@@ -31,13 +31,25 @@ describe("repository i18n contracts", () => {
     expect(workflow).toContain("Cache npm dependencies");
   });
 
-  it("runs the repository check on pushes and pull requests using Node 22", async () => {
+  it("splits typecheck, tests, and builds across Node 22 and 24", async () => {
     const workflow = await readFile(join(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
 
     expect(workflow).toContain("  push:");
     expect(workflow).toContain("  pull_request:");
-    expect(workflow).toContain("node-version-file: .nvmrc");
-    expect(workflow).toContain("run: npm run check");
+    expect(workflow).toContain("node-version: [22, 24]");
+    expect(workflow).toContain("run: npm run typecheck");
+    expect(workflow).toContain("run: npm run test:coverage");
+    expect(workflow).toContain("run: npm run build");
+  });
+
+  it("calls the reusable workflow with a real repository fixture", async () => {
+    const workflow = await readFile(join(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
+
+    expect(workflow).toContain("uses: $/.github/workflows/i18n-validate.yml");
+    expect(workflow).toContain("validation-command: i18n:validate");
+    expect(workflow).toContain(
+      "catalog-path: packages/i18n-pipeline/tests/fixtures/rbac-ui/translation-template.json",
+    );
   });
 
   it("keeps backend problem details keyed by code, raw params, and English detail", async () => {

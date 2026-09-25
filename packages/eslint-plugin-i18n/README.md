@@ -1,11 +1,11 @@
 # `@redhat-cloud-services/eslint-plugin-i18n`
 
-ESLint rules for product UI localization with ICU-compatible message catalogs.
+ESLint rules for product UI localization with ICU-compatible message catalogs. This workspace-only plugin is loaded from source by the repository's root ESLint config and is not published to npm.
 
 ## Flat config
 
 ```js
-import i18n from '@redhat-cloud-services/eslint-plugin-i18n';
+import i18n from './packages/eslint-plugin-i18n/dist/index.js';
 
 export default [
   {

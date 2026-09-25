@@ -1,0 +1,11 @@
+{
+  "type": "https://redhat.com/problems/access-denied",
+  "title": "Access denied",
+  "status": 403,
+  "detail": "You do not have permission to access this resource.",
+  "code": "access.forbidden",
+  "params": {
+    "resource": "project"
+  },
+  "instance": "/problems/123"
+}
