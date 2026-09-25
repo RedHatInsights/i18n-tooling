@@ -1,0 +1,18 @@
+{
+  "name": "i18n-tooling",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared product UI i18n pipelines and frontend tooling",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @redhat-cloud-services/eslint-plugin-i18n && npm run build --workspace @redhat-cloud-services/i18n-pipeline",
+    "test": "npm run test --workspace @redhat-cloud-services/eslint-plugin-i18n && npm run test --workspace @redhat-cloud-services/i18n-pipeline",
+    "lint": "npm run lint --workspace @redhat-cloud-services/eslint-plugin-i18n && npm run lint --workspace @redhat-cloud-services/i18n-pipeline",
+    "check": "npm run lint && npm run test && npm run build"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

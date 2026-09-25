@@ -1,0 +1,4 @@
+{
+  "example.title": "Example title",
+  "example.count": "{count, plural, one {# item} other {# items}}"
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://redhat.com/schemas/frontend-i18n/problem-details-i18n.json",
+  "title": "Localized RFC 9457 Problem Details",
+  "description": "RFC 9457 Problem Details extended with a stable message code and raw typed parameters.",
+  "type": "object",
+  "required": ["type", "title", "status", "detail", "code", "params"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "format": "uri"
+    },
+    "title": {
+      "type": "string"
+    },
+    "status": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 599
+    },
+    "detail": {
+      "type": "string",
+      "description": "English fallback for this occurrence."
+    },
+    "instance": {
+      "type": "string",
+      "format": "uri-reference"
+    },
+    "code": {
+      "type": "string",
+      "description": "Stable ICU catalog code owned by the emitting service."
+    },
+    "params": {
+      "type": "object",
+      "description": "Raw typed values required by the ICU message.",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

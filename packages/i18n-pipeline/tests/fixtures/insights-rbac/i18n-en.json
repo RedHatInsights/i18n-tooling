@@ -1,0 +1,5 @@
+{
+  "platform.identity.invalid": "Your identity could not be verified.",
+  "insights-rbac.role.not-found": "Role {roleName} does not exist.",
+  "insights-rbac.role.count": "{count, plural, one {# role} other {# roles}}"
+}

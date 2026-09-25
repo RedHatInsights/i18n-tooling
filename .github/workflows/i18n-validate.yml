@@ -1,0 +1,89 @@
+name: Reusable i18n validation
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node.js version used by the consumer repository
+        required: false
+        type: string
+        default: '22'
+      package-manager:
+        description: 'Dependency installer: bun or npm; validation runs through npm on Node.js'
+        required: false
+        type: string
+        default: bun
+      validation-command:
+        description: Consumer package script for native extraction, compilation, and catalog validation
+        required: false
+        type: string
+        default: i18n:validate
+      catalog-adapter:
+        description: Registered catalog adapter ID
+        required: false
+        type: string
+        default: formatjs-json
+      catalog-path:
+        description: Path to the catalog JSON file
+        required: false
+        type: string
+        default: locales/translation-template.json
+      catalog-role:
+        description: Catalog role, source or target
+        required: false
+        type: string
+        default: source
+      catalog-locale:
+        description: Locale represented by the catalog
+        required: false
+        type: string
+        default: en
+      catalog-config:
+        description: Optional JSON config path passed to the selected adapter
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  validate:
+    name: Validate catalogs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out consumer repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Set up Bun
+        if: inputs.package-manager == 'bun'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+        run: |
+          case "$PACKAGE_MANAGER" in
+            bun) bun install --frozen-lockfile ;;
+            npm) npm ci ;;
+            *)
+              echo "Unsupported package manager: $PACKAGE_MANAGER" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Run consumer validation with Node.js
+        env:
+          VALIDATION_COMMAND: ${{ inputs.validation-command }}
+          I18N_CATALOG_ADAPTER: ${{ inputs.catalog-adapter }}
+          I18N_CATALOG_PATH: ${{ inputs.catalog-path }}
+          I18N_CATALOG_ROLE: ${{ inputs.catalog-role }}
+          I18N_CATALOG_LOCALE: ${{ inputs.catalog-locale }}
+          I18N_CATALOG_CONFIG: ${{ inputs.catalog-config }}
+        run: npm run "$VALIDATION_COMMAND"

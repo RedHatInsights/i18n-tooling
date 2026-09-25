@@ -1,0 +1,13 @@
+{
+  "accessManagementDoc": {
+    "defaultMessage": "Understanding access management",
+    "description": "Understanding access management documentation title"
+  },
+  "accessOrigin": {
+    "defaultMessage": "Access origin",
+    "description": {
+      "text": "Label for the source of access",
+      "context": "Settings page"
+    }
+  }
+}
