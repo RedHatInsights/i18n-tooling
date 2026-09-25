@@ -78,7 +78,7 @@ jobs:
         run: npm run typecheck
 
   reusable-cli:
-    uses: ./.github/workflows/i18n-validate.yml
+    uses: $/.github/workflows/i18n-validate.yml
     with:
       validation-command: smoke:reusable-cli
 
@@ -267,7 +267,7 @@ jobs:
 
   reusable-workflow-self-test:
     name: Reusable i18n workflow self-test
-    uses: ./.github/workflows/i18n-validate.yml
+    uses: $/.github/workflows/i18n-validate.yml
     with:
       node-version: "22"
       package-manager: bun
@@ -372,11 +372,12 @@ jobs:
         run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
       - name: Lint workflow YAML
-        # actionlint 1.7.12 does not yet recognize GitHub's job.workflow_* fields.
+        # actionlint 1.7.12 does not yet recognize GitHub's job.workflow_* fields or self-repository calls.
         run: |
           "$(go env GOPATH)/bin/actionlint" -color \
             -ignore 'property "workflow_repository" is not defined in object type' \
-            -ignore 'property "workflow_sha" is not defined in object type'
+            -ignore 'property "workflow_sha" is not defined in object type' \
+            -ignore 'reusable workflow call "\$/.github/workflows/i18n-validate.yml"'
 
   zizmor:
     name: GitHub Actions security audit

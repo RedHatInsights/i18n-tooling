@@ -45,7 +45,7 @@ describe("repository i18n contracts", () => {
   it("calls the reusable workflow with a real repository fixture", async () => {
     const workflow = await readFile(join(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
 
-    expect(workflow).toContain("uses: ./.github/workflows/i18n-validate.yml");
+    expect(workflow).toContain("uses: $/.github/workflows/i18n-validate.yml");
     expect(workflow).toContain("validation-command: i18n:validate");
     expect(workflow).toContain(
       "catalog-path: packages/i18n-pipeline/tests/fixtures/rbac-ui/translation-template.json",
