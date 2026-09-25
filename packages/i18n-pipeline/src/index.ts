@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parse as parseIcuMessage } from "@formatjs/icu-messageformat-parser";
+export { checkCatalogs, type ArgumentMismatch, type CatalogCheckResult } from "./catalog-check.js";
 
 export type CatalogRole = "source" | "target";
 
@@ -95,11 +96,7 @@ export class FormatJsJsonAdapter implements CatalogAdapter {
       assertValidIcuPattern(rawMessage.defaultMessage, messageId, this.id);
 
       const description = rawMessage.description;
-      if (
-        description !== undefined &&
-        typeof description !== "string" &&
-        !isRecord(description)
-      ) {
+      if (description !== undefined && typeof description !== "string" && !isRecord(description)) {
         throw new CatalogFormatError(
           `FormatJS source entry "${messageId}" description must be a string or object`,
         );
