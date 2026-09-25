@@ -9,7 +9,7 @@ on:
         type: string
         default: "22"
       package-manager:
-        description: "Dependency installer: bun or npm; validation runs through npm on Node.js"
+        description: "Dependency installer for the consumer repository: bun or npm"
         required: false
         type: string
         default: bun
@@ -53,24 +53,32 @@ jobs:
     steps:
       - name: Check out consumer repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Check out i18n tooling source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: i18n-tooling-source
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ inputs.node-version }}
 
-      - name: Set up Bun
-        if: inputs.package-manager == 'bun'
+      - name: Set up Bun for the tooling workspace
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.14
 
       - name: Cache Bun dependencies
-        if: inputs.package-manager == 'bun'
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock', 'bun.lockb') }}
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock', 'bun.lockb', 'i18n-tooling-source/bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-bun-
 
@@ -83,7 +91,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-npm-
 
-      - name: Install dependencies
+      - name: Install consumer dependencies
         env:
           PACKAGE_MANAGER: ${{ inputs.package-manager }}
         run: |
@@ -95,6 +103,28 @@ jobs:
               exit 1
               ;;
           esac
+
+      - name: Install i18n tooling dependencies
+        run: bun install --frozen-lockfile
+        working-directory: i18n-tooling-source
+
+      - name: Build frontend-i18n CLI
+        run: npm run build
+        working-directory: i18n-tooling-source/packages/i18n-pipeline
+
+      - name: Add frontend-i18n to PATH
+        run: |
+          CLI="$GITHUB_WORKSPACE/i18n-tooling-source/packages/i18n-pipeline/dist/cli.js"
+          CLI_BIN="$RUNNER_TEMP/frontend-i18n-bin"
+          CONSUMER_BIN="$GITHUB_WORKSPACE/node_modules/.bin"
+          mkdir -p "$CLI_BIN" "$CONSUMER_BIN"
+          printf '#!/bin/sh\nexec node "%s" "$@"\n' "$CLI" > "$CLI_BIN/frontend-i18n"
+          chmod +x "$CLI_BIN/frontend-i18n"
+          ln -sfn "$CLI_BIN/frontend-i18n" "$CONSUMER_BIN/frontend-i18n"
+          echo "$CLI_BIN" >> "$GITHUB_PATH"
+
+      - name: Verify frontend-i18n CLI
+        run: frontend-i18n version
 
       - name: Run consumer validation with Node.js
         env:
