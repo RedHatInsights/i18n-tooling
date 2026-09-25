@@ -1,47 +1,63 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import type { Rule } from 'eslint';
+import fs from "node:fs";
+import path from "node:path";
+import type * as ESTree from "estree";
+import type { TSESTree } from "@typescript-eslint/utils";
+import type { Rule } from "eslint";
 
 type Options = [{ catalog?: string }];
-type CatalogEntry = string | { defaultMessage?: unknown };
-type Catalog = Record<string, CatalogEntry>;
 
 type CatalogState = {
   ids: Set<string>;
   error?: string;
 };
 
-const catalogCache = new Map<string, { mtimeMs: number; state: CatalogState }>();
+const catalogCache = new Map<string, { mtimeMs: number; size: number; state: CatalogState }>();
 
-function staticString(node: any): string | undefined {
-  if (node?.type === 'Literal' && typeof node.value === 'string') {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function staticString(node: unknown): string | undefined {
+  if (!isRecord(node)) return undefined;
+  if (node.type === "Literal" && typeof node.value === "string") {
     return node.value;
   }
 
   if (
-    node?.type === 'TemplateLiteral' &&
+    node.type === "TemplateLiteral" &&
+    Array.isArray(node.expressions) &&
     node.expressions.length === 0 &&
+    Array.isArray(node.quasis) &&
     node.quasis.length === 1
   ) {
-    return node.quasis[0].value.cooked ?? node.quasis[0].value.raw;
+    const quasi = node.quasis[0];
+    if (!isRecord(quasi) || !isRecord(quasi.value)) return undefined;
+    return typeof quasi.value.cooked === "string"
+      ? quasi.value.cooked
+      : typeof quasi.value.raw === "string"
+        ? quasi.value.raw
+        : undefined;
   }
 
   return undefined;
 }
 
-function propertyName(node: any): string | undefined {
-  if (node?.computed) return undefined;
-  return node.key?.type === 'Identifier' ? node.key.name : staticString(node.key);
+function propertyName(property: ESTree.Property): string | undefined {
+  if (property.computed) return undefined;
+  return property.key.type === "Identifier" ? property.key.name : staticString(property.key);
 }
 
-function objectProperty(object: any, name: string): any | undefined {
-  if (object?.type !== 'ObjectExpression') return undefined;
-  return object.properties.find((property: any) => propertyName(property) === name)?.value;
+function objectProperty(object: ESTree.Node | undefined, name: string): ESTree.Node | undefined {
+  if (object?.type !== "ObjectExpression") return undefined;
+  const property = object.properties.find(
+    (item): item is ESTree.Property => item.type === "Property" && propertyName(item) === name,
+  );
+  return property?.value;
 }
 
 function resolveCatalogPath(context: Rule.RuleContext, configuredPath: string | undefined): string {
-  const cwd = typeof (context as any).getCwd === 'function' ? (context as any).getCwd() : process.cwd();
-  return path.resolve(cwd, configuredPath ?? 'locales/en.json');
+  const cwd = context.cwd ?? context.getCwd();
+  return path.resolve(cwd, configuredPath ?? "locales/en.json");
 }
 
 function loadCatalog(catalogPath: string): CatalogState {
@@ -53,58 +69,60 @@ function loadCatalog(catalogPath: string): CatalogState {
   }
 
   const cached = catalogCache.get(catalogPath);
-  if (cached?.mtimeMs === stat.mtimeMs) return cached.state;
+  if (cached?.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.state;
 
   let state: CatalogState;
   try {
-    const parsed = JSON.parse(fs.readFileSync(catalogPath, 'utf8')) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('catalog must be a flat JSON object');
+    const parsed: unknown = JSON.parse(fs.readFileSync(catalogPath, "utf8"));
+    if (!isRecord(parsed)) {
+      throw new Error("catalog must be a flat JSON object");
     }
 
-    const catalog = parsed as Catalog;
-    const ids = new Set(Object.keys(catalog));
-    state = { ids };
+    state = { ids: new Set(Object.keys(parsed)) };
   } catch (error) {
     state = { ids: new Set(), error: `Cannot parse catalog ${catalogPath}: ${String(error)}` };
   }
 
-  catalogCache.set(catalogPath, { mtimeMs: stat.mtimeMs, state });
+  catalogCache.set(catalogPath, { mtimeMs: stat.mtimeMs, size: stat.size, state });
   return state;
 }
 
-function isFormatJsMessageCall(callee: any): boolean {
-  if (callee?.type === 'Identifier') {
-    return ['defineMessage', 'defineMessages', 'formatMessage'].includes(callee.name);
+function isFormatJsMessageCall(callee: ESTree.Node): boolean {
+  if (callee.type === "Identifier") {
+    return ["defineMessage", "defineMessages", "formatMessage"].includes(callee.name);
   }
 
   return (
-    callee?.type === 'MemberExpression' &&
+    callee.type === "MemberExpression" &&
     !callee.computed &&
-    callee.property?.type === 'Identifier' &&
-    callee.property.name === 'formatMessage'
+    callee.property.type === "Identifier" &&
+    callee.property.name === "formatMessage"
   );
+}
+
+function asEslintNode(node: TSESTree.Node): ESTree.Node {
+  return node as unknown as ESTree.Node;
 }
 
 const rule: Rule.RuleModule = {
   meta: {
-    type: 'problem',
+    type: "problem",
     docs: {
-      description: 'Require statically discoverable message IDs in the default catalog.',
+      description: "Require statically discoverable message IDs in the default catalog.",
     },
     schema: [
       {
-        type: 'object',
+        type: "object",
         properties: {
-          catalog: { type: 'string' },
+          catalog: { type: "string" },
         },
         additionalProperties: false,
       },
     ],
     messages: {
-      missingCatalog: 'Unable to load default catalog: {{error}}',
+      missingCatalog: "Unable to load default catalog: {{error}}",
       missingEntry: 'Message ID "{{id}}" is missing from the default catalog.',
-      dynamicId: 'Message IDs must be static string literals or no-expression templates.',
+      dynamicId: "Message IDs must be static string literals or no-expression templates.",
     },
   },
 
@@ -114,26 +132,27 @@ const rule: Rule.RuleModule = {
     let catalog: CatalogState | undefined;
     let catalogErrorReported = false;
 
-    function ensureCatalog(node: any): CatalogState {
+    function ensureCatalog(node: ESTree.Node): CatalogState {
       catalog ??= loadCatalog(catalogPath);
       if (catalog.error && !catalogErrorReported) {
         catalogErrorReported = true;
         context.report({
           node,
-          messageId: 'missingCatalog',
+          messageId: "missingCatalog",
           data: { error: catalog.error },
         });
       }
       return catalog;
     }
 
-    function checkDescriptor(node: any, descriptor: any): void {
-      const idNode = descriptor?.type === 'ObjectExpression' ? objectProperty(descriptor, 'id') : undefined;
+    function checkDescriptor(node: ESTree.Node, descriptor: ESTree.Node | undefined): void {
+      const idNode =
+        descriptor?.type === "ObjectExpression" ? objectProperty(descriptor, "id") : undefined;
       if (!idNode) return;
 
       const id = staticString(idNode);
       if (!id) {
-        context.report({ node: idNode, messageId: 'dynamicId' });
+        context.report({ node: idNode, messageId: "dynamicId" });
         return;
       }
 
@@ -141,55 +160,62 @@ const rule: Rule.RuleModule = {
       if (!state.error && !state.ids.has(id)) {
         context.report({
           node: idNode,
-          messageId: 'missingEntry',
+          messageId: "missingEntry",
           data: { id },
         });
       }
     }
 
-    function visitDescriptorTree(node: any): void {
-      if (node?.type !== 'ObjectExpression') return;
+    function visitDescriptorTree(node: ESTree.Node | undefined): void {
+      if (node?.type !== "ObjectExpression") return;
       checkDescriptor(node, node);
       for (const property of node.properties) {
-        if (property.type === 'Property') visitDescriptorTree(property.value);
+        if (property.type === "Property") visitDescriptorTree(property.value);
       }
     }
 
     return {
-      Program(node: any) {
+      Program(node) {
         ensureCatalog(node);
       },
 
-      CallExpression(node: any) {
+      CallExpression(node) {
         if (!isFormatJsMessageCall(node.callee)) return;
         const descriptor = node.arguments[0];
-        if (node.callee.type === 'Identifier' && node.callee.name === 'defineMessages') {
+        if (!descriptor || descriptor.type === "SpreadElement") return;
+        if (node.callee.type === "Identifier" && node.callee.name === "defineMessages") {
           visitDescriptorTree(descriptor);
         } else {
           checkDescriptor(node, descriptor);
         }
       },
 
-      JSXOpeningElement(node: any) {
-        const name = node.name?.type === 'JSXIdentifier' ? node.name.name : undefined;
-        if (name !== 'FormattedMessage') return;
+      JSXOpeningElement(node: TSESTree.JSXOpeningElement) {
+        const name = node.name.type === "JSXIdentifier" ? node.name.name : undefined;
+        if (name !== "FormattedMessage") return;
 
         const idAttribute = node.attributes.find(
-          (attribute: any) => attribute.type === 'JSXAttribute' && attribute.name?.name === 'id',
+          (attribute) =>
+            attribute.type === "JSXAttribute" &&
+            attribute.name.type === "JSXIdentifier" &&
+            attribute.name.name === "id",
         );
-        if (!idAttribute) return;
+        if (!idAttribute || idAttribute.type !== "JSXAttribute") return;
 
-        const id = staticString(idAttribute.value?.expression ?? idAttribute.value);
+        const value = idAttribute.value;
+        const idNode = value?.type === "JSXExpressionContainer" ? value.expression : value;
+        const id = staticString(idNode);
         if (!id) {
-          context.report({ node: idAttribute, messageId: 'dynamicId' });
+          context.report({ node: asEslintNode(idAttribute), messageId: "dynamicId" });
           return;
         }
 
-        const state = ensureCatalog(idAttribute);
+        const nodeForReport = asEslintNode(idAttribute);
+        const state = ensureCatalog(nodeForReport);
         if (!state.error && !state.ids.has(id)) {
           context.report({
-            node: idAttribute,
-            messageId: 'missingEntry',
+            node: nodeForReport,
+            messageId: "missingEntry",
             data: { id },
           });
         }

@@ -15,13 +15,13 @@ HCC is the first consumer; tooling should not make every future consumer pretend
 
 ## Initial packages
 
-| Package | Role |
-|---|---|
-| `@redhat-cloud-services/eslint-plugin-i18n` | ESLint rules for message IDs, source catalogs, and ICU-oriented source checks. |
-| `@redhat-cloud-services/i18n-pipeline` | Node.js package with the normalized catalog model, FormatJS and keyed ICU JSON adapters, adapter plugin loading, ICU syntax validation, and the `frontend-i18n` CLI. |
-| `.github/workflows/` | Reusable validation workflow for consumer repositories. |
+| Package                                     | Role                                                                                                                                                                 |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@redhat-cloud-services/eslint-plugin-i18n` | ESLint rules for message IDs, source catalogs, and ICU-oriented source checks.                                                                                       |
+| `@redhat-cloud-services/i18n-pipeline`      | Node.js package with the normalized catalog model, FormatJS and keyed ICU JSON adapters, adapter plugin loading, ICU syntax validation, and the `frontend-i18n` CLI. |
+| `.github/workflows/`                        | Repository CI, reusable consumer validation, and Changesets release automation.                                                                                      |
 
-The TypeScript package targets Node.js 22+. Bun is optional as a local development tool or dependency installer; it is not the package runtime. Framework extraction and compilation remain in each consumer's native tooling.
+The TypeScript packages target Node.js 22+. Bun 1.3.14 manages workspace dependencies, while package code and the CLI run under Node.js. Framework extraction and compilation remain in each consumer's native tooling.
 
 ## Design rules
 
@@ -58,17 +58,10 @@ docs/                    Architecture and consumer guidance
 
 ## Local development
 
-Use Node.js 22 or newer. Install dependencies with npm or Bun; repository scripts run through npm under Node:
+Use Node.js 22 or newer and Bun 1.3.14. Bun is the canonical dependency installer; this repo has no npm lockfile, so do not run `npm install` or `npm ci`. Use npm only to run scripts under Node:
 
 ```bash
-npm install
-npm run check
-```
-
-Bun is an optional package-manager alternative:
-
-```bash
-bun install
+bun install --frozen-lockfile
 npm run check
 ```
 
@@ -78,6 +71,12 @@ The package CLI is compiled to Node-compatible ESM:
 npm run build --workspace @redhat-cloud-services/i18n-pipeline
 node packages/i18n-pipeline/dist/cli.js version
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and release contributions.
+
+## Package releases
+
+Both workspace packages publish to npm as public `@redhat-cloud-services` packages. Add a Changesets entry for each user-facing package change. On pushes to `main`, the release workflow opens or updates a version PR; merging that PR publishes the packages. Configure the repository's `NPM_TOKEN` secret with publish access for the scope before enabling releases.
 
 ## Consumer examples
 
@@ -113,7 +112,7 @@ jobs:
       catalog-locale: en
 ```
 
-Run the CLI directly with explicit options or use workflow environment settings:
+Run the CLI directly with explicit options or use workflow environment settings. `check` compares source and target message IDs and named ICU arguments, including arguments nested inside plural/select branches:
 
 ```bash
 frontend-i18n validate \
@@ -121,6 +120,11 @@ frontend-i18n validate \
   --catalog i18n/en.json \
   --role source \
   --locale en
+
+frontend-i18n check \
+  --source locales/translation-template.json \
+  --target locales/fr.json \
+  --target-locale fr
 
 frontend-i18n convert \
   --source locales/translation-template.json \

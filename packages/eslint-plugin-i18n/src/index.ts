@@ -1,4 +1,5 @@
-import noMissingDefaultCatalogEntry from './rules/no-missing-default-catalog-entry.js';
+import packageMetadata from "../package.json" with { type: "json" };
+import noMissingDefaultCatalogEntry from "./rules/no-missing-default-catalog-entry.js";
 
 type Plugin = {
   meta: {
@@ -6,23 +7,23 @@ type Plugin = {
     version: string;
   };
   rules: {
-    'no-missing-default-catalog-entry': typeof noMissingDefaultCatalogEntry;
+    "no-missing-default-catalog-entry": typeof noMissingDefaultCatalogEntry;
   };
   configs?: {
     recommended: {
       plugins: { i18n: Plugin };
-      rules: { 'i18n/no-missing-default-catalog-entry': 'error' };
+      rules: { "i18n/no-missing-default-catalog-entry": "error" };
     };
   };
 };
 
 const plugin: Plugin = {
   meta: {
-    name: '@redhat-cloud-services/eslint-plugin-i18n',
-    version: '0.1.0',
+    name: "@redhat-cloud-services/eslint-plugin-i18n",
+    version: packageMetadata.version,
   },
   rules: {
-    'no-missing-default-catalog-entry': noMissingDefaultCatalogEntry,
+    "no-missing-default-catalog-entry": noMissingDefaultCatalogEntry,
   },
 };
 
@@ -32,7 +33,7 @@ plugin.configs = {
       i18n: plugin,
     },
     rules: {
-      'i18n/no-missing-default-catalog-entry': 'error',
+      "i18n/no-missing-default-catalog-entry": "error",
     },
   },
 };

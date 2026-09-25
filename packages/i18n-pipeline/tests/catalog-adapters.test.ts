@@ -1,10 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import {
-  CatalogAdapterRegistry,
-  CatalogFormatError,
-  convertCatalog,
-} from "../src/index.js";
+import { CatalogAdapterRegistry, CatalogFormatError, convertCatalog } from "../src/index.js";
 
 describe("Catalog adapters", () => {
   it("round-trips extracted source descriptors and descriptions", async () => {
@@ -19,9 +15,7 @@ describe("Catalog adapters", () => {
 
     const catalog = adapter.read(source, context);
 
-    expect(catalog.messages.accessManagementDoc?.pattern).toBe(
-      "Understanding access management",
-    );
+    expect(catalog.messages.accessManagementDoc?.pattern).toBe("Understanding access management");
     expect(catalog.messages.accessOrigin?.description).toEqual({
       text: "Label for the source of access",
       context: "Settings page",
@@ -50,28 +44,20 @@ describe("Catalog adapters", () => {
 
   it("round-trips compiled target messages as a flat ID-to-string map", async () => {
     const target = JSON.parse(
-      await readFile(
-        new URL("./fixtures/rbac-ui/translations.json", import.meta.url),
-        "utf8",
-      ),
+      await readFile(new URL("./fixtures/rbac-ui/translations.json", import.meta.url), "utf8"),
     );
     const context = { locale: "es", role: "target" as const, options: {} };
     const adapter = new CatalogAdapterRegistry().get("formatjs-json");
 
     const catalog = adapter.read(target, context);
 
-    expect(catalog.messages.accessManagementDoc?.pattern).toBe(
-      "Comprender la gestión de acceso",
-    );
+    expect(catalog.messages.accessManagementDoc?.pattern).toBe("Comprender la gestión de acceso");
     expect(adapter.write(catalog, context)).toEqual(target);
   });
 
   it("round-trips keyed ICU JSON and preserves plural patterns", async () => {
     const source = JSON.parse(
-      await readFile(
-        new URL("./fixtures/insights-rbac/i18n-en.json", import.meta.url),
-        "utf8",
-      ),
+      await readFile(new URL("./fixtures/insights-rbac/i18n-en.json", import.meta.url), "utf8"),
     );
     const context = { locale: "en", role: "source" as const, options: {} };
     const adapter = new CatalogAdapterRegistry().get("icu-json");
@@ -106,8 +92,9 @@ describe("Catalog adapters", () => {
     const context = { locale: "en", role: "source" as const, options: {} };
     const registry = new CatalogAdapterRegistry();
 
-    expect(() => registry.get("formatjs-json").read({ "": { defaultMessage: "Hello" } }, context))
-      .toThrowError(CatalogFormatError);
+    expect(() =>
+      registry.get("formatjs-json").read({ "": { defaultMessage: "Hello" } }, context),
+    ).toThrowError(CatalogFormatError);
     expect(() => registry.get("icu-json").read({ "": "Hello" }, context)).toThrowError(
       CatalogFormatError,
     );
