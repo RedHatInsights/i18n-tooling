@@ -16,6 +16,7 @@
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
+    "smoke:reusable-cli": "frontend-i18n validate --adapter icu-json --catalog packages/i18n-pipeline/tests/fixtures/insights-rbac/i18n-en.json --role source --locale en",
     "lint": "npm run lint --workspaces --if-present && npm run build --workspace @redhat-cloud-services/eslint-plugin-i18n && eslint .",
     "format": "prettier --write \"**/*.{js,mjs,cjs,ts,tsx,json,yml,yaml}\"",
     "format:check": "prettier --check \"**/*.{js,mjs,cjs,ts,tsx,json,yml,yaml}\"",

@@ -41,3 +41,8 @@ jobs:
 
       - name: Run checks
         run: npm run check
+
+  reusable-cli:
+    uses: ./.github/workflows/i18n-validate.yml
+    with:
+      validation-command: smoke:reusable-cli

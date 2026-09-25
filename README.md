@@ -85,24 +85,24 @@ Both workspace packages publish to npm as public `@redhat-cloud-services` packag
 ```yaml
 jobs:
   i18n:
-    uses: RedHatInsights/i18n-tooling/.github/workflows/i18n-validate.yml@main
+    uses: RedHatInsights/i18n-tooling/.github/workflows/i18n-validate.yml@<reviewed-commit-sha>
     with:
       package-manager: bun
-      validation-command: i18n:validate # consumer script runs FormatJS extraction/compilation and frontend-i18n validate
+      validation-command: i18n:validate # consumer script runs FormatJS extraction/compilation and frontend-i18n check
       catalog-adapter: formatjs-json
       catalog-path: locales/translation-template.json
       catalog-role: source
       catalog-locale: en
 ```
 
-The reusable workflow uses the selected package manager to install dependencies, then invokes the consumer script with `npm run` under Node.js. The script can call `frontend-i18n validate`; the catalog settings arrive through `I18N_CATALOG_*` environment variables.
+Replace `<reviewed-commit-sha>` with a reviewed commit SHA. The reusable workflow checks out the consumer repository and `i18n-tooling` at the exact commit of the called workflow (`job.workflow_sha`). It installs consumer dependencies with the selected package manager, installs the tooling workspace with Bun, builds `@redhat-cloud-services/i18n-pipeline`, and adds the CLI to `PATH` before running the consumer script with `npm run` under Node.js. The script can call `frontend-i18n validate` for one catalog or `frontend-i18n check` for a source/target pair; catalog settings arrive through `I18N_CATALOG_*` environment variables. The CLI is built from source, so npm publication is not required. Pinning the reusable workflow pins the CLI source too.
 
 A service can validate its service-owned keyed ICU JSON catalog the same way:
 
 ```yaml
 jobs:
   i18n:
-    uses: RedHatInsights/i18n-tooling/.github/workflows/i18n-validate.yml@main
+    uses: RedHatInsights/i18n-tooling/.github/workflows/i18n-validate.yml@<reviewed-commit-sha>
     with:
       package-manager: npm
       validation-command: i18n:validate
