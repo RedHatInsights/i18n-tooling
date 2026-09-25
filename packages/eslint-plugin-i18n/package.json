@@ -2,6 +2,15 @@
   "name": "@redhat-cloud-services/eslint-plugin-i18n",
   "version": "0.1.0",
   "description": "ESLint rules for ICU-compatible product UI localization",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RedHatInsights/i18n-tooling.git",
+    "directory": "packages/eslint-plugin-i18n"
+  },
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -19,13 +28,17 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm,cjs --dts",
     "lint": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "peerDependencies": {
     "eslint": ">=8.57.0 <11"
   },
   "devDependencies": {
+    "@typescript-eslint/utils": "^8.0.0",
+    "@types/estree": "^1.0.0",
     "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^3.0.0",
     "eslint": "^9.0.0",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",

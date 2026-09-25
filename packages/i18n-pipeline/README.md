@@ -15,12 +15,19 @@ The FormatJS adapter retains string/object descriptions and other descriptor met
 
 ## CLI
 
+`check` compares source and target message IDs and named ICU arguments, including arguments nested in plural/select branches. Use `--source-adapter` and `--target-adapter` when the catalogs use different formats.
+
 ```bash
 frontend-i18n validate \
   --adapter formatjs-json \
   --catalog locales/translation-template.json \
   --role source \
   --locale en
+
+frontend-i18n check \
+  --source locales/translation-template.json \
+  --target locales/fr.json \
+  --target-locale fr
 
 frontend-i18n convert \
   --source locales/translation-template.json \

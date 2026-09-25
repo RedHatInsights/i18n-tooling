@@ -1,0 +1,7 @@
+{
+  "singleQuote": false,
+  "printWidth": 100,
+  "trailingComma": "all",
+  "proseWrap": "preserve",
+  "endOfLine": "lf"
+}
