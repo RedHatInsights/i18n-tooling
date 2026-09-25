@@ -8,9 +8,6 @@
     "directory": "packages/eslint-plugin-i18n"
   },
   "license": "Apache-2.0",
-  "publishConfig": {
-    "access": "public"
-  },
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",

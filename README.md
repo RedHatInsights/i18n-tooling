@@ -19,7 +19,7 @@ HCC is the first consumer; tooling should not make every future consumer pretend
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `@redhat-cloud-services/eslint-plugin-i18n` | ESLint rules for message IDs, source catalogs, and ICU-oriented source checks.                                                                                       |
 | `@redhat-cloud-services/i18n-pipeline`      | Node.js package with the normalized catalog model, FormatJS and keyed ICU JSON adapters, adapter plugin loading, ICU syntax validation, and the `frontend-i18n` CLI. |
-| `.github/workflows/`                        | Repository CI, reusable consumer validation, and Changesets release automation.                                                                                      |
+| `.github/workflows/`                        | Repository CI and reusable consumer validation.                                                                                                                       |
 
 The TypeScript packages target Node.js 22+. Bun 1.3.14 manages workspace dependencies, while package code and the CLI run under Node.js. Framework extraction and compilation remain in each consumer's native tooling.
 
@@ -50,20 +50,23 @@ The TypeScript packages target Node.js 22+. Bun 1.3.14 manages workspace depende
 ```text
 .github/workflows/       Reusable consumer workflows
 packages/
-  eslint-plugin-i18n/    Published ESLint plugin
-  i18n-pipeline/         Published Node.js/TypeScript package and CLI
+  eslint-plugin-i18n/    Workspace ESLint plugin
+  i18n-pipeline/         Workspace Node.js/TypeScript module and CLI
 schemas/                 Shared machine-readable contracts
 docs/                    Architecture and consumer guidance
 ```
 
 ## Local development
 
-Use Node.js 22 or newer and Bun 1.3.14. Bun is the canonical dependency installer; this repo has no npm lockfile, so do not run `npm install` or `npm ci`. Use npm only to run scripts under Node:
+Use Node.js 22 or newer and Bun 1.3.14. Bun is the canonical dependency installer; `bun.lock` is authoritative, while Bun generates `yarn.lock` as a mirror for GitHub Dependency Review. Do not run `npm install` or `npm ci`; use npm only to run scripts under Node:
 
 ```bash
 bun install --frozen-lockfile
+bun install --yarn
 npm run check
 ```
+
+CI tests Node 22 and 24 in separate typecheck, test, and build jobs. It also checks coverage thresholds, source-built CLI behavior, schemas, reusable workflow behavior, and GitHub Actions security.
 
 The package CLI is compiled to Node-compatible ESM:
 
@@ -72,11 +75,11 @@ npm run build --workspace @redhat-cloud-services/i18n-pipeline
 node packages/i18n-pipeline/dist/cli.js version
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and release contributions.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and consumer workflow guidance.
 
-## Package releases
+## Shared validation workflow
 
-Both workspace packages publish to npm as public `@redhat-cloud-services` packages. Add a Changesets entry for each user-facing package change. On pushes to `main`, the release workflow opens or updates a version PR; merging that PR publishes the packages. Configure the repository's `NPM_TOKEN` secret with publish access for the scope before enabling releases.
+The reusable `i18n-validate.yml` workflow checks out tooling source at the called workflow's commit, builds the CLI, then runs the consumer's validation script with `frontend-i18n` available. Consumers do not need an npm dependency on this repository, and this repository does not publish workspace packages to npm.
 
 ## Consumer examples
 

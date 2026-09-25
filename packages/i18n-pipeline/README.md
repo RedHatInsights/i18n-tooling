@@ -1,8 +1,8 @@
 # `@redhat-cloud-services/i18n-pipeline`
 
-Node.js 22+ package for repository-owned locale catalogs. It provides a normalized `Catalog` model, built-in FormatJS and keyed ICU JSON adapters, ICU pattern validation, and the `frontend-i18n` CLI.
+Node.js 22+ workspace package for repository-owned locale catalogs. It provides a normalized `Catalog` model, built-in FormatJS and keyed ICU JSON adapters, ICU pattern validation, and the `frontend-i18n` CLI.
 
-Framework extraction and compilation stay with each consumer's native tooling. Catalog-format adapters normalize repository artifacts; TMS-provider adapters are a separate future seam.
+The reusable workflow builds the CLI from this source; consumers do not need an npm dependency on this repository. This repository does not publish workspace packages to npm. Framework extraction and compilation stay with each consumer's native tooling. Catalog-format adapters normalize repository artifacts; TMS-provider adapters are a separate future seam.
 
 ## Built-in adapters
 
@@ -53,7 +53,7 @@ Install a Node package that default-exports an adapter object, then register its
 }
 ```
 
-The adapter package depends on `@redhat-cloud-services/i18n-pipeline` for TypeScript types and implements:
+The adapter implements the structural TypeScript contract declared in `src/index.ts`:
 
 ```ts
 interface CatalogAdapter {

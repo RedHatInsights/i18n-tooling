@@ -1,0 +1,15 @@
+[default.extend-words]
+HCC = "HCC"
+ICU = "ICU"
+Lingui = "Lingui"
+RBAC = "RBAC"
+RedHat = "RedHat"
+TMS = "TMS"
+FormatJS = "FormatJS"
+i18n = "i18n"
+i18next = "i18next"
+tsup = "tsup"
+zizmor = "zizmor"
+
+[files]
+extend-exclude = ["bun.lock", "yarn.lock"]

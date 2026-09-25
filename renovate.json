@@ -1,0 +1,17 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "enabledManagers": ["bun", "github-actions"],
+  "packageRules": [
+    {
+      "matchManagers": ["bun"],
+      "groupName": "Bun dependencies"
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions"
+    }
+  ],
+  "schedule": ["before 6am on Monday"],
+  "prConcurrentLimit": 5
+}
