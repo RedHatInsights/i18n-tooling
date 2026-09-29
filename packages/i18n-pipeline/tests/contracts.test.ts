@@ -18,6 +18,7 @@ describe("repository i18n contracts", () => {
       "catalog-role",
       "catalog-locale",
       "catalog-config",
+      "source-glob",
     ]) {
       const environmentName = `I18N_${input.toUpperCase().replaceAll("-", "_")}`;
       expect(workflow).toContain(`      ${input}:`);
@@ -27,6 +28,10 @@ describe("repository i18n contracts", () => {
     expect(workflow).toContain("actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020");
     expect(workflow).toContain("bun-version: 1.3.14");
     expect(workflow).toContain('npm run "$VALIDATION_COMMAND"');
+    expect(workflow).toContain("Build source-catalog ESLint plugin");
+    expect(workflow).toContain("Lint consumer source message IDs");
+    expect(workflow).toContain('--config "$TOOLING_ROOT/scripts/eslint-source.config.mjs"');
+    expect(workflow).toContain('"$I18N_SOURCE_GLOB"');
     expect(workflow).toContain("Cache Bun dependencies");
     expect(workflow).toContain("Cache npm dependencies");
   });
@@ -49,6 +54,12 @@ describe("repository i18n contracts", () => {
     expect(workflow).toContain("validation-command: i18n:validate");
     expect(workflow).toContain(
       "catalog-path: packages/i18n-pipeline/tests/fixtures/rbac-ui/translation-template.json",
+    );
+    expect(workflow).toContain('source-glob: "packages/*/src/**/*.ts"');
+    expect(workflow).toContain("validation-command: smoke:reusable-cli");
+    expect(workflow).toContain("catalog-adapter: icu-json");
+    expect(workflow).toContain(
+      "catalog-path: packages/i18n-pipeline/tests/fixtures/insights-rbac/i18n-en.json",
     );
   });
 
