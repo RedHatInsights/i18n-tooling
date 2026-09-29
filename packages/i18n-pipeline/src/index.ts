@@ -73,13 +73,19 @@ export class FormatJsJsonAdapter implements CatalogAdapter {
         throw new CatalogFormatError("FormatJS message IDs must be non-empty strings");
       }
       if (context.role === "target") {
-        if (typeof rawMessage !== "string") {
+        const pattern =
+          typeof rawMessage === "string"
+            ? rawMessage
+            : isRecord(rawMessage) && typeof rawMessage.defaultMessage === "string"
+              ? rawMessage.defaultMessage
+              : undefined;
+        if (pattern === undefined) {
           throw new CatalogFormatError(
-            `FormatJS target entry "${messageId}" must be a message string`,
+            `FormatJS target entry "${messageId}" must be a message string or descriptor`,
           );
         }
-        assertValidIcuPattern(rawMessage, messageId, this.id);
-        messages[messageId] = { pattern: rawMessage, metadata: {} };
+        assertValidIcuPattern(pattern, messageId, this.id);
+        messages[messageId] = { pattern, metadata: {} };
         continue;
       }
 
