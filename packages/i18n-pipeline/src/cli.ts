@@ -257,6 +257,7 @@ async function checkCatalog(
 function phraseCredentials(
   env: NodeJS.ProcessEnv,
 ): Pick<PhraseClientOptions, "platformApiToken" | "serviceAccount"> {
+  // Selection is by secret name only; credential values are never inspected to guess a kind.
   const platformApiToken = env.PHRASE_PLATFORM_API_TOKEN || undefined;
   const clientId = env.PHRASE_SERVICE_ACCOUNT_CLIENT_ID || undefined;
   const clientSecret = env.PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET || undefined;
@@ -268,7 +269,9 @@ function phraseCredentials(
     }
     if (platformApiToken) {
       throw new Error(
-        "Set either PHRASE_PLATFORM_API_TOKEN or the Phrase service account secrets, not both",
+        "Both PHRASE_PLATFORM_API_TOKEN and the Phrase service account secrets are set. " +
+          "Remove PHRASE_PLATFORM_API_TOKEN to use the service account, or remove " +
+          "PHRASE_SERVICE_ACCOUNT_CLIENT_ID and PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET to use the token",
       );
     }
     return { serviceAccount: { clientId, clientSecret } };
@@ -311,6 +314,11 @@ async function runTmsCommand(
     region: parsed.workflow.region,
     fetch: options.fetch,
   });
+  options.stdout(
+    phrase.authMethod === "service-account"
+      ? "Phrase auth: service account (PHRASE_SERVICE_ACCOUNT_CLIENT_ID/_SECRET)"
+      : "Phrase auth: user Platform API token (PHRASE_PLATFORM_API_TOKEN)",
+  );
   const github = new GitHubPhraseRepository({
     repository: repositoryName,
     token: githubToken,

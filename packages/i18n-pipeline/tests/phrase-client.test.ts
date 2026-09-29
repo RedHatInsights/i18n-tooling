@@ -348,10 +348,23 @@ describe("PhraseClient", () => {
     const error = await client.getJob("project-uid", "job-fr").catch((caught: unknown) => caught);
 
     expect(error).toMatchObject({
-      message: "Phrase Platform OAuth returned HTTP 401",
+      message:
+        "Phrase Platform OAuth returned HTTP 401 for the service account credentials; check that the secret is current and stored under the name for its credential kind",
       status: 401,
     });
     expect(JSON.stringify(error)).not.toContain("do-not-leak-this-secret");
+  });
+
+  it("reports which credential kind it uses without detecting it from the value", () => {
+    expect(new PhraseClient({ platformApiToken: "token", region: "eu" }).authMethod).toBe(
+      "platform-api-token",
+    );
+    expect(
+      new PhraseClient({
+        serviceAccount: { clientId: "id", clientSecret: "secret" },
+        region: "eu",
+      }).authMethod,
+    ).toBe("service-account");
   });
 
   it("does not expose the Platform API token when OAuth rejects it", async () => {
@@ -370,7 +383,8 @@ describe("PhraseClient", () => {
         targetLangs: ["fr"],
       }),
     ).rejects.toMatchObject({
-      message: "Phrase Platform OAuth returned HTTP 401",
+      message:
+        "Phrase Platform OAuth returned HTTP 401 for the Platform API token; check that the secret is current and stored under the name for its credential kind",
       status: 401,
     });
   });

@@ -136,10 +136,22 @@ Consumer configuration follows [the Phrase TMS config schema](schemas/phrase-tms
 
 Set `sourceCatalog.importSettingsUid` or `useProjectFileImportSettings` when the Phrase project requires a particular import format. `sourceCatalog.filename` defaults to the source path's basename. `project.region` selects the Platform OAuth and TMS API hosts (`eu` or `us`).
 
-Phrase credentials come from one of two secret sets; setting both is an error:
+Phrase credentials come from one of two secret sets. The CLI chooses by **which secret names are set**; it never inspects a value to guess its kind, so a value stored under the wrong name is sent with the wrong login flow and Phrase rejects it:
 
 - **Service Account (preferred for automation):** `PHRASE_SERVICE_ACCOUNT_CLIENT_ID` and `PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET`, used with the OAuth client-credentials grant. A Phrase organization admin creates the account under Organization Settings → Service Accounts; the secret is shown once. The account is not tied to a person, but it cannot own projects, and job creation by a service account still needs one verified test job in the target project.
 - **User token:** `PHRASE_PLATFORM_API_TOKEN`, a Platform API token from Settings → Profile → Access tokens, exchanged for a short-lived access token. It carries that user's full permissions, expires after two years, and stops working if the user is deactivated.
+
+Selection rules (unset reusable-workflow secrets arrive empty and count as not set):
+
+| Secrets set                                 | Result                                                           |
+| ------------------------------------------- | ---------------------------------------------------------------- |
+| Both service-account secrets, no user token | Service account                                                  |
+| User token only                             | User token                                                       |
+| Both kinds                                  | Fails before any request; the error says which secrets to remove |
+| Only one service-account secret             | Fails before any request                                         |
+| None                                        | Fails before any request                                         |
+
+Each `tms` run logs the chosen kind, for example `Phrase auth: service account (PHRASE_SERVICE_ACCOUNT_CLIENT_ID/_SECRET)`, never the value. If Phrase rejects the credentials, the error names the kind that was tried, for example `Phrase Platform OAuth returned HTTP 401 for the service account credentials`. To switch from the user token to a service account, add both service-account secrets and delete `PHRASE_PLATFORM_API_TOKEN` in the same change.
 
 Put the secrets in a protected Actions environment and pass that environment as the reusable-workflow `environment` input. A caller may instead map repository/organization secrets to the same workflow-call secret names (GitHub secret names are case-insensitive). The CLI rejects credential-like keys (for example `apiToken`, `api_key`, `clientSecret`) anywhere in the config so tokens cannot enter batch-state files; the JSON schema does not enforce this. GitHub PR and state operations use the run's `GITHUB_TOKEN`, with `contents: write` and (for reconciliation) `pull-requests: write`; no personal GitHub token is used.
 

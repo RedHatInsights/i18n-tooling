@@ -262,7 +262,7 @@ describe("frontend-i18n CLI", () => {
         PHRASE_SERVICE_ACCOUNT_CLIENT_ID: "client-id",
         PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET: "client-secret",
       },
-      "Set either PHRASE_PLATFORM_API_TOKEN or the Phrase service account secrets, not both",
+      "Remove PHRASE_PLATFORM_API_TOKEN to use the service account, or remove PHRASE_SERVICE_ACCOUNT_CLIENT_ID and PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET to use the token",
     ],
   ] as Array<[string, Record<string, string>, string]>)(
     "rejects %s before calling external services",
@@ -341,9 +341,33 @@ describe("frontend-i18n CLI", () => {
     });
 
     expect(exitCode).toBe(0);
-    expect(output).toEqual(["No ready Phrase batches found."]);
+    expect(output).toEqual([
+      "Phrase auth: user Platform API token (PHRASE_PLATFORM_API_TOKEN)",
+      "No ready Phrase batches found.",
+    ]);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toContain("/contents/.github/i18n-state/batches?ref=i18n-tms-state");
+
+    output.length = 0;
+    expect(
+      await runCli(["tms", "reconcile", "--config", "phrase.json"], {
+        cwd: projectRoot,
+        env: {
+          PHRASE_PLATFORM_API_TOKEN: "",
+          PHRASE_SERVICE_ACCOUNT_CLIENT_ID: "client-id",
+          PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET: "client-secret",
+          GITHUB_TOKEN: "run-token",
+          GITHUB_REPOSITORY: "example/app",
+        },
+        fetch,
+        stdout: (message) => output.push(message),
+        stderr: (message) => output.push(message),
+      }),
+    ).toBe(0);
+    expect(output[0]).toBe(
+      "Phrase auth: service account (PHRASE_SERVICE_ACCOUNT_CLIENT_ID/_SECRET)",
+    );
+    expect(output.join("\n")).not.toContain("client-secret");
   });
 
   it("requires an explicit base ref for pull-request runs and ignores empty workflow inputs", async () => {
