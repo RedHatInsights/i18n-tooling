@@ -1,7 +1,17 @@
 export type PhraseRegion = "eu" | "us";
 
+/** Phrase Platform Service Account credentials (OAuth 2.0 client credentials). */
+export interface PhraseServiceAccountCredentials {
+  clientId: string;
+  clientSecret: string;
+  /** Space-separated, product-prefixed scopes; omit for the account's full configured scope. */
+  scope?: string;
+}
+
+/** Provide exactly one of `platformApiToken` (a user's token) or `serviceAccount`. */
 export interface PhraseClientOptions {
-  platformApiToken: string;
+  platformApiToken?: string;
+  serviceAccount?: PhraseServiceAccountCredentials;
   oauthTokenUrl?: string;
   apiBaseUrl?: string;
   region?: PhraseRegion;
@@ -130,8 +140,24 @@ export class PhraseClient {
   private cachedAccessToken?: { value: string; expiresAt: number };
 
   constructor(private readonly options: PhraseClientOptions) {
-    if (!nonEmptyString(options.platformApiToken)) {
-      throw new TypeError("A Phrase Platform API token is required");
+    const { platformApiToken, serviceAccount } = options;
+    if (platformApiToken !== undefined && serviceAccount !== undefined) {
+      throw new TypeError(
+        "Provide either a Phrase Platform API token or a service account, not both",
+      );
+    }
+    if (serviceAccount !== undefined) {
+      if (
+        !nonEmptyString(serviceAccount.clientId) ||
+        !nonEmptyString(serviceAccount.clientSecret)
+      ) {
+        throw new TypeError("A Phrase service account needs both a client ID and a client secret");
+      }
+      if (serviceAccount.scope !== undefined && !nonEmptyString(serviceAccount.scope)) {
+        throw new TypeError("Phrase service account scope must be a non-empty string");
+      }
+    } else if (!nonEmptyString(platformApiToken)) {
+      throw new TypeError("A Phrase Platform API token or service account is required");
     }
     const regionalEndpoints = options.region ? phraseEndpoints(options.region) : undefined;
     const oauthTokenUrl = options.oauthTokenUrl ?? regionalEndpoints?.oauthTokenUrl;
@@ -392,16 +418,30 @@ export class PhraseClient {
     }
   }
 
+  /** Service accounts use client credentials; user tokens use Platform token exchange. */
+  private tokenRequestBody(): URLSearchParams {
+    const { serviceAccount } = this.options;
+    if (serviceAccount) {
+      return new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: serviceAccount.clientId,
+        client_secret: serviceAccount.clientSecret,
+        ...(serviceAccount.scope ? { scope: serviceAccount.scope } : {}),
+      });
+    }
+    return new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+      subject_token: this.options.platformApiToken ?? "",
+      subject_token_type: "urn:phrase:params:oauth:token-type:api_token",
+      requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
+    });
+  }
+
   private async accessToken(): Promise<string> {
     if (this.cachedAccessToken && this.cachedAccessToken.expiresAt - 60_000 > this.now()) {
       return this.cachedAccessToken.value;
     }
-    const body = new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-      subject_token: this.options.platformApiToken,
-      subject_token_type: "urn:phrase:params:oauth:token-type:api_token",
-      requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
-    });
+    const body = this.tokenRequestBody();
     let response: Response;
     try {
       response = await this.fetcher(this.oauthTokenUrl, {

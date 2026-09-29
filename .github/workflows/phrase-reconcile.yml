@@ -20,7 +20,15 @@ on:
       # Secret names are case-insensitive, so this single name covers both an environment
       # secret in `inputs.environment` and an explicitly mapped repository/organization secret.
       PHRASE_PLATFORM_API_TOKEN:
-        description: Phrase Platform API token; prefer an environment secret over explicit mapping
+        description: A user's Phrase Platform API token; prefer an environment secret over explicit mapping
+        required: false
+      # Preferred for automation: a Phrase Platform Service Account, not tied to a person.
+      # Set both of these instead of PHRASE_PLATFORM_API_TOKEN, never alongside it.
+      PHRASE_SERVICE_ACCOUNT_CLIENT_ID:
+        description: Phrase Platform Service Account client ID
+        required: false
+      PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET:
+        description: Phrase Platform Service Account client secret
         required: false
 
 jobs:
@@ -73,6 +81,8 @@ jobs:
         env:
           CONFIG_PATH: ${{ inputs.config-path }}
           PHRASE_PLATFORM_API_TOKEN: ${{ secrets.PHRASE_PLATFORM_API_TOKEN }}
+          PHRASE_SERVICE_ACCOUNT_CLIENT_ID: ${{ secrets.PHRASE_SERVICE_ACCOUNT_CLIENT_ID }}
+          PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET: ${{ secrets.PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET }}
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}
         run: >-

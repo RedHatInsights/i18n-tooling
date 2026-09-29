@@ -11,7 +11,7 @@ import {
   type CatalogRole,
 } from "./index.js";
 import { GitHubPhraseRepository } from "./github-phrase-repository.js";
-import { PhraseClient } from "./phrase-client.js";
+import { PhraseClient, type PhraseClientOptions } from "./phrase-client.js";
 import { parsePhraseTmsConfig } from "./phrase-config.js";
 import { PhraseWorkflow, type PhraseReconcileResult } from "./phrase-workflow.js";
 
@@ -65,7 +65,13 @@ Options:
   -h, --help             Show this help`,
   tms: `Usage: frontend-i18n tms <submit|reconcile> [options]
 
-Use frontend-i18n tms <command> --help for command options.`,
+Use frontend-i18n tms <command> --help for command options.
+
+Environment:
+  PHRASE_SERVICE_ACCOUNT_CLIENT_ID and PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET
+                              Phrase Service Account (preferred), or
+  PHRASE_PLATFORM_API_TOKEN   a user's Phrase Platform API token
+  GITHUB_TOKEN                State-branch and pull-request access`,
   "tms submit": `Usage: frontend-i18n tms submit --config <path> [options]
 
 Options:
@@ -244,6 +250,37 @@ async function checkCatalog(
   return true;
 }
 
+/**
+ * Chooses Phrase credentials from protected workflow secrets. Empty values come from unset
+ * reusable-workflow secrets and count as absent.
+ */
+function phraseCredentials(
+  env: NodeJS.ProcessEnv,
+): Pick<PhraseClientOptions, "platformApiToken" | "serviceAccount"> {
+  const platformApiToken = env.PHRASE_PLATFORM_API_TOKEN || undefined;
+  const clientId = env.PHRASE_SERVICE_ACCOUNT_CLIENT_ID || undefined;
+  const clientSecret = env.PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET || undefined;
+  if (clientId || clientSecret) {
+    if (!clientId || !clientSecret) {
+      throw new Error(
+        "Set both PHRASE_SERVICE_ACCOUNT_CLIENT_ID and PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET",
+      );
+    }
+    if (platformApiToken) {
+      throw new Error(
+        "Set either PHRASE_PLATFORM_API_TOKEN or the Phrase service account secrets, not both",
+      );
+    }
+    return { serviceAccount: { clientId, clientSecret } };
+  }
+  if (!platformApiToken) {
+    throw new Error(
+      "Set PHRASE_SERVICE_ACCOUNT_CLIENT_ID and PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET, or PHRASE_PLATFORM_API_TOKEN, as protected workflow secrets",
+    );
+  }
+  return { platformApiToken };
+}
+
 async function runTmsCommand(
   command: "submit" | "reconcile",
   args: string[],
@@ -261,9 +298,7 @@ async function runTmsCommand(
   const parsed = parsePhraseTmsConfig(
     await readJson(resolve(options.cwd, configPath), "TMS config"),
   );
-  const platformApiToken = options.env.PHRASE_PLATFORM_API_TOKEN;
-  if (!platformApiToken)
-    throw new Error("PHRASE_PLATFORM_API_TOKEN is required as a protected workflow secret");
+  const credentials = phraseCredentials(options.env);
   const githubToken = options.env.GITHUB_TOKEN;
   if (!githubToken)
     throw new Error("GITHUB_TOKEN is required for state and pull-request operations");
@@ -272,7 +307,7 @@ async function runTmsCommand(
   if (!repositoryName) throw new Error("Pass --repository or set GITHUB_REPOSITORY");
 
   const phrase = new PhraseClient({
-    platformApiToken,
+    ...credentials,
     region: parsed.workflow.region,
     fetch: options.fetch,
   });
@@ -404,6 +439,8 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
     if (
       !subcommand ||
       subcommand === "help" ||
+      subcommand === "--help" ||
+      subcommand === "-h" ||
       subargs.includes("--help") ||
       subargs.includes("-h")
     ) {

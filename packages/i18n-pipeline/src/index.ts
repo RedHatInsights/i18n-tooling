@@ -15,6 +15,7 @@ export {
   type PhraseJobCreation,
   type PhraseJobPart,
   type PhraseRegion,
+  type PhraseServiceAccountCredentials,
 } from "./phrase-client.js";
 export {
   PhraseBatchStateConflictError,

@@ -277,6 +277,83 @@ describe("PhraseClient", () => {
     );
   });
 
+  it("authenticates a service account with client credentials instead of token exchange", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      calls.push({ url, init });
+      if (url === "https://eu.phrase.com/idm/oauth/token") {
+        return new Response(
+          JSON.stringify({ access_token: "bot-jwt", token_type: "Bearer", expires_in: 3600 }),
+          { status: 200 },
+        );
+      }
+      return new Response(
+        JSON.stringify({ uid: "job-fr", targetLang: "fr", workflowLevel: 1, status: "NEW" }),
+        { status: 200 },
+      );
+    };
+    const client = new PhraseClient({
+      serviceAccount: {
+        clientId: "client-id",
+        clientSecret: "client-secret",
+        scope: "tms:default",
+      },
+      region: "eu",
+      fetch,
+    });
+
+    await client.getJob("project-uid", "job-fr");
+    await client.getJob("project-uid", "job-fr");
+
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://eu.phrase.com/idm/oauth/token",
+      "https://cloud.memsource.com/web/api2/v1/projects/project-uid/jobs/job-fr",
+      "https://cloud.memsource.com/web/api2/v1/projects/project-uid/jobs/job-fr",
+    ]);
+    expect(Object.fromEntries(new URLSearchParams(String(calls[0]?.init?.body)))).toEqual({
+      grant_type: "client_credentials",
+      client_id: "client-id",
+      client_secret: "client-secret",
+      scope: "tms:default",
+    });
+    expect(new Headers(calls[1]?.init?.headers).get("Authorization")).toBe("Bearer bot-jwt");
+  });
+
+  it.each([
+    [{}, /Platform API token or service account is required/],
+    [
+      {
+        platformApiToken: "user-token",
+        serviceAccount: { clientId: "id", clientSecret: "secret" },
+      },
+      /not both/,
+    ],
+    [
+      { serviceAccount: { clientId: "id", clientSecret: "" } },
+      /both a client ID and a client secret/,
+    ],
+    [{ serviceAccount: { clientId: "id", clientSecret: "secret", scope: " " } }, /scope/],
+  ])("rejects invalid credentials %#", (credentials, expectedError) => {
+    expect(() => new PhraseClient({ ...credentials, region: "eu" })).toThrow(expectedError);
+  });
+
+  it("does not expose service account secrets when OAuth rejects them", async () => {
+    const client = new PhraseClient({
+      serviceAccount: { clientId: "client-id", clientSecret: "do-not-leak-this-secret" },
+      region: "us",
+      fetch: async () => new Response("do-not-leak-this-secret", { status: 401 }),
+    });
+
+    const error = await client.getJob("project-uid", "job-fr").catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      message: "Phrase Platform OAuth returned HTTP 401",
+      status: 401,
+    });
+    expect(JSON.stringify(error)).not.toContain("do-not-leak-this-secret");
+  });
+
   it("does not expose the Platform API token when OAuth rejects it", async () => {
     const platformApiToken = "do-not-leak-this-token";
     const client = new PhraseClient({

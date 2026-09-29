@@ -134,7 +134,14 @@ Consumer configuration follows [the Phrase TMS config schema](schemas/phrase-tms
 }
 ```
 
-Set `sourceCatalog.importSettingsUid` or `useProjectFileImportSettings` when the Phrase project requires a particular import format. `sourceCatalog.filename` defaults to the source path's basename. `project.region` selects the Platform token-exchange and TMS API hosts (`eu` or `us`). The workflow secret is `PHRASE_PLATFORM_API_TOKEN`; put it in a protected Actions environment and pass that environment as the reusable-workflow `environment` input. A caller may instead map a repository/organization secret to the same `PHRASE_PLATFORM_API_TOKEN` workflow-call secret (GitHub secret names are case-insensitive, so there is only one name). The CLI rejects credential-like keys (for example `apiToken`, `api_key`, `clientSecret`) anywhere in the config so tokens cannot enter batch-state files; the JSON schema does not enforce this. GitHub PR and state operations use the run's `GITHUB_TOKEN`, with `contents: write` and (for reconciliation) `pull-requests: write`; no personal GitHub token is used.
+Set `sourceCatalog.importSettingsUid` or `useProjectFileImportSettings` when the Phrase project requires a particular import format. `sourceCatalog.filename` defaults to the source path's basename. `project.region` selects the Platform OAuth and TMS API hosts (`eu` or `us`).
+
+Phrase credentials come from one of two secret sets; setting both is an error:
+
+- **Service Account (preferred for automation):** `PHRASE_SERVICE_ACCOUNT_CLIENT_ID` and `PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET`, used with the OAuth client-credentials grant. A Phrase organization admin creates the account under Organization Settings → Service Accounts; the secret is shown once. The account is not tied to a person, but it cannot own projects, and job creation by a service account still needs one verified test job in the target project.
+- **User token:** `PHRASE_PLATFORM_API_TOKEN`, a Platform API token from Settings → Profile → Access tokens, exchanged for a short-lived access token. It carries that user's full permissions, expires after two years, and stops working if the user is deactivated.
+
+Put the secrets in a protected Actions environment and pass that environment as the reusable-workflow `environment` input. A caller may instead map repository/organization secrets to the same workflow-call secret names (GitHub secret names are case-insensitive). The CLI rejects credential-like keys (for example `apiToken`, `api_key`, `clientSecret`) anywhere in the config so tokens cannot enter batch-state files; the JSON schema does not enforce this. GitHub PR and state operations use the run's `GITHUB_TOKEN`, with `contents: write` and (for reconciliation) `pull-requests: write`; no personal GitHub token is used.
 
 A consumer owns the trigger and pins the reusable workflow to a reviewed commit. Example manual caller:
 
@@ -151,7 +158,7 @@ jobs:
       contents: write
 ```
 
-Put `PHRASE_PLATFORM_API_TOKEN` in the consumer's `phrase-pilot` Actions environment; the called job binds to that environment. If using a repository/organization secret instead, explicitly map it with `secrets: { PHRASE_PLATFORM_API_TOKEN: ${{ secrets.<name> }} }`—never use `secrets: inherit`. The consumer's reconciliation caller should use the same `environment` and grant `contents: write` plus `pull-requests: write`; a schedule belongs in that consumer repository and runs from its default branch only.
+Put the Phrase secrets in the consumer's `phrase-pilot` Actions environment; the called job binds to that environment. If using repository/organization secrets instead, explicitly map them, for example `secrets: { PHRASE_SERVICE_ACCOUNT_CLIENT_ID: ${{ secrets.<id-name> }}, PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET: ${{ secrets.<secret-name> }} }`—never use `secrets: inherit`. The consumer's reconciliation caller should use the same `environment` and grant `contents: write` plus `pull-requests: write`; a schedule belongs in that consumer repository and runs from its default branch only.
 
 Batch state is stored on the configured state branch under `.github/i18n-state/batches/` (the GitHub contents API lists at most 1,000 records per directory). A batch is keyed by repository, PR base, exact source bytes, and the Phrase-facing settings (project, region, filename, import settings, target languages). The source commit is not part of the key, so re-dispatching or pushing unrelated commits never creates a second Phrase job for unchanged source; repository-side mapping changes (output paths, adapters, completion policy) are adopted by the existing batch. The workflow refuses ambiguous job-creation retries, supersedes stale source batches, and never auto-merges translation PRs. Reconciliation currently supports one final job part per catalog and locale. `COMPLETED` on the final workflow step is the success signal; `DELIVERED` is not treated as completion.
 

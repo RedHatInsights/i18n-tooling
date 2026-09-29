@@ -71,7 +71,7 @@ consumer framework/extractor
         │
         ▼
 PhraseClient
-  ├── Platform API-token exchange
+  ├── Platform auth (service-account client credentials or API-token exchange)
   ├── source-job upload + async import tracking
   ├── final-step status reads
   └── target export + download
@@ -94,7 +94,7 @@ GitHubPhraseRepository
 
 The state record is keyed by repository, base ref, exact source bytes, and the Phrase-facing settings; the source commit is recorded but not keyed, so unchanged source is never submitted twice. Terminal batches (`completed`, `failed`, `superseded`) leave reconciliation, and each batch is reconciled in isolation. The exact job-create request is never replayed after an ambiguous outcome. Reconciliation verifies the source at its pinned commit and current PR base, validates every downloaded target against the pinned source, and opens one PR per locale. Reconciliation downloads afresh after an interrupted export rather than reusing a possibly consumed one-time request ID.
 
-The reusable submit and reconcile workflows use a protected environment secret for the Phrase Platform API token and the run-scoped `GITHUB_TOKEN` for state and PR operations. They do not auto-merge or add consumer-specific schedules/configuration. GitHub may hold `pull_request` checks from a `GITHUB_TOKEN`-created PR for maintainer approval; generated PRs must not be assumed to have immediately running checks.
+The reusable submit and reconcile workflows use protected environment secrets for Phrase credentials (a Service Account or a user's Platform API token) and the run-scoped `GITHUB_TOKEN` for state and PR operations. They do not auto-merge or add consumer-specific schedules/configuration. GitHub may hold `pull_request` checks from a `GITHUB_TOKEN`-created PR for maintainer approval; generated PRs must not be assumed to have immediately running checks.
 
 ## Reusable workflow
 
