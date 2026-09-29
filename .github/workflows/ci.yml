@@ -401,3 +401,66 @@ jobs:
           online-audits: false
           advanced-security: false
           annotations: true
+
+  core-validation:
+    name: Core validation
+    if: always()
+    needs:
+      - lockfile
+      - typecheck
+      - reusable-cli
+      - test
+      - build
+      - cli-smoke
+      - schema-contracts
+      - reusable-workflow-self-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every core check to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          failed="$(jq -r 'to_entries[] | select(.value.result != "success") | "\(.key): \(.value.result)"' <<< "$NEEDS")"
+          if [[ -n "$failed" ]]; then
+            printf 'Core checks did not all succeed:\n%s\n' "$failed" >&2
+            exit 1
+          fi
+
+  code-quality:
+    name: Code quality
+    if: always()
+    needs:
+      - lint-format
+      - markdown
+      - spelling
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every code-quality check to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          failed="$(jq -r 'to_entries[] | select(.value.result != "success") | "\(.key): \(.value.result)"' <<< "$NEEDS")"
+          if [[ -n "$failed" ]]; then
+            printf 'Code-quality checks did not all succeed:\n%s\n' "$failed" >&2
+            exit 1
+          fi
+
+  security:
+    name: Security checks
+    if: always()
+    needs:
+      - dependency-review
+      - actionlint
+      - zizmor
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every applicable security check to succeed
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          failed="$(jq -r --arg event "$EVENT_NAME" 'to_entries[] | select(.key != "dependency-review" or $event == "pull_request") | select(.value.result != "success") | "\(.key): \(.value.result)"' <<< "$NEEDS")"
+          if [[ -n "$failed" ]]; then
+            printf 'Security checks did not all succeed:\n%s\n' "$failed" >&2
+            exit 1
+          fi
