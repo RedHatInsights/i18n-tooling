@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -509,6 +510,23 @@ async function main(): Promise<void> {
   process.exitCode = await runCli(process.argv.slice(2));
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+function realPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+/**
+ * True when the script Node was asked to run is this module. Symlinks are resolved on both
+ * sides: npm-style `.bin/frontend-i18n` links point here, and without resolving them the CLI
+ * would exit 0 without doing anything.
+ */
+export function isCliEntryPoint(argvPath: string | undefined, moduleUrl: string): boolean {
+  return argvPath !== undefined && realPath(argvPath) === realPath(fileURLToPath(moduleUrl));
+}
+
+if (isCliEntryPoint(process.argv[1], import.meta.url)) {
   void main();
 }

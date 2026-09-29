@@ -1,8 +1,9 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { runCli } from "../src/cli.js";
+import { isCliEntryPoint, runCli } from "../src/cli.js";
 
 let projectRoot: string | undefined;
 
@@ -14,6 +15,22 @@ afterEach(async () => {
 });
 
 describe("frontend-i18n CLI", () => {
+  it("recognizes itself as the entry point when started through a bin symlink", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-entry-"));
+    const cliFile = join(projectRoot, "dist/cli.js");
+    const binLink = join(projectRoot, "node_modules/.bin/frontend-i18n");
+    await mkdir(join(projectRoot, "dist"));
+    await mkdir(join(projectRoot, "node_modules/.bin"), { recursive: true });
+    await writeFile(cliFile, "");
+    await symlink(cliFile, binLink);
+    const moduleUrl = pathToFileURL(cliFile).href;
+
+    expect(isCliEntryPoint(cliFile, moduleUrl)).toBe(true);
+    expect(isCliEntryPoint(binLink, moduleUrl)).toBe(true);
+    expect(isCliEntryPoint(join(projectRoot, "other.js"), moduleUrl)).toBe(false);
+    expect(isCliEntryPoint(undefined, moduleUrl)).toBe(false);
+  });
+
   it("validates catalogs using workflow environment settings", async () => {
     projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-"));
     await mkdir(join(projectRoot, "locales"));
