@@ -1,0 +1,29 @@
+{
+  "provider": "phrase",
+  "project": {
+    "uid": "replace-with-phrase-project-uid",
+    "region": "eu"
+  },
+  "state": {
+    "branch": "i18n-tms-state",
+    "directory": ".github/i18n-state/batches"
+  },
+  "sourceCatalog": {
+    "path": "locales/translation-template.json",
+    "filename": "translation-template.json",
+    "adapter": "formatjs-json",
+    "locale": "en",
+    "useProjectFileImportSettings": true
+  },
+  "targetAdapter": "formatjs-json",
+  "targetLocales": [
+    {
+      "phraseLocale": "fr",
+      "repositoryLocale": "fr",
+      "outputPath": "src/locales/fr.json"
+    }
+  ],
+  "completionPolicy": {
+    "default": "per-locale"
+  }
+}

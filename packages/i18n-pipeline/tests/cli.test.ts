@@ -171,7 +171,7 @@ describe("frontend-i18n CLI", () => {
         stderr: (message) => errors.push(message),
       }),
     ).toBe(0);
-    expect(output[0]).toContain("<check|validate|convert|version|help>");
+    expect(output[0]).toContain("<check|validate|convert|tms|version|help>");
 
     expect(
       await runCli(["check", "--help"], {
@@ -191,8 +191,204 @@ describe("frontend-i18n CLI", () => {
     ).toBe(1);
     expect(unknownErrors[0]).toContain('Unknown command "unknown"');
     expect(unknownErrors[0]).toContain(
-      "Usage: frontend-i18n <check|validate|convert|version|help>",
+      "Usage: frontend-i18n <check|validate|convert|tms|version|help>",
     );
+  });
+
+  it("shows TMS command help and requires the protected Phrase secret for submission", async () => {
+    const help: string[] = [];
+    expect(
+      await runCli(["tms", "submit", "--help"], {
+        stdout: (message) => help.push(message),
+        stderr: () => undefined,
+      }),
+    ).toBe(0);
+    expect(help[0]).toContain("Usage: frontend-i18n tms submit --config <path>");
+    expect(
+      await runCli(["tms", "--help"], {
+        stdout: (message) => help.push(message),
+        stderr: () => undefined,
+      }),
+    ).toBe(0);
+    expect(help[1]).toContain("PHRASE_SERVICE_ACCOUNT_CLIENT_ID");
+
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-"));
+    await mkdir(join(projectRoot, "locales"));
+    await writeFile(join(projectRoot, "package.json"), "{}\n");
+    await writeFile(
+      join(projectRoot, "locales/en.json"),
+      JSON.stringify({ greeting: { defaultMessage: "Hello" } }),
+    );
+    await writeFile(
+      join(projectRoot, "phrase.json"),
+      JSON.stringify({
+        provider: "phrase",
+        project: { uid: "project-uid", region: "us" },
+        sourceCatalog: { path: "locales/en.json", adapter: "formatjs-json", locale: "en" },
+        targetLocales: [
+          { phraseLocale: "fr", repositoryLocale: "fr", outputPath: "locales/fr.json" },
+        ],
+      }),
+    );
+    const errors: string[] = [];
+    const exitCode = await runCli(["tms", "submit", "--config", "phrase.json"], {
+      cwd: projectRoot,
+      env: {
+        GITHUB_TOKEN: "run-token",
+        GITHUB_REPOSITORY: "example/app",
+        GITHUB_REF_NAME: "phrase-pilot",
+        GITHUB_SHA: "abc123",
+      },
+      stdout: () => undefined,
+      stderr: (message) => errors.push(message),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(errors[0]).toContain(
+      "Set PHRASE_SERVICE_ACCOUNT_CLIENT_ID and PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET, or PHRASE_PLATFORM_API_TOKEN, as protected workflow secrets",
+    );
+  });
+
+  it.each([
+    [
+      "a partial service account",
+      { PHRASE_SERVICE_ACCOUNT_CLIENT_ID: "client-id" },
+      "Set both PHRASE_SERVICE_ACCOUNT_CLIENT_ID and PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET",
+    ],
+    [
+      "both credential kinds",
+      {
+        PHRASE_PLATFORM_API_TOKEN: "user-token",
+        PHRASE_SERVICE_ACCOUNT_CLIENT_ID: "client-id",
+        PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET: "client-secret",
+      },
+      "Set either PHRASE_PLATFORM_API_TOKEN or the Phrase service account secrets, not both",
+    ],
+  ] as Array<[string, Record<string, string>, string]>)(
+    "rejects %s before calling external services",
+    async (_label, secrets, message) => {
+      projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-credentials-"));
+      await writeFile(join(projectRoot, "package.json"), "{}\n");
+      await writeFile(
+        join(projectRoot, "phrase.json"),
+        JSON.stringify({
+          provider: "phrase",
+          project: { uid: "project-uid", region: "eu" },
+          sourceCatalog: { path: "locales/en.json", adapter: "formatjs-json", locale: "en" },
+          targetLocales: [
+            { phraseLocale: "fr", repositoryLocale: "fr", outputPath: "locales/fr.json" },
+          ],
+        }),
+      );
+      const calls: string[] = [];
+      const errors: string[] = [];
+
+      const exitCode = await runCli(["tms", "reconcile", "--config", "phrase.json"], {
+        cwd: projectRoot,
+        env: {
+          // Unset reusable-workflow secrets arrive as empty strings.
+          PHRASE_PLATFORM_API_TOKEN: "",
+          ...secrets,
+          GITHUB_TOKEN: "run-token",
+          GITHUB_REPOSITORY: "example/app",
+        },
+        fetch: async (input) => {
+          calls.push(input instanceof Request ? input.url : String(input));
+          return new Response("{}", { status: 500 });
+        },
+        stdout: () => undefined,
+        stderr: (message) => errors.push(message),
+      });
+
+      expect(exitCode).toBe(1);
+      expect(errors[0]).toContain(message);
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it("reconciles an empty state branch without calling external services", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-empty-"));
+    await writeFile(join(projectRoot, "package.json"), "{}\n");
+    await writeFile(
+      join(projectRoot, "phrase.json"),
+      JSON.stringify({
+        provider: "phrase",
+        project: { uid: "project-uid", region: "us" },
+        sourceCatalog: { path: "locales/en.json", adapter: "formatjs-json", locale: "en" },
+        targetLocales: [
+          { phraseLocale: "fr", repositoryLocale: "fr", outputPath: "locales/fr.json" },
+        ],
+      }),
+    );
+    const calls: string[] = [];
+    const output: string[] = [];
+    const fetch: typeof globalThis.fetch = async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      calls.push(url);
+      return new Response("{}", { status: 404 });
+    };
+
+    const exitCode = await runCli(["tms", "reconcile", "--config", "phrase.json"], {
+      cwd: projectRoot,
+      env: {
+        PHRASE_PLATFORM_API_TOKEN: "protected-phrase-token",
+        GITHUB_TOKEN: "run-token",
+        GITHUB_REPOSITORY: "example/app",
+      },
+      fetch,
+      stdout: (message) => output.push(message),
+      stderr: (message) => output.push(message),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(output).toEqual(["No ready Phrase batches found."]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("/contents/.github/i18n-state/batches?ref=i18n-tms-state");
+  });
+
+  it("requires an explicit base ref for pull-request runs and ignores empty workflow inputs", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-base-"));
+    await mkdir(join(projectRoot, "locales"));
+    await writeFile(join(projectRoot, "package.json"), "{}\n");
+    await writeFile(
+      join(projectRoot, "locales/en.json"),
+      JSON.stringify({ greeting: { defaultMessage: "Hello" } }),
+    );
+    await writeFile(
+      join(projectRoot, "phrase.json"),
+      JSON.stringify({
+        provider: "phrase",
+        project: { uid: "project-uid", region: "us" },
+        sourceCatalog: { path: "locales/en.json", adapter: "formatjs-json", locale: "en" },
+        targetLocales: [
+          { phraseLocale: "fr", repositoryLocale: "fr", outputPath: "locales/fr.json" },
+        ],
+      }),
+    );
+    const calls: string[] = [];
+    const errors: string[] = [];
+    const exitCode = await runCli(["tms", "submit", "--config", "phrase.json"], {
+      cwd: projectRoot,
+      env: {
+        PHRASE_PLATFORM_API_TOKEN: "protected-phrase-token",
+        GITHUB_TOKEN: "run-token",
+        GITHUB_REPOSITORY: "example/app",
+        GITHUB_REF: "refs/pull/12/merge",
+        GITHUB_REF_NAME: "12/merge",
+        GITHUB_SHA: "abc123",
+        I18N_BASE_REF: "",
+      },
+      fetch: async (input) => {
+        calls.push(input instanceof Request ? input.url : String(input));
+        return new Response("{}", { status: 500 });
+      },
+      stdout: () => undefined,
+      stderr: (message) => errors.push(message),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(errors[0]).toContain("Pass --base-ref: GITHUB_REF is not a branch");
+    expect(calls).toEqual([]);
   });
 
   it("passes JSON adapter config to a dynamically loaded plugin", async () => {

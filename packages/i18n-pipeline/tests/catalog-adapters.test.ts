@@ -55,6 +55,30 @@ describe("Catalog adapters", () => {
     expect(adapter.write(catalog, context)).toEqual(target);
   });
 
+  it("flattens Phrase-exported FormatJS descriptors into target strings", () => {
+    const phraseTarget = {
+      greeting: {
+        defaultMessage: "Bonjour {name}",
+        description: "Greeting",
+      },
+      accessOrigin: {
+        defaultMessage: "Origine d’accès",
+        description: { context: "Settings page", text: "Label for the source" },
+      },
+    };
+    const context = { locale: "fr", role: "target" as const, options: {} };
+    const adapter = new CatalogAdapterRegistry().get("formatjs-json");
+
+    const catalog = adapter.read(phraseTarget, context);
+
+    expect(catalog.messages.greeting?.pattern).toBe("Bonjour {name}");
+    expect(catalog.messages.accessOrigin?.pattern).toBe("Origine d’accès");
+    expect(adapter.write(catalog, context)).toEqual({
+      greeting: "Bonjour {name}",
+      accessOrigin: "Origine d’accès",
+    });
+  });
+
   it("round-trips keyed ICU JSON and preserves plural patterns", async () => {
     const source = JSON.parse(
       await readFile(new URL("./fixtures/insights-rbac/i18n-en.json", import.meta.url), "utf8"),

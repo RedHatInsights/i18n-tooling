@@ -19,7 +19,7 @@ HCC is the first consumer; tooling should not make every future consumer pretend
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `@redhat-cloud-services/eslint-plugin-i18n` | ESLint rules for message IDs, source catalogs, and ICU-oriented source checks.                                                                                       |
 | `@redhat-cloud-services/i18n-pipeline`      | Node.js package with the normalized catalog model, FormatJS and keyed ICU JSON adapters, adapter plugin loading, ICU syntax validation, and the `frontend-i18n` CLI. |
-| `.github/workflows/`                        | Repository CI and reusable consumer validation.                                                                                                                       |
+| `.github/workflows/`                        | Repository CI and reusable consumer validation.                                                                                                                      |
 
 The TypeScript packages target Node.js 22+. Bun 1.3.14 manages workspace dependencies, while package code and the CLI run under Node.js. Framework extraction and compilation remain in each consumer's native tooling.
 
@@ -99,6 +99,80 @@ jobs:
 ```
 
 Replace `<reviewed-commit-sha>` with a reviewed commit SHA. The reusable workflow checks out the consumer repository and `i18n-tooling` at the exact commit of the called workflow (`job.workflow_sha`). It installs consumer dependencies with the selected package manager, installs the tooling workspace with Bun, builds `@redhat-cloud-services/i18n-pipeline`, and adds the CLI to `PATH` before running the consumer script with `npm run` under Node.js. The script can call `frontend-i18n validate` for one catalog or `frontend-i18n check` for a source/target pair; catalog settings arrive through `I18N_CATALOG_*` environment variables. The CLI is built from source, so npm publication is not required. Pinning the reusable workflow pins the CLI source too.
+
+## Phrase TMS round trip
+
+The reusable Phrase workflows submit one validated source catalog and reconcile completed target jobs into ordinary locale-specific pull requests:
+
+- `.github/workflows/phrase-submit.yml` exposes `workflow_call` for manual source submission.
+- `.github/workflows/phrase-reconcile.yml` exposes `workflow_call` for scheduled or manual reconciliation.
+- `frontend-i18n tms submit --config <path>` validates and submits the pinned source revision. The PR base defaults to the pushed or dispatched branch; pull-request and tag runs must pass `--base-ref` (reusable-workflow input `base-ref`).
+- `frontend-i18n tms reconcile --config <path>` reads durable batch state, waits for each locale's final Phrase workflow step to reach `COMPLETED`, downloads and validates the target catalog, and opens or updates one PR per locale.
+
+Consumer configuration follows [the Phrase TMS config schema](schemas/phrase-tms-config.schema.json). For copyable caller/config examples and a test of the per-locale-to-runtime-data handoff, see the [Phrase consumer integration example](docs/phrase-consumer-integration.md):
+
+```json
+{
+  "provider": "phrase",
+  "project": { "uid": "<phrase-project-uid>", "region": "us" },
+  "state": { "branch": "i18n-tms-state" },
+  "sourceCatalog": {
+    "path": "locales/translation-template.json",
+    "adapter": "formatjs-json",
+    "locale": "en",
+    "importSettingsUid": "<phrase-import-settings-uid>"
+  },
+  "targetAdapter": "formatjs-json",
+  "targetLocales": [
+    {
+      "phraseLocale": "fr",
+      "repositoryLocale": "fr",
+      "outputPath": "locales/fr.json"
+    }
+  ],
+  "completionPolicy": { "default": "per-locale" }
+}
+```
+
+Set `sourceCatalog.importSettingsUid` or `useProjectFileImportSettings` when the Phrase project requires a particular import format. `sourceCatalog.filename` defaults to the source path's basename. `project.region` selects the Platform OAuth and TMS API hosts (`eu` or `us`).
+
+Phrase credentials come from one of two secret sets; setting both is an error:
+
+- **Service Account (preferred for automation):** `PHRASE_SERVICE_ACCOUNT_CLIENT_ID` and `PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET`, used with the OAuth client-credentials grant. A Phrase organization admin creates the account under Organization Settings → Service Accounts; the secret is shown once. The account is not tied to a person, but it cannot own projects, and job creation by a service account still needs one verified test job in the target project.
+- **User token:** `PHRASE_PLATFORM_API_TOKEN`, a Platform API token from Settings → Profile → Access tokens, exchanged for a short-lived access token. It carries that user's full permissions, expires after two years, and stops working if the user is deactivated.
+
+Put the secrets in a protected Actions environment and pass that environment as the reusable-workflow `environment` input. A caller may instead map repository/organization secrets to the same workflow-call secret names (GitHub secret names are case-insensitive). The CLI rejects credential-like keys (for example `apiToken`, `api_key`, `clientSecret`) anywhere in the config so tokens cannot enter batch-state files; the JSON schema does not enforce this. GitHub PR and state operations use the run's `GITHUB_TOKEN`, with `contents: write` and (for reconciliation) `pull-requests: write`; no personal GitHub token is used.
+
+A consumer owns the trigger and pins the reusable workflow to a reviewed commit. Example manual caller:
+
+```yaml
+on:
+  workflow_dispatch:
+jobs:
+  submit:
+    uses: RedHatInsights/i18n-tooling/.github/workflows/phrase-submit.yml@<reviewed-commit-sha>
+    with:
+      config-path: .github/i18n/phrase-tms.json
+      environment: phrase-pilot
+    permissions:
+      contents: write
+```
+
+Put the Phrase secrets in the consumer's `phrase-pilot` Actions environment; the called job binds to that environment. If using repository/organization secrets instead, explicitly map them, for example `secrets: { PHRASE_SERVICE_ACCOUNT_CLIENT_ID: ${{ secrets.<id-name> }}, PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET: ${{ secrets.<secret-name> }} }`—never use `secrets: inherit`. The consumer's reconciliation caller should use the same `environment` and grant `contents: write` plus `pull-requests: write`; a schedule belongs in that consumer repository and runs from its default branch only.
+
+Batch state is stored on the configured state branch under `.github/i18n-state/batches/` (the GitHub contents API lists at most 1,000 records per directory). A batch is keyed by repository, PR base, exact source bytes, and the Phrase-facing settings (project, region, filename, import settings, target languages). The source commit is not part of the key, so re-dispatching or pushing unrelated commits never creates a second Phrase job for unchanged source; repository-side mapping changes (output paths, adapters, completion policy) are adopted by the existing batch. The workflow refuses ambiguous job-creation retries, supersedes stale source batches, and never auto-merges translation PRs. Reconciliation currently supports one final job part per catalog and locale. `COMPLETED` on the final workflow step is the success signal; `DELIVERED` is not treated as completion.
+
+Batch phases: `creating` → `importing` → `ready` → `completed`, or `failed`/`superseded`. `completed`, `failed`, and `superseded` batches are not reconciled again. Reconciliation also resumes `importing` batches whose submit run timed out. Each locale is reported once when it fails; `tms reconcile` exits non-zero only for new failures or transient `retrying` errors, and an error in one batch never blocks the others. An `all-locales` target fails as soon as any other locale in its batch fails, because it can never become releasable. A PR that was closed without merging fails that locale permanently; reopen the PR or delete its branch and resubmit.
+
+A `failed` batch blocks resubmission of the same source. After fixing the cause in Phrase, run `tms submit --retry-failed` (reusable-workflow input `retry-failed: true`) to create a new job. Resubmitting source that was `superseded` and has become current again revives the existing batch instead of creating a new job. Superseded batches are never cancelled in Phrase automatically, since that would discard translator work; cancel stale jobs in Phrase if they should not continue.
+
+Submission and reconciliation use separate concurrency groups, so a queued reconcile cannot cancel a pending submission. They may run at the same time: state writes are compare-and-swap on the state file, and a write rejected only because the branch head moved is retried. Both jobs time out after 30 minutes; each Phrase request times out after 60 seconds and each GitHub request after 30 seconds.
+
+**Manual recovery for an ambiguous submission:** Do not rerun an `unknown`/stalled `creating` batch blindly. Inspect the exact Phrase project and job. If the job exists, edit only its JSON record (`<state.directory>/<batch-key>.json` on the configured state branch): preserve its key/config/source fields, add the verified `importAsyncRequestId` and complete `jobs` array (`uid`, `targetLang`, and `workflowLevel` for every job part), and set `phase` to `importing`. Rerun `tms submit` to resume import polling without creating another job. Delete only that exact state record if authoritative Phrase inspection confirms no job was created; then retry. If the remote outcome is uncertain, stop. No recovery CLI exists yet.
+
+**GitHub Actions caveat:** PRs opened with `GITHUB_TOKEN` can trigger `pull_request` workflows for `opened`, `synchronize`, or `reopened`, but GitHub holds those runs for maintainer approval. Do not assume generated PRs will have automatically running/passing consumer checks; see [GitHub's token-trigger behavior](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow). This implementation deliberately does not replace `GITHUB_TOKEN` with a PAT or auto-merge PRs.
+
+The reusable workflows are generic; they do not add `rbac-ui` configuration or schedule wiring. Live Phrase job creation and secret setup remain explicit acceptance steps.
 
 A service can validate its service-owned keyed ICU JSON catalog the same way:
 

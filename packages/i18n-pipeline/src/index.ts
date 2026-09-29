@@ -3,6 +3,50 @@ import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parse as parseIcuMessage } from "@formatjs/icu-messageformat-parser";
 export { checkCatalogs, type ArgumentMismatch, type CatalogCheckResult } from "./catalog-check.js";
+export {
+  PhraseAsyncRequestError,
+  PhraseApiError,
+  PhraseClient,
+  PhraseTransportError,
+  phraseEndpoints,
+  type CreatePhraseJobInput,
+  type PhraseAsyncRequest,
+  type PhraseClientOptions,
+  type PhraseJobCreation,
+  type PhraseJobPart,
+  type PhraseRegion,
+  type PhraseServiceAccountCredentials,
+} from "./phrase-client.js";
+export {
+  PhraseBatchStateConflictError,
+  PhraseCatalogValidationError,
+  PhraseRepositoryError,
+  PhraseWorkflow,
+  PhraseWorkflowError,
+  type LocaleCompletionPolicy,
+  type PhraseBatchPhase,
+  type PhraseBatchRecord,
+  type PhraseBatchStateStore,
+  type PhraseLocalePhase,
+  type PhraseLocalePullRequest,
+  type PhraseReconcileResult,
+  type PhraseSubmitInput,
+  type PhraseTargetLocale,
+  type PhraseWorkflowConfig,
+  type PhraseWorkflowDependencies,
+  type PhraseWorkflowRepository,
+  type StoredPhraseBatch,
+} from "./phrase-workflow.js";
+export {
+  parsePhraseTmsConfig,
+  validatePhraseWorkflowConfig,
+  type PhraseTmsConfig,
+} from "./phrase-config.js";
+export {
+  GitHubPhraseRepository,
+  GitHubRepositoryError,
+  type GitHubPhraseRepositoryOptions,
+} from "./github-phrase-repository.js";
 
 export type CatalogRole = "source" | "target";
 
@@ -73,13 +117,19 @@ export class FormatJsJsonAdapter implements CatalogAdapter {
         throw new CatalogFormatError("FormatJS message IDs must be non-empty strings");
       }
       if (context.role === "target") {
-        if (typeof rawMessage !== "string") {
+        const pattern =
+          typeof rawMessage === "string"
+            ? rawMessage
+            : isRecord(rawMessage) && typeof rawMessage.defaultMessage === "string"
+              ? rawMessage.defaultMessage
+              : undefined;
+        if (pattern === undefined) {
           throw new CatalogFormatError(
-            `FormatJS target entry "${messageId}" must be a message string`,
+            `FormatJS target entry "${messageId}" must be a message string or descriptor`,
           );
         }
-        assertValidIcuPattern(rawMessage, messageId, this.id);
-        messages[messageId] = { pattern: rawMessage, metadata: {} };
+        assertValidIcuPattern(pattern, messageId, this.id);
+        messages[messageId] = { pattern, metadata: {} };
         continue;
       }
 

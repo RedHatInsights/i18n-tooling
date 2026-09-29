@@ -1,0 +1,14 @@
+name: Phrase submit
+
+on:
+  workflow_dispatch:
+
+jobs:
+  submit:
+    # zizmor: ignore[unpinned-uses] -- Replace marker with a reviewed immutable SHA before adoption.
+    uses: RedHatInsights/i18n-tooling/.github/workflows/phrase-submit.yml@<reviewed-commit-sha>
+    with:
+      config-path: .github/i18n/phrase-tms.json
+      environment: phrase-pilot
+    permissions:
+      contents: write
