@@ -1,0 +1,14 @@
+name: Phrase reconcile
+
+on:
+  workflow_dispatch:
+
+jobs:
+  reconcile:
+    uses: RedHatInsights/i18n-tooling/.github/workflows/phrase-reconcile.yml@<reviewed-commit-sha>
+    with:
+      config-path: .github/i18n/phrase-tms.json
+      environment: phrase-pilot
+    permissions:
+      contents: write
+      pull-requests: write
