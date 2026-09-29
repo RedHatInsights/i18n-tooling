@@ -28,6 +28,11 @@ on:
         required: false
         type: string
         default: locales/translation-template.json
+      source-glob:
+        description: Glob of JavaScript/TypeScript sources to check against the catalog
+        required: false
+        type: string
+        default: "src/**/*.{js,jsx,ts,tsx}"
       catalog-role:
         description: Catalog role, source or target
         required: false
@@ -111,6 +116,22 @@ jobs:
       - name: Build frontend-i18n CLI
         run: npm run build
         working-directory: i18n-tooling-source/packages/i18n-pipeline
+
+      - name: Build source-catalog ESLint plugin
+        run: npm run build --workspace @redhat-cloud-services/eslint-plugin-i18n
+        working-directory: i18n-tooling-source
+
+      - name: Lint consumer source message IDs
+        env:
+          I18N_CATALOG_PATH: ${{ inputs.catalog-path }}
+          I18N_SOURCE_GLOB: ${{ inputs.source-glob }}
+        run: |
+          TOOLING_ROOT="$GITHUB_WORKSPACE/i18n-tooling-source"
+          "$TOOLING_ROOT/node_modules/.bin/eslint" \
+            --no-config-lookup \
+            --no-inline-config \
+            --config "$TOOLING_ROOT/scripts/eslint-source.config.mjs" \
+            "$I18N_SOURCE_GLOB"
 
       - name: Add frontend-i18n to PATH
         run: |

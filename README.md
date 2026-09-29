@@ -79,7 +79,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and consumer workflow 
 
 ## Shared validation workflow
 
-The reusable `i18n-validate.yml` workflow checks out tooling source at the called workflow's commit, builds the CLI, then runs the consumer's validation script with `frontend-i18n` available. Consumers do not need an npm dependency on this repository, and this repository does not publish workspace packages to npm.
+The reusable `i18n-validate.yml` workflow checks out tooling source at the called workflow's commit, builds the CLI and ESLint plugin, checks consumer source message IDs against the configured catalog, then runs the consumer's validation script with `frontend-i18n` available. The source glob defaults to `src/**/*.{js,jsx,ts,tsx}` and can be overridden with `source-glob`; include files that declare reusable messages too. The ESLint check rejects missing catalog entries, missing or dynamic inline IDs, and opaque descriptor expressions. Declare reusable descriptors with `defineMessages` so their IDs are checked at the definition. Consumers do not need an npm dependency on this repository, and this repository does not publish workspace packages to npm.
 
 ## Consumer examples
 
@@ -98,7 +98,7 @@ jobs:
       catalog-locale: en
 ```
 
-Replace `<reviewed-commit-sha>` with a reviewed commit SHA. The reusable workflow checks out the consumer repository and `i18n-tooling` at the exact commit of the called workflow (`job.workflow_sha`). It installs consumer dependencies with the selected package manager, installs the tooling workspace with Bun, builds `@redhat-cloud-services/i18n-pipeline`, and adds the CLI to `PATH` before running the consumer script with `npm run` under Node.js. The script can call `frontend-i18n validate` for one catalog or `frontend-i18n check` for a source/target pair; catalog settings arrive through `I18N_CATALOG_*` environment variables. The CLI is built from source, so npm publication is not required. Pinning the reusable workflow pins the CLI source too.
+Replace `<reviewed-commit-sha>` with a reviewed commit SHA. The reusable workflow checks out the consumer repository and `i18n-tooling` at the exact commit of the called workflow (`job.workflow_sha`). It installs consumer dependencies with the selected package manager and the tooling workspace with Bun, builds the CLI and ESLint plugin, then lints the configured source glob against `catalog-path` before running the consumer script with `npm run` under Node.js. The rule recognizes FormatJS `formatMessage`, `defineMessage(s)`, and `<FormattedMessage>` forms; IDs must be static and present in the catalog. The consumer script can call `frontend-i18n validate` for one catalog or `frontend-i18n check` for a source/target pair; catalog settings arrive through `I18N_CATALOG_*` environment variables. Neither package needs npm publication. Pinning the reusable workflow pins the CLI and rule source too.
 
 A service can validate its service-owned keyed ICU JSON catalog the same way:
 

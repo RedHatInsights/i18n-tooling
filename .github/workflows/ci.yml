@@ -81,6 +81,9 @@ jobs:
     uses: $/.github/workflows/i18n-validate.yml
     with:
       validation-command: smoke:reusable-cli
+      catalog-adapter: icu-json
+      catalog-path: packages/i18n-pipeline/tests/fixtures/insights-rbac/i18n-en.json
+      source-glob: "packages/*/src/**/*.ts"
 
   test:
     name: Tests and coverage (Node ${{ matrix.node-version }})
@@ -274,6 +277,7 @@ jobs:
       validation-command: i18n:validate
       catalog-adapter: formatjs-json
       catalog-path: packages/i18n-pipeline/tests/fixtures/rbac-ui/translation-template.json
+      source-glob: "packages/*/src/**/*.ts"
       catalog-role: source
       catalog-locale: en
     permissions:

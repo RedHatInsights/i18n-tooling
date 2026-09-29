@@ -22,4 +22,4 @@ export default [
 ];
 ```
 
-The first rule checks literal IDs used by supported FormatJS call forms against the committed English catalog. It deliberately does not make a generated temporary extraction file authoritative.
+`no-missing-default-catalog-entry` checks IDs in FormatJS `formatMessage`, `defineMessage(s)`, and `<FormattedMessage>` forms against the configured catalog. Missing entries fail lint. Missing or dynamic inline IDs, spread/computed descriptors, and unresolved descriptor expressions also fail. Static reusable descriptors are checked at their definitions; configure the source glob to include those files. The reusable workflow builds this plugin and runs the rule against consumer sources before consumer validation; it does not require consumers to install the workspace-only package.
