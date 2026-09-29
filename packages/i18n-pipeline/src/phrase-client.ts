@@ -84,6 +84,16 @@ export class PhraseApiError extends Error {
   }
 }
 
+/** Platform OAuth refused the credentials; the message names the credential kind, never its value. */
+export class PhraseAuthError extends PhraseApiError {
+  constructor(message: string, status: number) {
+    super(message, status);
+    this.name = "PhraseAuthError";
+  }
+}
+
+export type PhraseAuthMethod = "service-account" | "platform-api-token";
+
 export class PhraseTransportError extends Error {
   constructor(
     message: string,
@@ -138,6 +148,8 @@ export class PhraseClient {
   private readonly maxRetries: number;
   private readonly requestTimeoutMs: number;
   private cachedAccessToken?: { value: string; expiresAt: number };
+  /** Which credential kind this client authenticates with; chosen by the caller, not detected. */
+  readonly authMethod: PhraseAuthMethod;
 
   constructor(private readonly options: PhraseClientOptions) {
     const { platformApiToken, serviceAccount } = options;
@@ -177,6 +189,7 @@ export class PhraseClient {
       ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.maxRetries = options.maxRetries ?? 2;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 60_000;
+    this.authMethod = serviceAccount ? "service-account" : "platform-api-token";
   }
 
   async createJob(input: CreatePhraseJobInput): Promise<PhraseJobCreation> {
@@ -459,8 +472,15 @@ export class PhraseClient {
       });
     }
     if (!response.ok) {
-      throw new PhraseApiError(
-        `Phrase Platform OAuth returned HTTP ${response.status}`,
+      const credential =
+        this.authMethod === "service-account"
+          ? "service account credentials"
+          : "Platform API token";
+      const hint = [400, 401, 403].includes(response.status)
+        ? "; check that the secret is current and stored under the name for its credential kind"
+        : "";
+      throw new PhraseAuthError(
+        `Phrase Platform OAuth returned HTTP ${response.status} for the ${credential}${hint}`,
         response.status,
       );
     }

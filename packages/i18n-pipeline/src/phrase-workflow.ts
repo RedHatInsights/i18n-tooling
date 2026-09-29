@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import { checkCatalogs } from "./catalog-check.js";
 import type { Catalog, CatalogAdapter, CatalogAdapterRegistry } from "./index.js";
-import { PhraseApiError, PhraseAsyncRequestError, PhraseTransportError } from "./phrase-client.js";
+import {
+  PhraseApiError,
+  PhraseAsyncRequestError,
+  PhraseAuthError,
+  PhraseTransportError,
+} from "./phrase-client.js";
 import type { CreatePhraseJobInput, PhraseJobCreation, PhraseJobPart } from "./phrase-client.js";
 import { validatePhraseWorkflowConfig } from "./phrase-config.js";
 
@@ -204,6 +209,7 @@ function digest(bytes: Uint8Array): string {
 
 function safeFailureReason(error: unknown): string {
   if (error instanceof PhraseAsyncRequestError) return "Phrase asynchronous request failed";
+  if (error instanceof PhraseAuthError) return error.message;
   if (error instanceof PhraseApiError) return `Phrase API returned HTTP ${error.status}`;
   if (error instanceof PhraseTransportError) {
     return error.mayHaveExecuted

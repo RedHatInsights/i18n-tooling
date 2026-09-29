@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CatalogAdapterRegistry } from "../src/index.js";
-import { PhraseApiError } from "../src/phrase-client.js";
+import { PhraseApiError, PhraseAuthError } from "../src/phrase-client.js";
 import {
   PhraseBatchStateConflictError,
   PhraseRepositoryError,
@@ -698,6 +698,13 @@ describe("PhraseWorkflow submission", () => {
     phrase.getJobError = new PhraseApiError("Phrase API returned HTTP 404", 404);
     expect(await workflow.reconcile()).toEqual([
       { batchKey: corrupt.key, phase: "retrying", reason: "Phrase API returned HTTP 404" },
+    ]);
+
+    const authMessage =
+      "Phrase Platform OAuth returned HTTP 401 for the service account credentials";
+    phrase.getJobError = new PhraseAuthError(authMessage, 401);
+    expect(await workflow.reconcile()).toEqual([
+      { batchKey: corrupt.key, phase: "retrying", reason: authMessage },
     ]);
   });
 

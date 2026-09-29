@@ -1,8 +1,9 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { runCli } from "../src/cli.js";
+import { isCliEntryPoint, runCli } from "../src/cli.js";
 
 let projectRoot: string | undefined;
 
@@ -14,6 +15,22 @@ afterEach(async () => {
 });
 
 describe("frontend-i18n CLI", () => {
+  it("recognizes itself as the entry point when started through a bin symlink", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-entry-"));
+    const cliFile = join(projectRoot, "dist/cli.js");
+    const binLink = join(projectRoot, "node_modules/.bin/frontend-i18n");
+    await mkdir(join(projectRoot, "dist"));
+    await mkdir(join(projectRoot, "node_modules/.bin"), { recursive: true });
+    await writeFile(cliFile, "");
+    await symlink(cliFile, binLink);
+    const moduleUrl = pathToFileURL(cliFile).href;
+
+    expect(isCliEntryPoint(cliFile, moduleUrl)).toBe(true);
+    expect(isCliEntryPoint(binLink, moduleUrl)).toBe(true);
+    expect(isCliEntryPoint(join(projectRoot, "other.js"), moduleUrl)).toBe(false);
+    expect(isCliEntryPoint(undefined, moduleUrl)).toBe(false);
+  });
+
   it("validates catalogs using workflow environment settings", async () => {
     projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-"));
     await mkdir(join(projectRoot, "locales"));
@@ -262,7 +279,7 @@ describe("frontend-i18n CLI", () => {
         PHRASE_SERVICE_ACCOUNT_CLIENT_ID: "client-id",
         PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET: "client-secret",
       },
-      "Set either PHRASE_PLATFORM_API_TOKEN or the Phrase service account secrets, not both",
+      "Remove PHRASE_PLATFORM_API_TOKEN to use the service account, or remove PHRASE_SERVICE_ACCOUNT_CLIENT_ID and PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET to use the token",
     ],
   ] as Array<[string, Record<string, string>, string]>)(
     "rejects %s before calling external services",
@@ -341,9 +358,33 @@ describe("frontend-i18n CLI", () => {
     });
 
     expect(exitCode).toBe(0);
-    expect(output).toEqual(["No ready Phrase batches found."]);
+    expect(output).toEqual([
+      "Phrase auth: user Platform API token (PHRASE_PLATFORM_API_TOKEN)",
+      "No ready Phrase batches found.",
+    ]);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toContain("/contents/.github/i18n-state/batches?ref=i18n-tms-state");
+
+    output.length = 0;
+    expect(
+      await runCli(["tms", "reconcile", "--config", "phrase.json"], {
+        cwd: projectRoot,
+        env: {
+          PHRASE_PLATFORM_API_TOKEN: "",
+          PHRASE_SERVICE_ACCOUNT_CLIENT_ID: "client-id",
+          PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET: "client-secret",
+          GITHUB_TOKEN: "run-token",
+          GITHUB_REPOSITORY: "example/app",
+        },
+        fetch,
+        stdout: (message) => output.push(message),
+        stderr: (message) => output.push(message),
+      }),
+    ).toBe(0);
+    expect(output[0]).toBe(
+      "Phrase auth: service account (PHRASE_SERVICE_ACCOUNT_CLIENT_ID/_SECRET)",
+    );
+    expect(output.join("\n")).not.toContain("client-secret");
   });
 
   it("requires an explicit base ref for pull-request runs and ignores empty workflow inputs", async () => {

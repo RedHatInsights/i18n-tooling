@@ -6,11 +6,13 @@ export { checkCatalogs, type ArgumentMismatch, type CatalogCheckResult } from ".
 export {
   PhraseAsyncRequestError,
   PhraseApiError,
+  PhraseAuthError,
   PhraseClient,
   PhraseTransportError,
   phraseEndpoints,
   type CreatePhraseJobInput,
   type PhraseAsyncRequest,
+  type PhraseAuthMethod,
   type PhraseClientOptions,
   type PhraseJobCreation,
   type PhraseJobPart,
