@@ -47,5 +47,18 @@ for (const schemaFile of schemaFiles) {
     }
   }
 
+  if (schemaName === "phrase-tms-config") {
+    const examplePath = join(
+      repositoryRoot,
+      "examples/phrase-consumer/.github/i18n/phrase-tms.json",
+    );
+    const example = JSON.parse(await readFile(examplePath, "utf8"));
+    if (!validate(example)) {
+      const errors = JSON.stringify(validate.errors ?? [], null, 2);
+      throw new Error(`Consumer Phrase config example is invalid:\n${errors}`);
+    }
+    console.log("examples/phrase-consumer/.github/i18n/phrase-tms.json: valid");
+  }
+
   console.log(`${schemaFile}: compiled; ${fixtureFiles.length} fixtures passed`);
 }

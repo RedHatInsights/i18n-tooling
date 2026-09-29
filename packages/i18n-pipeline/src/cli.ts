@@ -10,20 +10,26 @@ import {
   type AdapterContext,
   type CatalogRole,
 } from "./index.js";
+import { GitHubPhraseRepository } from "./github-phrase-repository.js";
+import { PhraseClient } from "./phrase-client.js";
+import { parsePhraseTmsConfig } from "./phrase-config.js";
+import { PhraseWorkflow, type PhraseReconcileResult } from "./phrase-workflow.js";
 
 export interface CliOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   stdout?: (message: string) => void;
   stderr?: (message: string) => void;
+  fetch?: typeof globalThis.fetch;
 }
 
-const ROOT_HELP = `Usage: frontend-i18n <check|validate|convert|version|help> [options]
+const ROOT_HELP = `Usage: frontend-i18n <check|validate|convert|tms|version|help> [options]
 
 Commands:
   check     Compare source and target catalogs
   validate  Validate one catalog's format and ICU syntax
   convert   Convert a catalog between adapters
+  tms       Submit and reconcile translation batches
   version   Print the package version
   help      Show help, optionally for one command
 
@@ -57,6 +63,27 @@ Options:
   --source-config <path> Source adapter JSON config
   --target-config <path> Target adapter JSON config
   -h, --help             Show this help`,
+  tms: `Usage: frontend-i18n tms <submit|reconcile> [options]
+
+Use frontend-i18n tms <command> --help for command options.`,
+  "tms submit": `Usage: frontend-i18n tms submit --config <path> [options]
+
+Options:
+  --repository <owner/name>   GitHub repository (default: GITHUB_REPOSITORY)
+  --base-ref <branch>         PR base branch (default: branch from GITHUB_REF)
+  --source-commit <sha>       Source revision (default: GITHUB_SHA)
+  --config <path>             TMS JSON config path
+  --retry-failed              Create a new Phrase job if this source's last batch failed
+  -h, --help                  Show this help
+
+The base branch defaults to the pushed or dispatched branch (GITHUB_REF=refs/heads/*).
+Pull-request and tag refs require an explicit --base-ref.`,
+  "tms reconcile": `Usage: frontend-i18n tms reconcile --config <path>
+
+Options:
+  --repository <owner/name>   GitHub repository (default: GITHUB_REPOSITORY)
+  --config <path>             TMS JSON config path
+  -h, --help                  Show this help`,
   version: `Usage: frontend-i18n version
 
 Prints the i18n-pipeline package version.`,
@@ -66,12 +93,14 @@ function helpText(command?: string): string {
   return command ? (COMMAND_HELP[command] ?? ROOT_HELP) : ROOT_HELP;
 }
 
-function parseOptions<T extends Record<string, { type: "string" }>>(
+function parseOptions<T extends Record<string, { type: "string" | "boolean" }>>(
   args: string[],
   options: T,
-): Record<keyof T, string | undefined> {
+): { [K in keyof T]: (T[K]["type"] extends "boolean" ? boolean : string) | undefined } {
   const { values } = parseArgs({ args, options, strict: true, allowPositionals: false });
-  return values as unknown as Record<keyof T, string | undefined>;
+  return values as unknown as {
+    [K in keyof T]: (T[K]["type"] extends "boolean" ? boolean : string) | undefined;
+  };
 }
 
 function requireRole(value: string): CatalogRole {
@@ -215,6 +244,100 @@ async function checkCatalog(
   return true;
 }
 
+async function runTmsCommand(
+  command: "submit" | "reconcile",
+  args: string[],
+  options: Required<Pick<CliOptions, "cwd" | "env" | "stdout">> & Pick<CliOptions, "fetch">,
+): Promise<number> {
+  const values = parseOptions(args, {
+    config: { type: "string" },
+    repository: { type: "string" },
+    "base-ref": { type: "string" },
+    "source-commit": { type: "string" },
+    "retry-failed": { type: "boolean" },
+  });
+  const configPath = values.config;
+  if (!configPath) throw new Error("TMS command requires --config");
+  const parsed = parsePhraseTmsConfig(
+    await readJson(resolve(options.cwd, configPath), "TMS config"),
+  );
+  const platformApiToken = options.env.PHRASE_PLATFORM_API_TOKEN;
+  if (!platformApiToken)
+    throw new Error("PHRASE_PLATFORM_API_TOKEN is required as a protected workflow secret");
+  const githubToken = options.env.GITHUB_TOKEN;
+  if (!githubToken)
+    throw new Error("GITHUB_TOKEN is required for state and pull-request operations");
+  // Empty strings arrive from unset reusable-workflow inputs, so fall through with `||`.
+  const repositoryName = values.repository || options.env.GITHUB_REPOSITORY;
+  if (!repositoryName) throw new Error("Pass --repository or set GITHUB_REPOSITORY");
+
+  const phrase = new PhraseClient({
+    platformApiToken,
+    region: parsed.workflow.region,
+    fetch: options.fetch,
+  });
+  const github = new GitHubPhraseRepository({
+    repository: repositoryName,
+    token: githubToken,
+    stateBranch: parsed.stateBranch,
+    stateDirectory: parsed.stateDirectory,
+    ...(options.env.GITHUB_API_URL ? { apiUrl: options.env.GITHUB_API_URL } : {}),
+    fetch: options.fetch,
+  });
+  const catalogAdapters = await createCatalogAdapterRegistry(options.cwd);
+  const workflow = new PhraseWorkflow({
+    phrase,
+    state: github,
+    repository: github,
+    catalogAdapters,
+  });
+
+  if (command === "submit") {
+    const branchRef = options.env.GITHUB_REF?.startsWith("refs/heads/")
+      ? options.env.GITHUB_REF.slice("refs/heads/".length)
+      : undefined;
+    const baseRef = values["base-ref"] || options.env.I18N_BASE_REF || branchRef;
+    const sourceCommit =
+      values["source-commit"] || options.env.I18N_SOURCE_COMMIT || options.env.GITHUB_SHA;
+    if (!baseRef) {
+      throw new Error(
+        "Pass --base-ref: GITHUB_REF is not a branch (pull-request and tag runs need an explicit PR base)",
+      );
+    }
+    if (!sourceCommit) throw new Error("Pass --source-commit or set GITHUB_SHA");
+    const sourceBytes = await readFile(resolve(options.cwd, parsed.workflow.sourceCatalog.path));
+    const batch = await workflow.submit({
+      repository: repositoryName,
+      baseRef,
+      sourceCommit,
+      sourceBytes,
+      config: parsed.workflow,
+      retryFailed: values["retry-failed"] === true,
+    });
+    const warningSummary = batch.warningCount ? `, ${batch.warningCount} import warning(s)` : "";
+    options.stdout(
+      `Phrase batch ${batch.key} is ${batch.phase} (${batch.jobs.length} job parts${warningSummary}).`,
+    );
+    return 0;
+  }
+
+  const results = await workflow.reconcile();
+  if (!results.length) {
+    options.stdout("No ready Phrase batches found.");
+    return 0;
+  }
+  for (const result of results) options.stdout(formatReconcileResult(result));
+  return results.some((result) => result.phase === "failed" || result.phase === "retrying") ? 1 : 0;
+}
+
+function formatReconcileResult(result: PhraseReconcileResult): string {
+  return (
+    `${result.batchKey.slice(0, 12)} ${result.phraseLocale ?? "(batch)"}: ${result.phase}` +
+    (result.pullRequestUrl ? ` — ${result.pullRequestUrl}` : "") +
+    (result.reason ? ` — ${result.reason}` : "")
+  );
+}
+
 async function convertCatalog(
   args: string[],
   { cwd, stdout }: Required<Pick<CliOptions, "cwd" | "stdout">>,
@@ -270,15 +393,41 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
   const [command, ...args] = argv;
 
   if (!command || command === "--help" || command === "-h" || command === "help") {
-    stdout(helpText(command === "help" ? args[0] : undefined));
+    const requestedHelp = command === "help" ? args.slice(0, 2).join(" ") : undefined;
+    stdout(helpText(requestedHelp));
     return 0;
   }
-  if (args.includes("--help") || args.includes("-h")) {
+  if (command === "tms") {
+    const [subcommand, ...subargs] = args;
+    const helpCommand =
+      subcommand === "submit" || subcommand === "reconcile" ? `tms ${subcommand}` : "tms";
+    if (
+      !subcommand ||
+      subcommand === "help" ||
+      subargs.includes("--help") ||
+      subargs.includes("-h")
+    ) {
+      stdout(helpText(helpCommand));
+      return 0;
+    }
+  } else if (args.includes("--help") || args.includes("-h")) {
     stdout(helpText(command));
     return 0;
   }
 
   try {
+    if (command === "tms") {
+      const [subcommand, ...subargs] = args;
+      if (subcommand !== "submit" && subcommand !== "reconcile") {
+        throw new Error(`Unknown TMS command "${subcommand ?? ""}"`);
+      }
+      return await runTmsCommand(subcommand, subargs, {
+        cwd,
+        env,
+        stdout,
+        fetch: options.fetch,
+      });
+    }
     if (command === "version") {
       const manifest = await readJson(
         fileURLToPath(new URL("../package.json", import.meta.url)),

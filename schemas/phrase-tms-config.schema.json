@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://redhat.com/schemas/frontend-i18n/phrase-tms-config.json",
+  "title": "Phrase TMS workflow configuration",
+  "description": "Consumer-repository configuration for reusable Phrase submission and reconciliation workflows. Credentials must be provided as protected workflow secrets; the CLI rejects credential-like keys anywhere in this file.",
+  "type": "object",
+  "required": ["provider", "project", "sourceCatalog", "targetLocales"],
+  "properties": {
+    "provider": {
+      "const": "phrase"
+    },
+    "project": {
+      "type": "object",
+      "required": ["uid", "region"],
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1
+        },
+        "region": {
+          "enum": ["eu", "us"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "state": {
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "directory": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*/$)(?!.*(?:^|/)\\.\\.?(/|$)).+$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sourceCatalog": {
+      "type": "object",
+      "required": ["path", "adapter", "locale"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*/$)(?!.*(?:^|/)\\.\\.?(/|$)).+$"
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^/\\\\]+$"
+        },
+        "adapter": {
+          "type": "string",
+          "minLength": 1
+        },
+        "locale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "options": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "importSettingsUid": {
+          "type": "string",
+          "minLength": 1
+        },
+        "useProjectFileImportSettings": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "targetAdapter": {
+      "type": "string",
+      "minLength": 1
+    },
+    "targetOptions": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "targetLocales": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["phraseLocale", "repositoryLocale", "outputPath"],
+        "properties": {
+          "phraseLocale": {
+            "type": "string",
+            "minLength": 1
+          },
+          "repositoryLocale": {
+            "type": "string",
+            "minLength": 1
+          },
+          "outputPath": {
+            "type": "string",
+            "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*/$)(?!.*(?:^|/)\\.\\.?(/|$)).+$"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "completionPolicy": {
+      "type": "object",
+      "properties": {
+        "default": {
+          "enum": ["per-locale", "all-locales"],
+          "default": "per-locale"
+        },
+        "byLocale": {
+          "type": "object",
+          "additionalProperties": {
+            "enum": ["per-locale", "all-locales"]
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
