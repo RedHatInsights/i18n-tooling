@@ -1,0 +1,14 @@
+{
+  "provider": "phrase",
+  "project": {
+    "uid": "project-uid",
+    "region": "apac"
+  },
+  "sourceCatalog": {
+    "path": "../secrets.json",
+    "adapter": "formatjs-json",
+    "locale": "en"
+  },
+  "targetLocales": [],
+  "platformApiToken": "must-not-be-in-config"
+}
