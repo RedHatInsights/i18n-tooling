@@ -5,6 +5,7 @@ on:
 
 jobs:
   reconcile:
+    # zizmor: ignore[unpinned-uses] -- Replace marker with a reviewed immutable SHA before adoption.
     uses: RedHatInsights/i18n-tooling/.github/workflows/phrase-reconcile.yml@<reviewed-commit-sha>
     with:
       config-path: .github/i18n/phrase-tms.json

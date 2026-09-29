@@ -11,6 +11,7 @@ on:
 
 jobs:
   validate:
+    # zizmor: ignore[unpinned-uses] -- Replace marker with a reviewed immutable SHA before adoption.
     uses: RedHatInsights/i18n-tooling/.github/workflows/i18n-validate.yml@<reviewed-commit-sha>
     with:
       package-manager: npm
