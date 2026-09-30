@@ -3,6 +3,8 @@ name: Phrase submit
 on:
   workflow_dispatch:
 
+permissions: {}
+
 jobs:
   submit:
     # zizmor: ignore[unpinned-uses] -- Replace marker with a reviewed immutable SHA before adoption.
