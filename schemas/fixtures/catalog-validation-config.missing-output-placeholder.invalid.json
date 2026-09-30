@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "checks": [],
+  "generated": [
+    {
+      "path": "locales/en.json",
+      "adapter": "formatjs-json",
+      "role": "source",
+      "locale": "en",
+      "command": "npm",
+      "args": ["run", "translations:extract"]
+    }
+  ]
+}

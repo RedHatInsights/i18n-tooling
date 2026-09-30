@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://redhat.com/schemas/frontend-i18n/catalog-validation-config.json",
+  "title": "Catalog validation configuration",
+  "description": "Consumer-owned catalog checks and generated-file synchronization for frontend-i18n validate-project.",
+  "type": "object",
+  "required": ["version", "checks"],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "tmsConfig": {
+      "$ref": "#/$defs/path",
+      "description": "Phrase TMS config whose source catalog and target locales become a check. Targets are checked once their output file exists."
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source", "targets"],
+        "properties": {
+          "source": {
+            "$ref": "#/$defs/catalog"
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/catalog"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "generated": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "command", "args"],
+        "properties": {
+          "path": {
+            "$ref": "#/$defs/path"
+          },
+          "adapter": {
+            "type": "string",
+            "minLength": 1
+          },
+          "locale": {
+            "type": "string",
+            "minLength": 1
+          },
+          "role": {
+            "enum": ["source", "target"]
+          },
+          "options": {
+            "type": "object"
+          },
+          "command": {
+            "type": "string",
+            "minLength": 1
+          },
+          "args": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            },
+            "contains": {
+              "type": "string",
+              "pattern": "\\{output\\}"
+            },
+            "description": "Argument array passed without a shell; include {output} in the output-file argument."
+          },
+          "updateCommand": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false,
+        "description": "Without adapter, the checked-in and generated files are compared as plain JSON.",
+        "if": {
+          "required": ["adapter"],
+          "properties": {
+            "adapter": true
+          }
+        },
+        "then": {
+          "required": ["locale", "role"],
+          "properties": {
+            "locale": true,
+            "role": true
+          }
+        },
+        "else": {
+          "not": {
+            "anyOf": [
+              {
+                "required": ["locale"],
+                "properties": {
+                  "locale": true
+                }
+              },
+              {
+                "required": ["role"],
+                "properties": {
+                  "role": true
+                }
+              },
+              {
+                "required": ["options"],
+                "properties": {
+                  "options": true
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "catalogDirectories": {
+      "type": "array",
+      "description": "Directories whose catalog files must all be declared by the plan (checks, TMS targets, or generated entries).",
+      "items": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": {
+            "$ref": "#/$defs/path"
+          },
+          "extension": {
+            "type": "string",
+            "pattern": "^\\.[^/\\\\]+$",
+            "default": ".json"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false,
+  "anyOf": [
+    {
+      "required": ["tmsConfig"],
+      "properties": {
+        "tmsConfig": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "properties": {
+        "checks": {
+          "type": "array",
+          "minItems": 1
+        }
+      }
+    },
+    {
+      "required": ["generated"],
+      "properties": {
+        "generated": {
+          "type": "array",
+          "minItems": 1
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.\\.?(/|$)).+$",
+      "description": "Repository-relative path without parent traversal."
+    },
+    "catalog": {
+      "type": "object",
+      "required": ["path", "adapter", "locale"],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "adapter": {
+          "type": "string",
+          "minLength": 1
+        },
+        "locale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "options": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

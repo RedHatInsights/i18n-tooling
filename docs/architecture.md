@@ -17,6 +17,8 @@ Framework integration, catalog serialization, and TMS-provider behavior are sepa
 ```ts
 interface CatalogAdapter {
   readonly id: string;
+  parseDocument?(content: string, context: AdapterContext): unknown;
+  serializeDocument?(document: unknown, context: AdapterContext): string;
   read(document: unknown, context: AdapterContext): Catalog;
   write(catalog: Catalog, context: AdapterContext): unknown;
 }
@@ -28,7 +30,7 @@ interface AdapterContext {
 }
 ```
 
-The normalized `Catalog` keeps message IDs, ICU patterns, descriptions, and format-specific metadata. Adapters own repository serialization; they do not own framework extraction or TMS credentials.
+The normalized `Catalog` keeps message IDs, ICU patterns, descriptions, and format-specific metadata. Adapters own repository serialization. Optional `parseDocument`/`serializeDocument` codecs handle non-JSON text files; adapters without codecs use JSON defaults. Adapters do not own framework extraction or TMS credentials.
 
 Built-in adapter IDs:
 
@@ -54,7 +56,7 @@ Install a Node package that default-exports a `CatalogAdapter`, then map the sta
 }
 ```
 
-The package is loaded at runtime by the Node CLI. Its exported `id` must match the configured ID. Adapter-specific options come from an optional JSON config file and are passed as `context.options`. The reusable workflow selects only an ID and config path; it does not dynamically choose GitHub `uses` references, package names, or shell code.
+The package is loaded at runtime by the Node CLI. Its exported `id` must match the configured ID. Adapter-specific options come from an optional JSON config file and are passed as `context.options`. Optional `parseDocument(content, context)` and `serializeDocument(document, context)` methods let adapters read and write formats such as YAML or PO; without them, the CLI uses JSON. The reusable workflow selects only an adapter ID and config path; it does not dynamically choose GitHub `uses` references or package names.
 
 Django gettext is enabled in `insights-rbac`, but there are no current PO catalogs or catalog workflow. The POC therefore introduces keyed ICU JSON instead of adding a PO conversion path. i18next, Lingui, and PO adapters remain future plugins.
 
@@ -98,7 +100,7 @@ The reusable submit and reconcile workflows use protected environment secrets fo
 
 ## Reusable workflow
 
-The GitHub workflow sets up Node.js 22+ and supports Bun or npm for dependency installation. It invokes the consumer's named validation script through `npm run`; the compiled package CLI starts on Node through its `node` shebang, while consumer-native commands retain their own toolchain. The script receives adapter ID, path, role, locale, and optional JSON config through `I18N_CATALOG_*` environment variables.
+The GitHub workflow sets up Node.js 22+ and supports Bun or npm for dependency installation. With `validation-config`, it invokes `frontend-i18n validate-project` directly; a JSON plan declares catalog paths, adapters, locale contexts, and generated-file sync commands. Each generator runs with an argument array (no shell) and writes to a temporary output path for comparison. Otherwise, the workflow retains `validation-command` through `npm run`. Simple commands can continue using adapter ID, path, role, locale, and optional JSON config through `I18N_CATALOG_*` environment variables.
 
 Workflow inputs are not interpolated into shell code, and a format adapter ID never selects a dynamic GitHub `uses` reference. Custom adapter packages must be installed and pinned by the consumer environment.
 

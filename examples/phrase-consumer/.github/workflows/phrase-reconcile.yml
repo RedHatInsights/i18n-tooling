@@ -3,6 +3,8 @@ name: Phrase reconcile
 on:
   workflow_dispatch:
 
+permissions: {}
+
 jobs:
   reconcile:
     # zizmor: ignore[unpinned-uses] -- Replace marker with a reviewed immutable SHA before adoption.

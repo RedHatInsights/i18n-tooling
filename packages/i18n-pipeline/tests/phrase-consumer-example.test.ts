@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { CatalogAdapterRegistry, checkCatalogs } from "../src/index.js";
+import { CatalogAdapterRegistry, checkCatalogs, type CatalogAdapter } from "../src/index.js";
 import {
   PhraseWorkflow,
   type PhraseBatchRecord,
@@ -194,5 +194,118 @@ describe("Phrase consumer example", () => {
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true });
     }
+  });
+
+  it("uses adapter codecs for non-JSON Phrase source and target catalogs", async () => {
+    const sourceText = "greeting = Hello {name}\n";
+    const targetText = "greeting = Bonjour {name}\n";
+    const textSourceBytes = new TextEncoder().encode(sourceText);
+    const textTargetBytes = new TextEncoder().encode(targetText);
+    const textAdapter: CatalogAdapter = {
+      id: "line-catalog",
+      parseDocument(content) {
+        const entries = Object.create(null) as Record<string, string>;
+        for (const line of content.trimEnd().split("\n")) {
+          if (!line) continue;
+          const separator = line.indexOf(" = ");
+          if (separator < 1) throw new Error("Expected id = message");
+          entries[line.slice(0, separator)] = line.slice(separator + 3);
+        }
+        return entries;
+      },
+      serializeDocument(document) {
+        const entries = document as Record<string, string>;
+        return `${Object.entries(entries)
+          .map(([id, pattern]) => `${id} = ${pattern}`)
+          .join("\n")}\n`;
+      },
+      read(document, context) {
+        const entries = document as Record<string, unknown>;
+        const messages = Object.fromEntries(
+          Object.entries(entries).map(([id, pattern]) => {
+            if (typeof pattern !== "string") throw new Error("Expected string message");
+            return [id, { pattern, metadata: {} }];
+          }),
+        );
+        return { locale: context.locale, messages };
+      },
+      write(catalog) {
+        return Object.fromEntries(
+          Object.entries(catalog.messages).map(([id, message]) => [id, message.pattern]),
+        );
+      },
+    };
+    const textConfig: PhraseWorkflowConfig = {
+      ...config,
+      sourceCatalog: {
+        ...config.sourceCatalog,
+        path: "locales/source.messages",
+        filename: "source.messages",
+        adapter: textAdapter.id,
+      },
+      targetAdapter: textAdapter.id,
+      targetLocales: [
+        { phraseLocale: "fr", repositoryLocale: "fr", outputPath: "locales/fr.messages" },
+      ],
+    };
+    const pullRequests: PhraseLocalePullRequest[] = [];
+    const phrase: PhraseWorkflowDependencies["phrase"] = {
+      async createJob() {
+        return {
+          asyncRequest: { id: "import-1", action: "IMPORT_JOB" },
+          jobs: [{ uid: "job-fr", targetLang: "fr", workflowLevel: 1, lastWorkflowLevel: 1 }],
+          unsupportedFiles: [],
+          warnings: [],
+        };
+      },
+      async waitForAsyncRequest() {},
+      async getJob() {
+        return {
+          uid: "job-fr",
+          targetLang: "fr",
+          workflowLevel: 1,
+          lastWorkflowLevel: 1,
+          status: "COMPLETED",
+          imported: true,
+          importStatus: { status: "OK", errorMessage: null },
+        };
+      },
+      async startTargetDownload() {
+        return "export-1";
+      },
+      async downloadTargetFile() {
+        return textTargetBytes;
+      },
+    };
+    const repository: PhraseWorkflowRepository = {
+      async readFile() {
+        return textSourceBytes;
+      },
+      async createOrUpdatePullRequest(input) {
+        pullRequests.push(input);
+        return "https://github.com/example/consumer/pull/2";
+      },
+    };
+    const adapters = new CatalogAdapterRegistry();
+    adapters.register(textAdapter);
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state: new MemoryState(),
+      repository,
+      catalogAdapters: adapters,
+    });
+
+    await workflow.submit({
+      repository: "example/consumer",
+      baseRef: "main",
+      sourceCommit: "def456",
+      sourceBytes: textSourceBytes,
+      config: textConfig,
+    });
+    const results = await workflow.reconcile();
+
+    expect(results[0]?.phase).toBe("pr-created");
+    expect(pullRequests[0]?.path).toBe("locales/fr.messages");
+    expect(new TextDecoder().decode(pullRequests[0]?.content)).toBe(targetText);
   });
 });

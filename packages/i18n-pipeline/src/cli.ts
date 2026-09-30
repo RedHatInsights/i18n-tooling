@@ -8,7 +8,12 @@ import {
   checkCatalogs as compareCatalogs,
   convertCatalog as convertCatalogDocument,
   createCatalogAdapterRegistry,
+  parseCatalogDocument,
+  parseCatalogValidationConfig,
+  serializeCatalogDocument,
+  validateCatalogProject,
   type AdapterContext,
+  type CatalogAdapter,
   type CatalogRole,
 } from "./index.js";
 import { GitHubPhraseRepository } from "./github-phrase-repository.js";
@@ -24,15 +29,16 @@ export interface CliOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-const ROOT_HELP = `Usage: frontend-i18n <check|validate|convert|tms|version|help> [options]
+const ROOT_HELP = `Usage: frontend-i18n <check|validate|validate-project|convert|tms|version|help> [options]
 
 Commands:
-  check     Compare source and target catalogs
-  validate  Validate one catalog's format and ICU syntax
-  convert   Convert a catalog between adapters
-  tms       Submit and reconcile translation batches
-  version   Print the package version
-  help      Show help, optionally for one command
+  check             Compare source and target catalogs
+  validate          Validate one catalog's format and ICU syntax
+  validate-project  Check configured catalogs and generated-catalog sync
+  convert           Convert a catalog between adapters
+  tms               Submit and reconcile translation batches
+  version           Print the package version
+  help              Show help, optionally for one command
 
 Use frontend-i18n <command> --help for command options.`;
 
@@ -55,6 +61,16 @@ Options:
   --role <role>   Catalog role: source or target (default: source)
   --config <path> Adapter JSON config
   -h, --help      Show this help`,
+  "validate-project": `Usage: frontend-i18n validate-project --config <path>
+
+Run configured source/target catalog checks and verify generated catalogs are current.
+The config may declare multiple adapters, native generator commands, a Phrase TMS config
+whose target locales are checked once delivered, and directories that must hold only
+declared catalogs.
+
+Options:
+  --config <path>  Catalog validation JSON config
+  -h, --help       Show this help`,
   convert: `Usage: frontend-i18n convert --source <path> --output <path> --source-adapter <id> --target-adapter <id> [options]
 
 Options:
@@ -125,6 +141,21 @@ async function readJson(path: string, label: string): Promise<unknown> {
   }
 }
 
+function parseCatalogFile(
+  content: string,
+  label: string,
+  adapter: CatalogAdapter,
+  context: AdapterContext,
+): unknown {
+  try {
+    return parseCatalogDocument(content, adapter, context);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const format = adapter.parseDocument ? `adapter "${adapter.id}" input` : "JSON";
+    throw new Error(`${label} is not valid ${format}: ${detail}`, { cause: error });
+  }
+}
+
 async function readAdapterOptions(
   cwd: string,
   configPath: string | undefined,
@@ -166,12 +197,15 @@ async function validateCatalog(
   const locale = values.locale ?? env.I18N_CATALOG_LOCALE ?? "en";
   const role = requireRole(values.role ?? env.I18N_CATALOG_ROLE ?? "source");
   const configPath = values.config ?? env.I18N_CATALOG_CONFIG;
-  const [document, options] = await Promise.all([
-    readJson(resolve(cwd, catalogPath), "Catalog"),
+  const [content, options] = await Promise.all([
+    readFile(resolve(cwd, catalogPath), "utf8"),
     readAdapterOptions(cwd, configPath),
   ]);
   const registry = await createCatalogAdapterRegistry(cwd);
-  const catalog = registry.get(adapterId).read(document, createContext(locale, role, options));
+  const adapter = registry.get(adapterId);
+  const context = createContext(locale, role, options);
+  const document = parseCatalogFile(content, "Catalog", adapter, context);
+  const catalog = adapter.read(document, context);
   stdout(
     `Validated ${messageCount(Object.keys(catalog.messages).length)} ` +
       `(adapter=${adapterId}, locale=${locale}, role=${role}).`,
@@ -210,19 +244,31 @@ async function checkCatalog(
     sourceAdapterId;
   const sourceLocale = values["source-locale"] ?? env.I18N_SOURCE_CATALOG_LOCALE ?? "en";
   const targetLocale = values["target-locale"] ?? env.I18N_TARGET_CATALOG_LOCALE ?? "und";
-  const [sourceDocument, targetDocument, sourceOptions, targetOptions] = await Promise.all([
-    readJson(resolve(cwd, sourcePath), "Source catalog"),
-    readJson(resolve(cwd, targetPath), "Target catalog"),
+  const [sourceContent, targetContent, sourceOptions, targetOptions] = await Promise.all([
+    readFile(resolve(cwd, sourcePath), "utf8"),
+    readFile(resolve(cwd, targetPath), "utf8"),
     readAdapterOptions(cwd, values["source-config"] ?? env.I18N_SOURCE_CATALOG_CONFIG),
     readAdapterOptions(cwd, values["target-config"] ?? env.I18N_TARGET_CATALOG_CONFIG),
   ]);
   const registry = await createCatalogAdapterRegistry(cwd);
-  const source = registry
-    .get(sourceAdapterId)
-    .read(sourceDocument, createContext(sourceLocale, "source", sourceOptions));
-  const target = registry
-    .get(targetAdapterId)
-    .read(targetDocument, createContext(targetLocale, "target", targetOptions));
+  const sourceAdapter = registry.get(sourceAdapterId);
+  const targetAdapter = registry.get(targetAdapterId);
+  const sourceContext = createContext(sourceLocale, "source", sourceOptions);
+  const targetContext = createContext(targetLocale, "target", targetOptions);
+  const sourceDocument = parseCatalogFile(
+    sourceContent,
+    "Source catalog",
+    sourceAdapter,
+    sourceContext,
+  );
+  const targetDocument = parseCatalogFile(
+    targetContent,
+    "Target catalog",
+    targetAdapter,
+    targetContext,
+  );
+  const source = sourceAdapter.read(sourceDocument, sourceContext);
+  const target = targetAdapter.read(targetDocument, targetContext);
   const result = compareCatalogs(source, target);
 
   const problems: string[] = [];
@@ -408,25 +454,59 @@ async function convertCatalog(
   const locale = values.locale ?? "en";
   const sourceRole = requireRole(values["source-role"] ?? "source");
   const targetRole = requireRole(values["target-role"] ?? "target");
-  const [document, sourceOptions, targetOptions] = await Promise.all([
-    readJson(resolve(cwd, sourcePath), "Source catalog"),
+  const [content, sourceOptions, targetOptions] = await Promise.all([
+    readFile(resolve(cwd, sourcePath), "utf8"),
     readAdapterOptions(cwd, values["source-config"]),
     readAdapterOptions(cwd, values["target-config"]),
   ]);
   const registry = await createCatalogAdapterRegistry(cwd);
   const sourceAdapter = registry.get(sourceAdapterId);
   const targetAdapter = registry.get(targetAdapterId);
+  const sourceContext = createContext(locale, sourceRole, sourceOptions);
+  const targetContext = createContext(locale, targetRole, targetOptions);
+  const document = parseCatalogFile(content, "Source catalog", sourceAdapter, sourceContext);
   const converted = convertCatalogDocument(
     document,
     sourceAdapter,
     targetAdapter,
-    createContext(locale, sourceRole, sourceOptions),
-    createContext(locale, targetRole, targetOptions),
+    sourceContext,
+    targetContext,
   );
+  const serialized = serializeCatalogDocument(converted, targetAdapter, targetContext);
   const absoluteOutputPath = resolve(cwd, outputPath);
   await mkdir(dirname(absoluteOutputPath), { recursive: true });
-  await writeFile(absoluteOutputPath, `${JSON.stringify(converted, null, 2)}\n`, "utf8");
+  await writeFile(absoluteOutputPath, serialized, "utf8");
   stdout(`Converted catalog from ${sourceAdapterId} to ${targetAdapterId} (locale=${locale}).`);
+}
+
+async function validateProject(
+  args: string[],
+  { cwd, stdout, stderr }: Required<Pick<CliOptions, "cwd" | "stdout" | "stderr">>,
+): Promise<boolean> {
+  const values = parseOptions(args, { config: { type: "string" } });
+  if (!values.config) throw new Error("validate-project requires --config");
+  const config = parseCatalogValidationConfig(
+    await readJson(resolve(cwd, values.config), "Catalog validation config"),
+  );
+  const registry = await createCatalogAdapterRegistry(cwd);
+  const result = await validateCatalogProject(cwd, config, registry);
+  if (result.problems.length) {
+    stderr(
+      `Catalog validation failed:\n${result.problems.map((problem) => `- ${problem}`).join("\n")}`,
+    );
+    return false;
+  }
+
+  const count = (value: number, label: string) => `${value} ${label}${value === 1 ? "" : "s"}`;
+  const pending = result.pendingTargetCount
+    ? `, ${count(result.pendingTargetCount, "pending TMS target")}`
+    : "";
+  stdout(
+    `Catalog validation passed (${count(result.sourceCount, "source")}, ` +
+      `${count(result.targetCount, "target")}, ${count(result.generatedCount, "generated catalog")}` +
+      `${pending}).`,
+  );
+  return true;
 }
 
 export async function runCli(argv: string[], options: CliOptions = {}): Promise<number> {
@@ -493,6 +573,9 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
     if (command === "validate") {
       await validateCatalog(args, { cwd, env, stdout });
       return 0;
+    }
+    if (command === "validate-project") {
+      return (await validateProject(args, { cwd, stdout, stderr })) ? 0 : 1;
     }
     if (command === "convert") {
       await convertCatalog(args, { cwd, stdout });

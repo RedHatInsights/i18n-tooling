@@ -60,5 +60,18 @@ for (const schemaFile of schemaFiles) {
     console.log("examples/phrase-consumer/.github/i18n/phrase-tms.json: valid");
   }
 
+  if (schemaName === "catalog-validation-config") {
+    const examplePath = join(
+      repositoryRoot,
+      "examples/phrase-consumer/.github/i18n/catalog-validation.json",
+    );
+    const example = JSON.parse(await readFile(examplePath, "utf8"));
+    if (!validate(example)) {
+      const errors = JSON.stringify(validate.errors ?? [], null, 2);
+      throw new Error(`Consumer catalog validation example is invalid:\n${errors}`);
+    }
+    console.log("examples/phrase-consumer/.github/i18n/catalog-validation.json: valid");
+  }
+
   console.log(`${schemaFile}: compiled; ${fixtureFiles.length} fixtures passed`);
 }

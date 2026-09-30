@@ -12,25 +12,21 @@ This example shows the consumer-owned boundary around the reusable Phrase workfl
 The checked-in example files:
 
 - [Phrase config](../examples/phrase-consumer/.github/i18n/phrase-tms.json)
+- [Catalog validation config](../examples/phrase-consumer/.github/i18n/catalog-validation.json)
 - [Manual submit caller](../examples/phrase-consumer/.github/workflows/phrase-submit.yml)
 - [Manual reconcile caller](../examples/phrase-consumer/.github/workflows/phrase-reconcile.yml)
 - [Locale PR validation caller](../examples/phrase-consumer/.github/workflows/locale-validation.yml)
 - [Locale aggregation script](../examples/phrase-consumer/scripts/assemble-locales.mjs)
 
-## Consumer validation script
+For a step-by-step adoption guide, including the traps found while piloting rbac-ui, see [consumer onboarding](consumer-onboarding.md).
 
-Ensure every application build regenerates the aggregate from the per-locale files. For a single `fr` target, add a build hook and validation script like:
+## Consumer catalog validation
 
-```json
-{
-  "scripts": {
-    "prebuild": "npm run translations:compile && npm run translations:datafile",
-    "i18n:validate": "npm run translations:extract && git diff --exit-code -- locales/translation-template.json && frontend-i18n check --source locales/translation-template.json --target src/locales/fr.json --target-locale fr && npm run build"
-  }
-}
-```
+A consumer-specific `validate-i18n.mjs` is not a general solution: this example's source glob, FormatJS commands, catalog paths, and JSON layouts are repository choices. The shared `validate-project` command moves those choices into [`catalog-validation.json`](../examples/phrase-consumer/.github/i18n/catalog-validation.json): each source and target declares its own adapter and locale, and each generated artifact declares its native generator command. The example re-runs the consumer's own `translations:*` scripts into temporary files, so it checks that extraction, English compilation, and the `data.json` aggregate are all current. It then checks compiled English against the source, and `tmsConfig` adds every Phrase target locale once its file exists. `catalogDirectories` fails on any file in `src/locales/` that the plan does not declare.
 
-Without `prebuild` (or an equivalent consumer build step), the Phrase PR changes only `src/locales/fr.json`; tracked `data.json` stays stale and the application may still ship English-only data. `npm run build` invokes `prebuild`, which recompiles English and aggregates every locale. The sample `locale-validation.yml` calls the reusable validation workflow, which installs consumer dependencies and puts `frontend-i18n` on `PATH` before running `npm run i18n:validate`. For multiple locales, check each configured target rather than only `fr`. Keep the framework-specific extraction, compilation, aggregation, and build commands in the consumer repository.
+Use the reusable workflow's `validation-config` input to run this plan instead of maintaining a custom validation script. Generator arguments are passed without a shell; `{output}` points to a temporary file. The CLI parses generated and checked-in documents with their adapter and fails on drift. Configure generators to write only to `{output}`; the validator itself never rewrites tracked catalogs. `updateCommand` only tells maintainers how to refresh a stale file.
+
+Without `prebuild` (or an equivalent consumer build step), the Phrase PR changes only `src/locales/fr.json`; tracked `data.json` stays stale and the application may still ship English-only data. `npm run build` invokes `prebuild`, which recompiles English and aggregates every locale. Extraction, compilation, and aggregate sync are checked by `validation-config`. The application build steps remain the consumer's responsibility. The example's `locale-validation.yml` calls the reusable workflow, which installs consumer dependencies and puts `frontend-i18n` on `PATH` before running `validate-project`. Target locales come from `phrase-tms.json` through `tmsConfig`; do not list them a second time. Keep framework-specific extraction, compilation, aggregation, and build commands in the consumer repository.
 
 The sample aggregation script models the important contract in rbac-ui's existing `translations:datafile` flow: compiled `translations.json` becomes `en`, per-locale files remain separate, and the generated `data.json` contains both without overwriting English. Keep an existing consumer aggregator instead of copying this script if it already provides the same behavior.
 

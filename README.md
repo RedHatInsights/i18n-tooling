@@ -15,11 +15,11 @@ HCC is the first consumer; tooling should not make every future consumer pretend
 
 ## Initial packages
 
-| Package                                     | Role                                                                                                                                                                 |
-| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@redhat-cloud-services/eslint-plugin-i18n` | ESLint rules for message IDs, source catalogs, and ICU-oriented source checks.                                                                                       |
-| `@redhat-cloud-services/i18n-pipeline`      | Node.js package with the normalized catalog model, FormatJS and keyed ICU JSON adapters, adapter plugin loading, ICU syntax validation, and the `frontend-i18n` CLI. |
-| `.github/workflows/`                        | Repository CI and reusable consumer validation.                                                                                                                      |
+| Package                                     | Role                                                                                                                                                                                             |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `@redhat-cloud-services/eslint-plugin-i18n` | ESLint rules for message IDs, source catalogs, and ICU-oriented source checks.                                                                                                                   |
+| `@redhat-cloud-services/i18n-pipeline`      | Node.js package with the normalized catalog model, FormatJS and keyed ICU JSON adapters, adapter plugin loading, adapter-owned text codecs, generated-catalog sync, and the `frontend-i18n` CLI. |
+| `.github/workflows/`                        | Repository CI and reusable consumer validation.                                                                                                                                                  |
 
 The TypeScript packages target Node.js 22+. Bun 1.3.14 manages workspace dependencies, while package code and the CLI run under Node.js. Framework extraction and compilation remain in each consumer's native tooling.
 
@@ -28,7 +28,7 @@ The TypeScript packages target Node.js 22+. Bun 1.3.14 manages workspace depende
 - ICU MessageFormat remains normative for every catalog adapter. Built-in adapters parse patterns with FormatJS's official `@formatjs/icu-messageformat-parser`.
 - Initial built-ins target FormatJS descriptor/compiled JSON and keyed ICU JSON for service errors.
 - Catalog-format adapters stay separate from TMS-provider adapters.
-- Teams extend formats through installed Node packages, stable adapter IDs, and adapter-specific JSON options. GitHub `uses` references are not dynamic.
+- Teams extend formats through installed Node packages and stable adapter IDs. Custom adapters may own text parsing/serialization and receive adapter-specific JSON options; GitHub `uses` references are not dynamic.
 - Canonical locale catalogs remain repository-owned; TMS is a translation workspace, never a runtime dependency.
 - Provider-specific Phrase/APC/webhook behavior belongs behind a future TMS-provider interface.
 - English `detail` is fallback for backend errors; the English source catalog is fallback for UI messages.
@@ -37,12 +37,12 @@ The TypeScript packages target Node.js 22+. Bun 1.3.14 manages workspace depende
 ## Terminology
 
 - **Message ID** — Stable identifier used by application code to refer to the same translatable message across locales.
-- **Locale catalog** — Repository-owned set of messages for one locale, keyed by message ID. Here, catalogs are JSON files, not ICU resource bundles.
+- **Locale catalog** — Repository-owned set of messages for one locale, keyed by message ID. Its serialized file format is adapter-defined; it is distinct from an ICU resource bundle.
 - **Source catalog** — Canonical catalog for English source messages; also the fallback for missing or unavailable translations.
 - **Target catalog** — Locale catalog containing translations of the source messages.
 - **ICU MessageFormat pattern** — Syntax for message arguments, number/date formatting, and plural/select logic. It describes how messages are formatted, not how locale data is stored.
-- **ICU resource bundle** — ICU's native locale-aware data container and lookup/fallback model. It is distinct from this repository's JSON locale catalogs.
-- **ICU message catalog** — ICU's separate POSIX-style `ucat` API. Avoid this label for our JSON catalogs.
+- **ICU resource bundle** — ICU's native locale-aware data container and lookup/fallback model. It is distinct from this repository's locale catalogs.
+- **ICU message catalog** — ICU's separate POSIX-style `ucat` API. Avoid this label for our locale catalogs.
 - **TMS (translation management system)** — Workspace for translation work; it is not a runtime dependency or source of truth.
 
 ## Repository layout
@@ -79,11 +79,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and consumer workflow 
 
 ## Shared validation workflow
 
-The reusable `i18n-validate.yml` workflow checks out tooling source at the called workflow's commit, builds the CLI and ESLint plugin, checks consumer source message IDs against the configured catalog, then runs the consumer's validation script with `frontend-i18n` available. The source glob defaults to `src/**/*.{js,jsx,ts,tsx}` and can be overridden with `source-glob`; include files that declare reusable messages too. The ESLint check rejects missing catalog entries, missing or dynamic inline IDs, and opaque descriptor expressions. Declare reusable descriptors with `defineMessages` so their IDs are checked at the definition. Consumers do not need an npm dependency on this repository, and this repository does not publish workspace packages to npm.
+The reusable `i18n-validate.yml` workflow checks out tooling source at the called workflow's commit, builds the CLI and ESLint plugin, and checks consumer source message IDs against the configured catalog. The source glob defaults to `src/**/*.{js,jsx,ts,tsx}` and can be overridden with `source-glob`; include files that declare reusable messages too. The ESLint check rejects missing catalog entries, missing or dynamic inline IDs, and opaque descriptor expressions. Declare reusable descriptors with `defineMessages` so their IDs are checked at the definition. Set `validation-config` to run `frontend-i18n validate-project` directly, including generated-catalog sync, without a consumer validation script. `validation-command` remains the backward-compatible fallback when no config is supplied. Consumers do not need an npm dependency on this repository, and this repository does not publish workspace packages to npm.
 
 ## Consumer examples
 
-`rbac-ui` keeps its native FormatJS extraction/compile script and selects the matching catalog adapter:
+To onboard a new consumer, start with the [consumer onboarding checklist](docs/consumer-onboarding.md). It is written so a person or a coding agent can follow it step by step.
+
+`rbac-ui` can declare its FormatJS extraction/compile outputs and catalog checks without a custom validation script:
 
 ```yaml
 jobs:
@@ -91,14 +93,14 @@ jobs:
     uses: RedHatInsights/i18n-tooling/.github/workflows/i18n-validate.yml@<reviewed-commit-sha>
     with:
       package-manager: bun
-      validation-command: i18n:validate # consumer script runs FormatJS extraction/compilation and frontend-i18n check
+      validation-config: .github/i18n/catalog-validation.json
       catalog-adapter: formatjs-json
       catalog-path: locales/translation-template.json
       catalog-role: source
       catalog-locale: en
 ```
 
-Replace `<reviewed-commit-sha>` with a reviewed commit SHA. The reusable workflow checks out the consumer repository and `i18n-tooling` at the exact commit of the called workflow (`job.workflow_sha`). It installs consumer dependencies with the selected package manager and the tooling workspace with Bun, builds the CLI and ESLint plugin, then lints the configured source glob against `catalog-path` before running the consumer script with `npm run` under Node.js. The rule recognizes FormatJS `formatMessage`, `defineMessage(s)`, and `<FormattedMessage>` forms; IDs must be static and present in the catalog. The consumer script can call `frontend-i18n validate` for one catalog or `frontend-i18n check` for a source/target pair; catalog settings arrive through `I18N_CATALOG_*` environment variables. Neither package needs npm publication. Pinning the reusable workflow pins the CLI and rule source too.
+Replace `<reviewed-commit-sha>` with a reviewed commit SHA. The reusable workflow checks out the consumer repository and `i18n-tooling` at the exact commit of the called workflow (`job.workflow_sha`). It installs consumer dependencies with the selected package manager and the tooling workspace with Bun, builds the CLI and ESLint plugin, then lints the configured source glob against `catalog-path`. The rule recognizes FormatJS `formatMessage`, `defineMessage(s)`, and `<FormattedMessage>` forms; IDs must be static and present in the catalog. With `validation-config`, the workflow runs the shared `validate-project` command directly. Its config names source/target files and adapters and can run native generators into temporary output files to verify checked-in catalogs are current. See the [catalog validation example](examples/phrase-consumer/.github/i18n/catalog-validation.json) and [config schema](schemas/catalog-validation-config.schema.json). Without that input, the workflow runs `validation-command` through `npm run`; simple consumers can also use `frontend-i18n validate` or `frontend-i18n check` directly with `I18N_CATALOG_*` settings. Neither package needs npm publication. Pinning the reusable workflow pins the CLI and rule source too.
 
 ## Phrase TMS round trip
 
@@ -194,7 +196,7 @@ jobs:
     uses: RedHatInsights/i18n-tooling/.github/workflows/i18n-validate.yml@<reviewed-commit-sha>
     with:
       package-manager: npm
-      validation-command: i18n:validate
+      validation-config: .github/i18n/catalog-validation.json
       catalog-adapter: icu-json
       catalog-path: i18n/en.json
       catalog-role: source
@@ -221,7 +223,12 @@ frontend-i18n convert \
   --target-adapter icu-json \
   --output i18n/en.json \
   --locale en
+
+# Run a multi-catalog plan with generated-file sync checks
+frontend-i18n validate-project --config .github/i18n/catalog-validation.json
 ```
+
+`validate-project` accepts multiple source/target pairs, with an adapter and locale for every file; the formats may differ. `tmsConfig` derives the locale checks from the Phrase config, and delivered targets are checked while missing ones count as pending. `generated` entries run a native generator into a temporary `{output}` file, without a shell, and fail when the checked-in file is stale. An entry without an adapter compares plain JSON, which covers runtime aggregates. `catalogDirectories` rejects catalog files that the plan does not declare. The validator never rewrites checked-in files. See the [package guide](packages/i18n-pipeline/README.md#generic-project-validation), the [schema](schemas/catalog-validation-config.schema.json), and the [consumer example](examples/phrase-consumer/.github/i18n/catalog-validation.json).
 
 ### Add a custom catalog adapter
 
@@ -240,6 +247,6 @@ Install a package that default-exports an object implementing `CatalogAdapter`, 
 }
 ```
 
-The plugin implements `read(document, context) -> Catalog` and `write(catalog, context) -> JSON-compatible document`. `context` provides locale, source/target role, and options from the optional JSON `catalog-config` path. The configured ID must match the plugin's exported `id`. Custom modules are installed by the consumer; workflow inputs never select package names or shell code.
+The plugin implements `read(document, context) -> Catalog` and `write(catalog, context) -> document`. Optional `parseDocument(content, context) -> document` and `serializeDocument(document, context) -> string` methods own non-JSON file formats; when omitted, the CLI uses JSON parsing and formatted JSON output. `context` provides locale, source/target role, and options from the optional JSON `catalog-config` path. The configured ID must match the plugin's exported `id`. Custom modules are installed by the consumer; workflow inputs never select package names or shell code.
 
 See [the architecture guide](docs/architecture.md) for the normalized model and the separation between framework, catalog-format, and TMS-provider integrations.

@@ -63,7 +63,7 @@ Example trigger shape:
 ```yaml
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -196,11 +196,11 @@ The connector setup needs a human-assisted authorization step. It is not the sam
 
 Keep these identities separate:
 
-| Identity | Responsibility |
-|---|---|
-| Phrase GitHub App installation | Lets Phrase read the configured repository and use the connector/APC workflow. |
-| Phrase Service Account | Lets `i18n-tooling` call TMS APIs without a human password. |
-| GitHub Actions token/app | Lets `i18n-tooling` validate and open a pull request if HCC-owned import is used. |
+| Identity                       | Responsibility                                                                    |
+| ------------------------------ | --------------------------------------------------------------------------------- |
+| Phrase GitHub App installation | Lets Phrase read the configured repository and use the connector/APC workflow.    |
+| Phrase Service Account         | Lets `i18n-tooling` call TMS APIs without a human password.                       |
+| GitHub Actions token/app       | Lets `i18n-tooling` validate and open a pull request if HCC-owned import is used. |
 
 Phrase documents Service Accounts using OAuth client credentials. A Service Account produces a `client_id` and `client_secret`; the worker exchanges them for a short-lived token, optionally restricted to the `tms` resource. Store credentials in protected CI secrets, never in a repository or developer dotfile.
 

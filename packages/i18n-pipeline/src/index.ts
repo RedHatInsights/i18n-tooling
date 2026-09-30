@@ -3,6 +3,17 @@ import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parse as parseIcuMessage } from "@formatjs/icu-messageformat-parser";
 export { checkCatalogs, type ArgumentMismatch, type CatalogCheckResult } from "./catalog-check.js";
+export { parseCatalogDocument, serializeCatalogDocument } from "./catalog-document.js";
+export {
+  parseCatalogValidationConfig,
+  validateCatalogProject,
+  type CatalogDirectory,
+  type CatalogFileReference,
+  type CatalogValidationCheck,
+  type CatalogValidationConfig,
+  type CatalogValidationResult,
+  type GeneratedCatalogCheck,
+} from "./catalog-validation.js";
 export {
   PhraseAsyncRequestError,
   PhraseApiError,
@@ -71,6 +82,8 @@ export interface Catalog {
 
 export interface CatalogAdapter {
   readonly id: string;
+  parseDocument?(content: string, context: AdapterContext): unknown;
+  serializeDocument?(document: unknown, context: AdapterContext): string;
   read(document: unknown, context: AdapterContext): Catalog;
   write(catalog: Catalog, context: AdapterContext): unknown;
 }
@@ -305,10 +318,12 @@ export async function createCatalogAdapterRegistry(
       !isRecord(adapter) ||
       typeof adapter.id !== "string" ||
       typeof adapter.read !== "function" ||
-      typeof adapter.write !== "function"
+      typeof adapter.write !== "function" ||
+      (adapter.parseDocument !== undefined && typeof adapter.parseDocument !== "function") ||
+      (adapter.serializeDocument !== undefined && typeof adapter.serializeDocument !== "function")
     ) {
       throw new TypeError(
-        `Module for catalog adapter "${adapterId}" must default-export an adapter with id, read(), and write()`,
+        `Module for catalog adapter "${adapterId}" must default-export an adapter with id, read(), write(), and optional parseDocument()/serializeDocument()`,
       );
     }
     if (adapter.id !== adapterId) {
