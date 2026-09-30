@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "tmsConfig": ".github/i18n/phrase-tms.json",
+  "checks": [
+    {
+      "source": {
+        "path": "locales/en.json",
+        "adapter": "formatjs-json",
+        "locale": "en"
+      },
+      "targets": [
+        {
+          "path": "locales/fr.json",
+          "adapter": "icu-json",
+          "locale": "fr"
+        }
+      ]
+    }
+  ],
+  "generated": [
+    {
+      "path": "locales/en.json",
+      "adapter": "formatjs-json",
+      "role": "source",
+      "locale": "en",
+      "command": "npx",
+      "args": ["formatjs", "extract", "src/*.js", "--out-file", "{output}"],
+      "updateCommand": "npm run translations:extract"
+    },
+    {
+      "path": "src/locales/data.json",
+      "command": "node",
+      "args": ["scripts/assemble-locales.mjs", "src/locales", "{output}"]
+    }
+  ],
+  "catalogDirectories": [{ "path": "src/locales" }]
+}

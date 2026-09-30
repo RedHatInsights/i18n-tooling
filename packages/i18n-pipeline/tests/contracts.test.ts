@@ -27,7 +27,10 @@ describe("repository i18n contracts", () => {
 
     expect(workflow).toContain("actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020");
     expect(workflow).toContain("bun-version: 1.3.14");
+    expect(workflow).toContain("      validation-config:");
+    expect(workflow).toContain('frontend-i18n validate-project --config "$VALIDATION_CONFIG"');
     expect(workflow).toContain('npm run "$VALIDATION_COMMAND"');
+    expect(workflow).toContain("VALIDATION_CONFIG: ${{ inputs.validation-config }}");
     expect(workflow).toContain("Build source-catalog ESLint plugin");
     expect(workflow).toContain("Lint consumer source message IDs");
     expect(workflow).toContain('--config "$TOOLING_ROOT/scripts/eslint-source.config.mjs"');
@@ -45,6 +48,16 @@ describe("repository i18n contracts", () => {
     expect(workflow).toContain("run: npm run typecheck");
     expect(workflow).toContain("run: npm run test:coverage");
     expect(workflow).toContain("run: npm run build");
+  });
+
+  it("grants read access to the reusable locale-validation caller", async () => {
+    const workflow = await readFile(
+      join(repositoryRoot, "examples/phrase-consumer/.github/workflows/locale-validation.yml"),
+      "utf8",
+    );
+
+    expect(workflow).toContain("permissions: {}\n\njobs:");
+    expect(workflow.split("    permissions:\n      contents: read")).toHaveLength(2);
   });
 
   it("calls the reusable workflow with a real repository fixture", async () => {

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "checks": [],
+  "generated": [
+    {
+      "path": "src/locales/data.json",
+      "locale": "en",
+      "command": "node",
+      "args": ["scripts/assemble-locales.mjs", "src/locales", "{output}"]
+    }
+  ]
+}

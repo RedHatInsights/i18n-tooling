@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { checkCatalogs } from "./catalog-check.js";
+import { parseCatalogDocument, serializeCatalogDocument } from "./catalog-document.js";
 import type { Catalog, CatalogAdapter, CatalogAdapterRegistry } from "./index.js";
 import {
   PhraseApiError,
@@ -353,18 +354,24 @@ export class PhraseWorkflow {
     if (!input.sourceBytes.byteLength) throw new TypeError("Source catalog must not be empty");
 
     const sourceAdapter = this.dependencies.catalogAdapters.get(input.config.sourceCatalog.adapter);
+    const sourceContext = {
+      locale: input.config.sourceCatalog.locale,
+      role: "source" as const,
+      options: input.config.sourceCatalog.options ?? {},
+    };
     let sourceDocument: unknown;
     try {
-      sourceDocument = JSON.parse(new TextDecoder().decode(input.sourceBytes)) as unknown;
+      sourceDocument = parseCatalogDocument(
+        new TextDecoder().decode(input.sourceBytes),
+        sourceAdapter,
+        sourceContext,
+      );
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      throw new PhraseWorkflowError(`Source catalog is not valid JSON: ${detail}`);
+      const format = sourceAdapter.parseDocument ? `adapter "${sourceAdapter.id}" input` : "JSON";
+      throw new PhraseWorkflowError(`Source catalog is not valid ${format}: ${detail}`);
     }
-    sourceAdapter.read(sourceDocument, {
-      locale: input.config.sourceCatalog.locale,
-      role: "source",
-      options: input.config.sourceCatalog.options ?? {},
-    });
+    sourceAdapter.read(sourceDocument, sourceContext);
     const targetAdapter = input.config.targetAdapter ?? input.config.sourceCatalog.adapter;
     this.dependencies.catalogAdapters.get(targetAdapter);
 
@@ -563,20 +570,21 @@ export class PhraseWorkflow {
     );
     let sourceCatalog: Catalog;
     try {
+      const context = {
+        locale: record.config.sourceCatalog.locale,
+        role: "source" as const,
+        options: record.config.sourceCatalog.options ?? {},
+      };
       sourceCatalog = sourceAdapter.read(
-        JSON.parse(new TextDecoder().decode(pinnedSourceBytes)) as unknown,
-        {
-          locale: record.config.sourceCatalog.locale,
-          role: "source",
-          options: record.config.sourceCatalog.options ?? {},
-        },
+        parseCatalogDocument(new TextDecoder().decode(pinnedSourceBytes), sourceAdapter, context),
+        context,
       );
     } catch {
       await this.closeBatch(
         record,
         revision,
         "failed",
-        "Pinned source catalog no longer passes JSON or adapter validation",
+        "Pinned source catalog no longer passes adapter validation",
         results,
       );
       return;
@@ -747,7 +755,7 @@ export class PhraseWorkflow {
         options: record.config.targetOptions ?? {},
       };
       const targetCatalog = targetAdapter.read(
-        JSON.parse(new TextDecoder().decode(targetBytes)) as unknown,
+        parseCatalogDocument(new TextDecoder().decode(targetBytes), targetAdapter, context),
         context,
       );
       const comparison = checkCatalogs(sourceCatalog, targetCatalog);
@@ -761,9 +769,12 @@ export class PhraseWorkflow {
         );
       }
       if (problems.length) throw new Error(problems.join("; "));
-      const serialized = JSON.stringify(targetAdapter.write(targetCatalog, context), null, 2);
-      if (serialized === undefined) throw new Error("Target adapter did not produce a JSON value");
-      return new TextEncoder().encode(`${serialized}\n`);
+      const serialized = serializeCatalogDocument(
+        targetAdapter.write(targetCatalog, context),
+        targetAdapter,
+        context,
+      );
+      return new TextEncoder().encode(serialized);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new PhraseCatalogValidationError(
