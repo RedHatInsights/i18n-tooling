@@ -41,7 +41,7 @@ const config: PhraseWorkflowConfig = {
     filename: "translation-template.json",
     adapter: "formatjs-json",
     locale: "en",
-    useProjectFileImportSettings: true,
+    importSettingsUid: "example-import-settings",
   },
   targetAdapter: "formatjs-json",
   targetLocales: [

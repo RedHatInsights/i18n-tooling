@@ -65,11 +65,11 @@
         "importSettingsUid": {
           "type": "string",
           "minLength": 1,
-          "description": "Select a reusable Phrase file-import settings object. For ICU JSON, it must enable Parse ICU messages (json.icuSubFilter). Mutually exclusive with useProjectFileImportSettings."
+          "description": "Select a reusable Phrase import-settings record for this job; sent as importSettings.uid. For ICU JSON, configure fileImportSettings.json.icuSubFilter to true. Mutually exclusive with useProjectFileImportSettings."
         },
         "useProjectFileImportSettings": {
           "type": "boolean",
-          "description": "Use the Phrase project's file-import settings instead of API defaults. For ICU JSON, enable Parse ICU messages (json.icuSubFilter) in those settings. Mutually exclusive with importSettingsUid."
+          "description": "Use the Phrase project's file-import settings for this job instead of API defaults. This is distinct from a reusable job import-settings record selected with importSettingsUid. Mutually exclusive with importSettingsUid."
         }
       },
       "additionalProperties": false

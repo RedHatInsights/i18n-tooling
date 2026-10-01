@@ -13,7 +13,7 @@
     "filename": "translation-template.json",
     "adapter": "formatjs-json",
     "locale": "en",
-    "useProjectFileImportSettings": true
+    "importSettingsUid": "replace-with-phrase-import-settings-uid"
   },
   "targetAdapter": "formatjs-json",
   "targetLocales": [
