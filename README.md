@@ -136,7 +136,9 @@ Consumer configuration follows [the Phrase TMS config schema](schemas/phrase-tms
 }
 ```
 
-Set `sourceCatalog.importSettingsUid` or `useProjectFileImportSettings` when the Phrase project requires a particular import format. `sourceCatalog.filename` defaults to the source path's basename. `project.region` selects the Platform OAuth and TMS API hosts (`eu` or `us`).
+Select Phrase import settings explicitly. If neither `sourceCatalog.importSettingsUid` nor `sourceCatalog.useProjectFileImportSettings: true` is set, Create Job uses Phrase API defaults—not the project's File Import Settings. For ICU JSON catalogs, the selected settings must enable **Parse ICU messages** (`json.icuSubFilter: true`). Enabling it in the Phrase project UI is not enough unless the job request selects those settings. The selectors are mutually exclusive. `sourceCatalog.filename` defaults to the source path's basename. `project.region` selects the Platform OAuth and TMS API hosts (`eu` or `us`).
+
+Phrase's [JSON TMS documentation](https://support.phrase.com/hc/en-us/articles/5709604147100--JSON-JavaScript-Object-Notation-TMS) says ICU parsing is skipped for segments containing inline elements. Test messages combining ICU with FormatJS rich-text tags such as `<b>` in Phrase; HTML subfilter or regex-to-tag conversion may protect tags, but do not assume ICU parsing also applies to that segment.
 
 Phrase credentials come from one of two secret sets. The CLI chooses by **which secret names are set**; it never inspects a value to guess its kind, so a value stored under the wrong name is sent with the wrong login flow and Phrase rejects it:
 

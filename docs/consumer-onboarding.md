@@ -59,9 +59,10 @@ Copy the callers from [`examples/phrase-consumer`](../examples/phrase-consumer/.
 
 - Pilot runs usually happen on a feature branch before the callers land on the default branch. Temporarily point each caller's branch guard (`if: github.ref == …`) and the submit `base-ref` at the pilot branch, and allow that branch in the `phrase-pilot` environment's deployment refs. Mark each change with `FIXME` and restore the default branch before merge.
 - Store credentials only in the protected environment. Check the `Phrase auth:` line in the job log.
-- Configure the Phrase project to translate `defaultMessage`, keep `description` as context, and parse ICU.
+- Configure the Phrase JSON import settings to translate `defaultMessage`, keep `description` as context, and enable **Parse ICU messages** (`json.icuSubFilter: true`). API-created jobs use Phrase API defaults unless the consumer config explicitly selects settings with `sourceCatalog.useProjectFileImportSettings: true` or `sourceCatalog.importSettingsUid`; enabling ICU only in the project UI is not enough. The two selectors are mutually exclusive.
+- **Inline-tag caveat:** [Phrase TMS JSON](https://support.phrase.com/hc/en-us/articles/5709604147100--JSON-JavaScript-Object-Notation-TMS) skips ICU parsing for segments containing inline elements. Test any message that combines ICU with FormatJS rich-text tags (such as `<b>...</b>`); HTML subfilter or regex-to-tag conversion may protect the tags but does not guarantee ICU parsing for that same segment. The [Strings Connector CDATA option](https://support.phrase.com/hc/en-us/articles/5709647502620-Phrase-Strings-Connector-Job-Sync) is not part of direct JSON job upload.
 
-**Done when:** submit creates jobs, reconcile opens a per-locale PR, and that PR's validation job passes.
+**Done when:** submit creates jobs with the intended Phrase import settings, reconcile opens a per-locale PR, and that PR's validation job passes.
 
 ## 7. Confirm what users actually see
 

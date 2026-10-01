@@ -64,10 +64,12 @@
         },
         "importSettingsUid": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "Select a reusable Phrase file-import settings object. For ICU JSON, it must enable Parse ICU messages (json.icuSubFilter). Mutually exclusive with useProjectFileImportSettings."
         },
         "useProjectFileImportSettings": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Use the Phrase project's file-import settings instead of API defaults. For ICU JSON, enable Parse ICU messages (json.icuSubFilter) in those settings. Mutually exclusive with importSettingsUid."
         }
       },
       "additionalProperties": false

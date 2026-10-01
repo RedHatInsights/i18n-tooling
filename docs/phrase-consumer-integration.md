@@ -5,7 +5,7 @@ This example shows the consumer-owned boundary around the reusable Phrase workfl
 ## Catalog handoff
 
 1. Keep the extracted FormatJS source committed at `locales/translation-template.json`. The submit workflow reads the catalog at the dispatched commit; it does not run framework extraction.
-2. Configure Phrase's JSON settings to translate `defaultMessage`, retain `description` as context, and enable ICU parsing. The sample config selects project file-import settings; use that only after verifying the project settings.
+2. Configure Phrase's JSON settings to translate `defaultMessage`, retain `description` as context, and enable **Parse ICU messages** (`json.icuSubFilter: true`). API-created jobs must explicitly select these settings with `sourceCatalog.useProjectFileImportSettings: true` or a configured `sourceCatalog.importSettingsUid`; otherwise Phrase uses API defaults. The sample config selects project file-import settings; verify they enable ICU before using it. [Phrase TMS JSON](https://support.phrase.com/hc/en-us/articles/5709604147100--JSON-JavaScript-Object-Notation-TMS) skips ICU parsing for segments containing inline elements, so test messages combining ICU with FormatJS tags such as `<b>...</b>`; tag protection does not guarantee ICU parsing for the same segment.
 3. Reconciliation writes one flat `id -> message string` file per repository locale, for example `src/locales/fr.json`. Do not point `outputPath` at an aggregate file such as `src/locales/data.json`.
 4. Run the consumer's native compile/aggregation and build checks on the generated locale PR. The reusable Phrase workflow validates catalog IDs and ICU arguments, but does not run application-specific build steps.
 
