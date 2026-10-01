@@ -396,12 +396,27 @@ async function runTmsCommand(
     }
     if (!sourceCommit) throw new Error("Pass --source-commit or set GITHUB_SHA");
     const sourceBytes = await readFile(resolve(options.cwd, parsed.workflow.sourceCatalog.path));
+    let submitConfig = parsed.workflow;
+    if (parsed.ensureJsonIcuImportSettings) {
+      const ensured = await phrase.ensureJsonIcuImportSettings(
+        parsed.workflow.projectUid,
+        parsed.ensureJsonIcuImportSettings.name,
+      );
+      submitConfig = {
+        ...parsed.workflow,
+        sourceCatalog: { ...parsed.workflow.sourceCatalog, importSettingsUid: ensured.uid },
+      };
+      options.stdout(
+        `Phrase job import settings ${ensured.created ? "created" : "reused"}: ` +
+          `${ensured.name} (${ensured.uid}).`,
+      );
+    }
     const batch = await workflow.submit({
       repository: repositoryName,
       baseRef,
       sourceCommit,
       sourceBytes,
-      config: parsed.workflow,
+      config: submitConfig,
       retryFailed: values["retry-failed"] === true,
     });
     const warningSummary = batch.warningCount ? `, ${batch.warningCount} import warning(s)` : "";

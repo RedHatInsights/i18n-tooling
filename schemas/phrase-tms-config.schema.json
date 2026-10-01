@@ -65,11 +65,24 @@
         "importSettingsUid": {
           "type": "string",
           "minLength": 1,
-          "description": "Select a reusable Phrase import-settings record for this job; sent as importSettings.uid. For ICU JSON, configure fileImportSettings.json.icuSubFilter to true. Mutually exclusive with useProjectFileImportSettings."
+          "description": "Select a reusable Phrase import-settings record for this job; sent as importSettings.uid. For ICU JSON, configure fileImportSettings.json.icuSubFilter to true. Mutually exclusive with useProjectFileImportSettings and ensureJsonIcuImportSettings."
+        },
+        "ensureJsonIcuImportSettings": {
+          "type": "object",
+          "required": ["name"],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Base name for the reusable ICU-enabled job import-settings record; a settings fingerprint is appended."
+            }
+          },
+          "additionalProperties": false,
+          "description": "Copy project file-import settings, select JSON explicitly, enable Parse ICU messages, then reuse an identical reusable record or create one if missing. Mutually exclusive with importSettingsUid and useProjectFileImportSettings."
         },
         "useProjectFileImportSettings": {
           "type": "boolean",
-          "description": "Use the Phrase project's file-import settings for this job instead of API defaults. This is distinct from a reusable job import-settings record selected with importSettingsUid. Mutually exclusive with importSettingsUid."
+          "description": "Use the Phrase project's file-import settings for this job instead of API defaults. This is distinct from a reusable job import-settings record selected with importSettingsUid. Mutually exclusive with importSettingsUid and ensureJsonIcuImportSettings."
         }
       },
       "additionalProperties": false

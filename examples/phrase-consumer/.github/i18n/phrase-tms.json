@@ -13,7 +13,7 @@
     "filename": "translation-template.json",
     "adapter": "formatjs-json",
     "locale": "en",
-    "importSettingsUid": "replace-with-phrase-import-settings-uid"
+    "ensureJsonIcuImportSettings": { "name": "phrase-consumer-formatjs-json-icu" }
   },
   "targetAdapter": "formatjs-json",
   "targetLocales": [

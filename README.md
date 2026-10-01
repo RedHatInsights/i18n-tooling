@@ -122,7 +122,7 @@ Consumer configuration follows [the Phrase TMS config schema](schemas/phrase-tms
     "path": "locales/translation-template.json",
     "adapter": "formatjs-json",
     "locale": "en",
-    "importSettingsUid": "<phrase-import-settings-uid>"
+    "ensureJsonIcuImportSettings": { "name": "consumer-formatjs-json-icu" }
   },
   "targetAdapter": "formatjs-json",
   "targetLocales": [
@@ -136,7 +136,7 @@ Consumer configuration follows [the Phrase TMS config schema](schemas/phrase-tms
 }
 ```
 
-For job-specific file import settings, set `sourceCatalog.importSettingsUid` to a reusable Phrase import-settings record; Create Job sends it as `importSettings: { uid }`. For ICU JSON catalogs, configure that record's `fileImportSettings.json.icuSubFilter` to `true` (**Parse ICU messages**). Do not rely on project defaults for this job-specific setting. `sourceCatalog.useProjectFileImportSettings: true` selects the project's file import settings instead, and is mutually exclusive with `importSettingsUid`; if neither is set, Create Job uses Phrase API defaults. See Phrase's [List Import Settings](https://developers.phrase.com/en/api/tms/latest/import-settings/list-import-settings), [Get Import Settings](https://developers.phrase.com/en/api/tms/latest/import-settings/get-import-settings), [Create Import Settings](https://developers.phrase.com/en/api/tms/latest/import-settings/create-import-settings), and [Create Job](https://developers.phrase.com/en/api/tms/latest/job/create-job) APIs. `sourceCatalog.filename` defaults to the source path's basename. `project.region` selects the Platform OAuth and TMS API hosts (`eu` or `us`).
+For ICU JSON jobs, set `sourceCatalog.ensureJsonIcuImportSettings.name`. On submit, the CLI copies the project's file-import defaults into a reusable job record, sets `fileFormat` to `json` and `json.icuSubFilter` to `true` (**Parse ICU messages**), then reuses an identical record or creates one if missing. The returned UID is sent to Create Job as `importSettings: { uid }`; later jobs reuse the same record. For a record provisioned separately, set `sourceCatalog.importSettingsUid`. `sourceCatalog.useProjectFileImportSettings: true` directly selects project defaults and is a distinct, mutually exclusive option. See Phrase's [List Import Settings](https://developers.phrase.com/en/api/tms/latest/import-settings/list-import-settings), [Get Import Settings](https://developers.phrase.com/en/api/tms/latest/import-settings/get-import-settings), [Create Import Settings](https://developers.phrase.com/en/api/tms/latest/import-settings/create-import-settings), and [Create Job](https://developers.phrase.com/en/api/tms/latest/job/create-job) APIs. `sourceCatalog.filename` defaults to the source path's basename. `project.region` selects the Platform OAuth and TMS API hosts (`eu` or `us`).
 
 Phrase's [JSON TMS documentation](https://support.phrase.com/hc/en-us/articles/5709604147100--JSON-JavaScript-Object-Notation-TMS) says ICU parsing is skipped for segments containing inline elements. Test messages combining ICU with FormatJS rich-text tags such as `<b>` in Phrase; HTML subfilter or regex-to-tag conversion may protect tags, but do not assume ICU parsing also applies to that segment.
 

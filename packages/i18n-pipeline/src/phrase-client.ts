@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export type PhraseRegion = "eu" | "us";
 
 /** Phrase Platform Service Account credentials (OAuth 2.0 client credentials). */
@@ -42,6 +44,21 @@ export interface CreatePhraseJobInput {
   targetLangs: string[];
   importSettingsUid?: string;
   useProjectFileImportSettings?: boolean;
+}
+
+export interface PhraseImportSettingsSummary {
+  uid: string;
+  name: string;
+}
+
+export interface PhraseImportSettingsRecord extends PhraseImportSettingsSummary {
+  fileImportSettings: Record<string, unknown>;
+}
+
+export interface PhraseImportSettingsPage {
+  content: PhraseImportSettingsSummary[];
+  pageNumber: number;
+  totalPages: number;
 }
 
 export interface PhraseJobPart {
@@ -119,6 +136,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
 function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -190,6 +219,185 @@ export class PhraseClient {
     this.maxRetries = options.maxRetries ?? 2;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 60_000;
     this.authMethod = serviceAccount ? "service-account" : "platform-api-token";
+  }
+
+  async getProjectImportSettings(projectUid: string): Promise<Record<string, unknown>> {
+    if (!nonEmptyString(projectUid)) throw new TypeError("Phrase project UID is required");
+    const response = await this.apiRequest(
+      `/api2/v1/projects/${encodeURIComponent(projectUid)}/importSettings`,
+      { method: "GET", headers: { Accept: "application/json" } },
+      true,
+    );
+    const value: unknown = await response.json();
+    if (!isRecord(value)) {
+      throw new PhraseApiError("Phrase returned invalid project import settings", response.status);
+    }
+    return value;
+  }
+
+  async listImportSettings(pageNumber: number, pageSize = 50): Promise<PhraseImportSettingsPage> {
+    if (!Number.isInteger(pageNumber) || pageNumber < 0) {
+      throw new TypeError("Phrase import-settings page number must be a non-negative integer");
+    }
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 50) {
+      throw new TypeError("Phrase import-settings page size must be between 1 and 50");
+    }
+    const query = new URLSearchParams({
+      pageNumber: String(pageNumber),
+      pageSize: String(pageSize),
+    });
+    const response = await this.apiRequest(
+      `/api2/v1/importSettings?${query}`,
+      { method: "GET", headers: { Accept: "application/json" } },
+      true,
+    );
+    const value: unknown = await response.json();
+    if (!isRecord(value) || !Array.isArray(value.content)) {
+      throw new PhraseApiError("Phrase returned invalid import-settings list", response.status);
+    }
+    const content = value.content.map((entry) => {
+      if (!isRecord(entry) || !nonEmptyString(entry.uid) || !nonEmptyString(entry.name)) {
+        throw new PhraseApiError(
+          "Phrase returned an invalid import-settings summary",
+          response.status,
+        );
+      }
+      return { uid: entry.uid, name: entry.name };
+    });
+    const totalPages =
+      typeof value.totalPages === "number" && Number.isInteger(value.totalPages)
+        ? value.totalPages
+        : pageNumber + (content.length === pageSize ? 2 : 1);
+    return { content, pageNumber, totalPages };
+  }
+
+  async getImportSettings(uid: string): Promise<PhraseImportSettingsRecord> {
+    if (!nonEmptyString(uid)) throw new TypeError("Phrase import-settings UID is required");
+    const response = await this.apiRequest(
+      `/api2/v1/importSettings/${encodeURIComponent(uid)}`,
+      { method: "GET", headers: { Accept: "application/json" } },
+      true,
+    );
+    const value: unknown = await response.json();
+    if (
+      !isRecord(value) ||
+      !nonEmptyString(value.uid) ||
+      !nonEmptyString(value.name) ||
+      !isRecord(value.fileImportSettings)
+    ) {
+      throw new PhraseApiError("Phrase returned invalid import settings", response.status);
+    }
+    return {
+      uid: value.uid,
+      name: value.name,
+      fileImportSettings: value.fileImportSettings,
+    };
+  }
+
+  async createImportSettings(
+    name: string,
+    fileImportSettings: Record<string, unknown>,
+  ): Promise<PhraseImportSettingsRecord> {
+    if (!nonEmptyString(name)) throw new TypeError("Phrase import-settings name is required");
+    const response = await this.apiRequest(
+      "/api2/v1/importSettings",
+      {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({ name, fileImportSettings }),
+      },
+      false,
+      true,
+    );
+    const value: unknown = await response.json();
+    if (!isRecord(value) || !nonEmptyString(value.uid)) {
+      throw new PhraseApiError(
+        "Phrase returned an invalid import-settings creation response",
+        response.status,
+        true,
+      );
+    }
+    return this.getImportSettings(value.uid);
+  }
+
+  async ensureJsonIcuImportSettings(
+    projectUid: string,
+    name: string,
+  ): Promise<{ uid: string; name: string; created: boolean }> {
+    if (!nonEmptyString(name)) throw new TypeError("Phrase import-settings name is required");
+    const projectSettings = await this.getProjectImportSettings(projectUid);
+    const fileImportSettings: Record<string, unknown> = {
+      ...projectSettings,
+      fileFormat: "json",
+      json: {
+        ...(isRecord(projectSettings.json) ? projectSettings.json : {}),
+        icuSubFilter: true,
+      },
+    };
+    const fingerprint = createHash("sha256")
+      .update(stableJson({ projectUid, fileImportSettings }))
+      .digest("hex")
+      .slice(0, 12);
+    const profileName = `${name} ${fingerprint}`;
+    if (profileName.length > 255) {
+      throw new TypeError("Phrase import-settings name must be at most 243 characters");
+    }
+
+    const findMatchingSettings = async (): Promise<{
+      matching?: PhraseImportSettingsRecord;
+      nameCollision: boolean;
+    }> => {
+      let pageNumber = 0;
+      let totalPages = 1;
+      let nameCollision = false;
+      while (pageNumber < totalPages) {
+        const page = await this.listImportSettings(pageNumber);
+        totalPages = page.totalPages;
+        for (const summary of page.content) {
+          let settings: PhraseImportSettingsRecord;
+          try {
+            settings = await this.getImportSettings(summary.uid);
+          } catch (error) {
+            if (error instanceof PhraseApiError && error.status === 404) continue;
+            throw error;
+          }
+          if (stableJson(settings.fileImportSettings) === stableJson(fileImportSettings)) {
+            return { matching: settings, nameCollision };
+          }
+          if (settings.name === profileName) nameCollision = true;
+        }
+        pageNumber += 1;
+      }
+      return { nameCollision };
+    };
+
+    const existing = await findMatchingSettings();
+    if (existing.matching) {
+      return { uid: existing.matching.uid, name: existing.matching.name, created: false };
+    }
+    if (existing.nameCollision) {
+      throw new Error(
+        `Phrase import-settings profile "${profileName}" exists with different settings`,
+      );
+    }
+
+    let created: PhraseImportSettingsRecord;
+    try {
+      created = await this.createImportSettings(profileName, fileImportSettings);
+    } catch (error) {
+      // A lost POST response may still have created the record. Find it before allowing a retry.
+      const recovered = await findMatchingSettings();
+      if (recovered.matching) {
+        return { uid: recovered.matching.uid, name: recovered.matching.name, created: false };
+      }
+      throw error;
+    }
+    if (stableJson(created.fileImportSettings) !== stableJson(fileImportSettings)) {
+      throw new Error(
+        `Phrase import-settings profile "${profileName}" did not retain the requested settings`,
+      );
+    }
+    return { uid: created.uid, name: created.name, created: true };
   }
 
   async createJob(input: CreatePhraseJobInput): Promise<PhraseJobCreation> {

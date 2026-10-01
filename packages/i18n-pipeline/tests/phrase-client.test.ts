@@ -2,6 +2,115 @@ import { describe, expect, it } from "vitest";
 import { PhraseClient, PhraseAsyncRequestError, phraseEndpoints } from "../src/phrase-client.js";
 
 describe("PhraseClient", () => {
+  it("creates a reusable JSON ICU import profile from project defaults", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const projectDefaults = {
+      fileFormat: "auto-detect",
+      json: { contextNotePath: "description", icuSubFilter: false },
+      inputCharset: "UTF-8",
+    };
+    const expectedSettings = {
+      ...projectDefaults,
+      fileFormat: "json",
+      json: { contextNotePath: "description", icuSubFilter: true },
+    };
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      calls.push({ url, init });
+      if (url.endsWith("/idm/oauth/token")) {
+        return new Response(JSON.stringify({ access_token: "short-lived-jwt", expires_in: 3600 }));
+      }
+      if (url.endsWith("/projects/project-uid/importSettings")) {
+        return new Response(JSON.stringify(projectDefaults));
+      }
+      if (url.includes("/api2/v1/importSettings?pageNumber=0&pageSize=50")) {
+        return new Response(JSON.stringify({ content: [], pageNumber: 0, totalPages: 0 }));
+      }
+      if (url.endsWith("/api2/v1/importSettings") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as {
+          name: string;
+          fileImportSettings: Record<string, unknown>;
+        };
+        expect(body.fileImportSettings).toEqual(expectedSettings);
+        expect(body.name).toMatch(/^consumer-formatjs-icu [0-9a-f]{12}$/);
+        return new Response(JSON.stringify({ uid: "new-settings" }), { status: 201 });
+      }
+      if (url.endsWith("/api2/v1/importSettings/new-settings")) {
+        const create = calls.find(
+          (call) => call.url.endsWith("/api2/v1/importSettings") && call.init?.method === "POST",
+        );
+        const body = JSON.parse(String(create?.init?.body)) as { name: string };
+        return new Response(
+          JSON.stringify({
+            uid: "new-settings",
+            name: body.name,
+            fileImportSettings: expectedSettings,
+          }),
+        );
+      }
+      throw new Error(`Unexpected Phrase request ${url}`);
+    };
+    const client = new PhraseClient({ platformApiToken: "platform-token", region: "eu", fetch });
+
+    const result = await client.ensureJsonIcuImportSettings("project-uid", "consumer-formatjs-icu");
+
+    expect(result).toMatchObject({ uid: "new-settings", created: true });
+    expect(calls.map((call) => call.init?.method ?? "GET")).toEqual([
+      "POST",
+      "GET",
+      "GET",
+      "POST",
+      "GET",
+    ]);
+  });
+
+  it("reuses an existing reusable import profile when its settings match", async () => {
+    const projectDefaults = {
+      fileFormat: "json",
+      json: { contextNotePath: "description", icuSubFilter: false },
+    };
+    const expectedSettings = {
+      ...projectDefaults,
+      json: { contextNotePath: "description", icuSubFilter: true },
+    };
+    const calls: string[] = [];
+    const fetch: typeof globalThis.fetch = async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      calls.push(url);
+      if (url.endsWith("/idm/oauth/token")) {
+        return new Response(JSON.stringify({ access_token: "short-lived-jwt", expires_in: 3600 }));
+      }
+      if (url.endsWith("/projects/project-uid/importSettings")) {
+        return new Response(JSON.stringify(projectDefaults));
+      }
+      if (url.includes("/api2/v1/importSettings?pageNumber=0&pageSize=50")) {
+        return new Response(
+          JSON.stringify({
+            content: [{ uid: "existing-settings", name: "legacy-profile" }],
+            pageNumber: 0,
+            totalPages: 1,
+          }),
+        );
+      }
+      if (url.endsWith("/api2/v1/importSettings/existing-settings")) {
+        return new Response(
+          JSON.stringify({
+            uid: "existing-settings",
+            name: "legacy-profile",
+            fileImportSettings: expectedSettings,
+          }),
+        );
+      }
+      throw new Error(`Unexpected Phrase request ${url}`);
+    };
+    const client = new PhraseClient({ platformApiToken: "platform-token", region: "eu", fetch });
+
+    const result = await client.ensureJsonIcuImportSettings("project-uid", "consumer-formatjs-icu");
+
+    expect(result).toEqual({ uid: "existing-settings", name: "legacy-profile", created: false });
+    expect(calls.some((url) => url.endsWith("/api2/v1/importSettings"))).toBe(false);
+  });
+
   it("exchanges a Platform API token and uploads the source catalog as a job", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const fetch: typeof globalThis.fetch = async (input, init) => {

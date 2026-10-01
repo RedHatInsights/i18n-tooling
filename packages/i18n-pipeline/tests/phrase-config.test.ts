@@ -41,6 +41,28 @@ describe("Phrase TMS config parser", () => {
     });
   });
 
+  it("parses the ICU import-settings ensure profile from the consumer example", async () => {
+    const config = parsePhraseTmsConfig(
+      await readJsonFixture("../../../examples/phrase-consumer/.github/i18n/phrase-tms.json"),
+    );
+    expect(config.ensureJsonIcuImportSettings).toEqual({
+      name: "phrase-consumer-formatjs-json-icu",
+    });
+  });
+
+  it("rejects combining import-settings ensure with an explicit selector", () => {
+    expect(() =>
+      parsePhraseTmsConfig({
+        ...minimalConfig,
+        sourceCatalog: {
+          ...minimalConfig.sourceCatalog,
+          importSettingsUid: "existing-settings",
+          ensureJsonIcuImportSettings: { name: "json-icu" },
+        },
+      }),
+    ).toThrow(/mutually exclusive/);
+  });
+
   it.each(["./locales/en.json", "locales//en.json", "locales/en.json/", "locales/../en.json"])(
     "rejects the non-canonical source path %s",
     (path) => {

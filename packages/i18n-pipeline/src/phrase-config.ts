@@ -4,6 +4,7 @@ export interface PhraseTmsConfig {
   workflow: PhraseWorkflowConfig;
   stateBranch: string;
   stateDirectory: string;
+  ensureJsonIcuImportSettings?: { name: string };
 }
 
 export const DEFAULT_STATE_BRANCH = "i18n-tms-state";
@@ -199,6 +200,7 @@ export function parsePhraseTmsConfig(value: unknown): PhraseTmsConfig {
       "options",
       "importSettingsUid",
       "useProjectFileImportSettings",
+      "ensureJsonIcuImportSettings",
     ],
     'TMS config "sourceCatalog"',
   );
@@ -219,6 +221,34 @@ export function parsePhraseTmsConfig(value: unknown): PhraseTmsConfig {
     throw new TypeError(
       'TMS config "sourceCatalog.useProjectFileImportSettings" must be a boolean',
     );
+  }
+  const ensureJsonIcuImportSettingsConfig = optionalRecord(
+    source.ensureJsonIcuImportSettings,
+    'TMS config "sourceCatalog.ensureJsonIcuImportSettings"',
+  );
+  let ensureJsonIcuImportSettings: { name: string } | undefined;
+  if (ensureJsonIcuImportSettingsConfig) {
+    rejectUnknownKeys(
+      ensureJsonIcuImportSettingsConfig,
+      ["name"],
+      'TMS config "sourceCatalog.ensureJsonIcuImportSettings"',
+    );
+    if (importSettingsUid || source.useProjectFileImportSettings === true) {
+      throw new TypeError(
+        'TMS config "sourceCatalog.ensureJsonIcuImportSettings" is mutually exclusive with importSettingsUid and useProjectFileImportSettings',
+      );
+    }
+    if (source.adapter !== "formatjs-json") {
+      throw new TypeError(
+        'TMS config "sourceCatalog.ensureJsonIcuImportSettings" requires the formatjs-json adapter',
+      );
+    }
+    ensureJsonIcuImportSettings = {
+      name: requiredString(
+        ensureJsonIcuImportSettingsConfig.name,
+        'TMS config "sourceCatalog.ensureJsonIcuImportSettings.name"',
+      ),
+    };
   }
 
   if (!Array.isArray(root.targetLocales))
@@ -282,5 +312,10 @@ export function parsePhraseTmsConfig(value: unknown): PhraseTmsConfig {
   const stateDirectory =
     optionalString(state.directory, 'TMS config "state.directory"') ?? DEFAULT_STATE_DIRECTORY;
   validateRepoPath(stateDirectory, 'TMS config "state.directory"');
-  return { workflow, stateBranch, stateDirectory };
+  return {
+    workflow,
+    stateBranch,
+    stateDirectory,
+    ...(ensureJsonIcuImportSettings ? { ensureJsonIcuImportSettings } : {}),
+  };
 }
