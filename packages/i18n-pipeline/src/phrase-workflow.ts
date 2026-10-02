@@ -127,7 +127,7 @@ export interface PhraseSubmitInput {
   sourceCommit: string;
   sourceBytes: Uint8Array;
   config: PhraseWorkflowConfig;
-  /** Create a new Phrase job when every earlier batch for this exact source has failed. */
+  /** Create a new Phrase job for batch- or locale-level failures of this exact source. */
   retryFailed?: boolean;
 }
 
@@ -269,12 +269,18 @@ function makeBatchRecord(
   attempt: number,
   sourceDigest: string,
   now: number,
+  previousRecord?: PhraseBatchRecord,
 ): PhraseBatchRecord {
   const locales = Object.fromEntries(
-    input.config.targetLocales.map(({ phraseLocale }) => [
-      phraseLocale,
-      { phase: "pending" as const },
-    ]),
+    input.config.targetLocales.map(({ phraseLocale }) => {
+      const previousLocale = previousRecord?.locales[phraseLocale];
+      return [
+        phraseLocale,
+        previousLocale?.phase === "pr-created"
+          ? { ...previousLocale }
+          : { phase: "pending" as const },
+      ];
+    }),
   );
   return {
     schema: 1,
@@ -303,6 +309,14 @@ function localePolicy(record: PhraseBatchRecord, phraseLocale: string): LocaleCo
 function unresolvedTargets(record: PhraseBatchRecord): PhraseTargetLocale[] {
   return record.config.targetLocales.filter(
     (target) => !FINAL_LOCALE_PHASES.has(record.locales[target.phraseLocale]?.phase ?? "pending"),
+  );
+}
+
+function hasRetryableFailures(record: PhraseBatchRecord): boolean {
+  return (
+    record.phase === "failed" ||
+    (record.phase === "completed" &&
+      Object.values(record.locales).some((locale) => locale.phase === "failed"))
   );
 }
 
@@ -387,11 +401,16 @@ export class PhraseWorkflow {
     }
 
     const identity = batchIdentity(input, sourceDigest);
+    let previousFailedBatch: PhraseBatchRecord | undefined;
     for (let attempt = 0; attempt < MAX_SUBMISSION_ATTEMPTS; attempt += 1) {
       const key = batchKey(identity, attempt);
       const existing = await this.dependencies.state.readBatch(key);
-      if (!existing) return this.createSubmission(input, key, attempt, sourceDigest);
-      if (existing.record.phase === "failed" && input.retryFailed) continue;
+      if (!existing)
+        return this.createSubmission(input, key, attempt, sourceDigest, previousFailedBatch);
+      if (input.retryFailed && hasRetryableFailures(existing.record)) {
+        previousFailedBatch = existing.record;
+        continue;
+      }
       return this.resumeSubmission(existing, input.config);
     }
     throw new PhraseWorkflowError(
@@ -418,8 +437,15 @@ export class PhraseWorkflow {
     key: string,
     attempt: number,
     sourceDigest: string,
+    previousRecord?: PhraseBatchRecord,
   ): Promise<PhraseBatchRecord> {
-    const record = makeBatchRecord(input, key, attempt, sourceDigest, this.now());
+    const record = makeBatchRecord(input, key, attempt, sourceDigest, this.now(), previousRecord);
+    const targetLangs = input.config.targetLocales
+      .filter(({ phraseLocale }) => record.locales[phraseLocale]?.phase === "pending")
+      .map(({ phraseLocale }) => phraseLocale);
+    if (!targetLangs.length) {
+      throw new PhraseWorkflowError("Phrase retry has no locales left to submit", key);
+    }
     let revision: string;
     try {
       revision = await this.dependencies.state.createBatch(record);
@@ -435,7 +461,7 @@ export class PhraseWorkflow {
         projectUid: input.config.projectUid,
         filename: input.config.sourceCatalog.filename,
         sourceBytes: input.sourceBytes,
-        targetLangs: input.config.targetLocales.map((target) => target.phraseLocale),
+        targetLangs,
         ...(input.config.sourceCatalog.importSettingsUid
           ? { importSettingsUid: input.config.sourceCatalog.importSettingsUid }
           : {}),
