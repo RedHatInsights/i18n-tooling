@@ -22,7 +22,7 @@ on:
         type: string
         default: ""
       retry-failed:
-        description: Create a new Phrase job when this exact source's previous batch failed
+        description: Create a new Phrase job for failed batch or locale outcomes of this exact source
         required: false
         type: boolean
         default: false

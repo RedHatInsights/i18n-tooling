@@ -96,7 +96,7 @@ Options:
   --base-ref <branch>         PR base branch (default: branch from GITHUB_REF)
   --source-commit <sha>       Source revision (default: GITHUB_SHA)
   --config <path>             TMS JSON config path
-  --retry-failed              Create a new Phrase job if this source's last batch failed
+  --retry-failed              Retry failed locales or a failed batch for this source
   -h, --help                  Show this help
 
 The base branch defaults to the pushed or dispatched branch (GITHUB_REF=refs/heads/*).

@@ -93,6 +93,7 @@ class FakePhrase {
     lastWorkflowLevel?: number;
   }> = [{ uid: "job-fr", targetLang: "fr", workflowLevel: 1 }];
   targetBytes = new TextEncoder().encode('{"greeting":"Bonjour {name}"}');
+  readonly targetBytesByJob = new Map<string, Uint8Array>();
 
   constructor(events: string[] = []) {
     this.events = events;
@@ -140,9 +141,9 @@ class FakePhrase {
     return `export-${jobUid}`;
   }
 
-  async downloadTargetFile(_projectUid: string, _jobUid: string) {
+  async downloadTargetFile(_projectUid: string, jobUid: string, _asyncRequestId: string) {
     this.events.push("phrase:download");
-    return this.targetBytes;
+    return this.targetBytesByJob.get(jobUid) ?? this.targetBytes;
   }
 }
 
@@ -454,6 +455,99 @@ describe("PhraseWorkflow submission", () => {
     await expect(workflow.submit({ ...input, retryFailed: true })).resolves.toMatchObject({
       key: retried.key,
     });
+    expect(phrase.createJobCalls).toBe(2);
+  });
+
+  it("retries only failed locales after completion while preserving successful locale PRs", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.jobParts = [
+      { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
+      { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
+    ];
+    phrase.expectedTargetLangs = ["fr", "ja"];
+    phrase.jobStatuses.set("job-fr", "COMPLETED");
+    phrase.jobStatuses.set("job-ja", "COMPLETED");
+    phrase.targetBytesByJob.set(
+      "job-fr",
+      new TextEncoder().encode('{"greeting":"Bonjour {name}"}'),
+    );
+    phrase.targetBytesByJob.set(
+      "job-ja",
+      new TextEncoder().encode('{"greeting":"こんにちは {count}"}'),
+    );
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const input = {
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config: {
+        ...config,
+        targetLocales: [
+          ...config.targetLocales,
+          { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
+        ],
+      },
+    };
+
+    const first = await workflow.submit(input);
+    const firstResults = await workflow.reconcile();
+    const firstBatches = await state.listBatches();
+
+    expect(firstResults.map(({ phraseLocale, phase }) => [phraseLocale, phase])).toEqual([
+      ["fr", "pr-created"],
+      ["ja", "failed"],
+    ]);
+    expect(firstBatches[0]?.record.phase).toBe("completed");
+    expect(firstBatches[0]?.record.locales.fr).toMatchObject({ phase: "pr-created" });
+    expect(firstBatches[0]?.record.locales.ja).toMatchObject({ phase: "failed" });
+    expect(repository.pullRequests.map(({ path }) => path)).toEqual(["locales/fr.json"]);
+
+    const existing = await workflow.submit(input);
+    expect(existing.key).toBe(first.key);
+    expect(phrase.createJobCalls).toBe(1);
+
+    phrase.expectedTargetLangs = ["ja"];
+    phrase.jobParts = [{ uid: "job-ja-retry", targetLang: "ja", workflowLevel: 1 }];
+    phrase.jobStatuses.set("job-ja-retry", "COMPLETED");
+    phrase.targetBytesByJob.set(
+      "job-ja-retry",
+      new TextEncoder().encode('{"greeting":"こんにちは {name}"}'),
+    );
+    const retried = await workflow.submit({ ...input, retryFailed: true });
+
+    expect(retried.key).not.toBe(first.key);
+    expect(retried.attempt).toBe(1);
+    expect(retried.jobs.map(({ uid, targetLang }) => [uid, targetLang])).toEqual([
+      ["job-ja-retry", "ja"],
+    ]);
+    expect(retried.locales.fr).toMatchObject({
+      phase: "pr-created",
+      pullRequestUrl: "https://github.com/example/app/pull/42",
+    });
+    expect(retried.locales.ja).toEqual({ phase: "pending" });
+    expect(phrase.createJobCalls).toBe(2);
+
+    const retryResults = await workflow.reconcile();
+    const repeated = await workflow.submit({ ...input, retryFailed: true });
+
+    expect(retryResults.map(({ phraseLocale, phase }) => [phraseLocale, phase])).toEqual([
+      ["fr", "pr-created"],
+      ["ja", "pr-created"],
+    ]);
+    expect(repository.pullRequests.map(({ path }) => path)).toEqual([
+      "locales/fr.json",
+      "locales/ja.json",
+    ]);
+    expect(phrase.targetDownloadCalls).toBe(3);
+    expect(repeated.key).toBe(retried.key);
     expect(phrase.createJobCalls).toBe(2);
   });
 
