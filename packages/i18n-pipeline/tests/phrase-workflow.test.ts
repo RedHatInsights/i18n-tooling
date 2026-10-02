@@ -467,14 +467,10 @@ describe("PhraseWorkflow submission", () => {
     ];
     phrase.expectedTargetLangs = ["fr", "ja"];
     phrase.jobStatuses.set("job-fr", "COMPLETED");
-    phrase.jobStatuses.set("job-ja", "COMPLETED");
+    phrase.jobStatuses.set("job-ja", "CANCELLED");
     phrase.targetBytesByJob.set(
       "job-fr",
       new TextEncoder().encode('{"greeting":"Bonjour {name}"}'),
-    );
-    phrase.targetBytesByJob.set(
-      "job-ja",
-      new TextEncoder().encode('{"greeting":"こんにちは {count}"}'),
     );
     const repository = new FakeRepository();
     const workflow = new PhraseWorkflow({
@@ -546,7 +542,7 @@ describe("PhraseWorkflow submission", () => {
       "locales/fr.json",
       "locales/ja.json",
     ]);
-    expect(phrase.targetDownloadCalls).toBe(3);
+    expect(phrase.targetDownloadCalls).toBe(2);
     expect(repeated.key).toBe(retried.key);
     expect(phrase.createJobCalls).toBe(2);
   });
@@ -952,7 +948,7 @@ describe("PhraseWorkflow submission", () => {
     expect(phrase.events).toContain("phrase:export:job-step-2");
   });
 
-  it("does not open a PR when downloaded catalog fails ICU validation", async () => {
+  it("retries a validation-failed locale from the same completed Phrase job", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
     phrase.targetBytes = new TextEncoder().encode(
@@ -979,13 +975,33 @@ describe("PhraseWorkflow submission", () => {
     });
     phrase.jobStatus = "COMPLETED";
 
-    const results = await workflow.reconcile();
-    const [stored] = await state.listBatches();
+    const first = await workflow.reconcile();
+    const [failed] = await state.listBatches();
 
-    expect(results[0]?.phase).toBe("failed");
-    expect(results[0]?.reason).toContain("ICU argument mismatches");
-    expect(stored?.record.locales.fr?.phase).toBe("failed");
+    expect(first[0]?.phase).toBe("failed");
+    expect(first[0]?.reason).toContain("ICU argument mismatches");
+    expect(failed?.record.phase).toBe("completed");
+    expect(failed?.record.locales.fr?.phase).toBe("validation-failed");
     expect(repository.pullRequests).toHaveLength(0);
+
+    phrase.targetBytes = new TextEncoder().encode(
+      JSON.stringify({
+        greeting: {
+          defaultMessage: "Bonjour {name}",
+          description: "Greeting",
+        },
+      }),
+    );
+    const retried = await workflow.reconcile();
+    const [completed] = await state.listBatches();
+
+    expect(retried[0]?.phase).toBe("pr-created");
+    expect(phrase.createJobCalls).toBe(1);
+    expect(phrase.targetDownloadCalls).toBe(2);
+    expect(repository.pullRequests).toHaveLength(1);
+    expect(completed?.record.locales.fr?.phase).toBe("pr-created");
+    expect(await workflow.reconcile()).toEqual([]);
+    expect(phrase.targetDownloadCalls).toBe(2);
   });
 
   it.each([
@@ -1148,7 +1164,7 @@ describe("PhraseWorkflow submission", () => {
     expect(repository.pullRequests).toHaveLength(2);
   });
 
-  it("fails all-locales targets once another locale fails validation", async () => {
+  it("keeps all-locales targets pending while another locale has a retryable validation failure", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
     phrase.jobParts = [
@@ -1184,16 +1200,21 @@ describe("PhraseWorkflow submission", () => {
     await workflow.submit(input);
 
     const first = await workflow.reconcile();
-    expect(first.map((result) => result.phase)).toEqual(["failed", "failed"]);
-    expect(first[1]?.reason).toBe("Blocked: locale fr failed in this all-locales batch");
+    expect(first.map((result) => result.phase)).toEqual(["failed"]);
     expect((await state.listBatches())[0]?.record.phase).toBe("completed");
+    expect((await state.listBatches())[0]?.record.locales.ja?.phase).toBe("pending");
+
+    phrase.jobStatuses.set("job-ja", "COMPLETED");
+    const stillInvalid = await workflow.reconcile();
+    expect(stillInvalid.map((result) => result.phase)).toEqual(["failed", "pending"]);
+    expect((await state.listBatches())[0]?.record.locales.ja?.phase).toBe("pending");
+    expect(phrase.targetDownloadCalls).toBe(2);
 
     phrase.targetBytes = new TextEncoder().encode('{"greeting":"Bonjour {name}"}');
-    phrase.jobStatuses.set("job-ja", "COMPLETED");
     const retried = await workflow.reconcile();
 
-    expect(retried).toEqual([]);
-    expect(phrase.targetDownloadCalls).toBe(1);
+    expect(retried.map((result) => result.phase)).toEqual(["pr-created", "pr-created"]);
+    expect(phrase.targetDownloadCalls).toBe(4);
   });
 
   it("fails the batch if the pinned source revision can no longer be reproduced", async () => {
