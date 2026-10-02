@@ -99,6 +99,42 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function parserErrorLocation(error: unknown): { line: number; column: number } | undefined {
+  if (!isRecord(error) || !isRecord(error.location) || !isRecord(error.location.start)) {
+    return undefined;
+  }
+  const { line, column } = error.location.start;
+  return typeof line === "number" && typeof column === "number" ? { line, column } : undefined;
+}
+
+function readableParserError(error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  if (!/^[A-Z][A-Z0-9_]*$/.test(detail)) return detail;
+  const words = detail.toLowerCase().replaceAll("_", " ");
+  const readable = words.startsWith("expect ") ? `Expected ${words.slice(7)}` : words;
+  return `${readable.charAt(0).toUpperCase()}${readable.slice(1)} (${detail})`;
+}
+
+function icuSyntaxProblem(
+  pattern: string,
+  messageId: string,
+  adapterId: string,
+): string | undefined {
+  try {
+    parseIcuMessage(pattern);
+    return undefined;
+  } catch (error) {
+    const location = parserErrorLocation(error);
+    const locationText = location
+      ? ` at pattern line ${location.line}, column ${location.column}`
+      : "";
+    return (
+      `${adapterId} message "${messageId}" has invalid ICU syntax${locationText}: ` +
+      readableParserError(error)
+    );
+  }
+}
+
 function assertValidIcuPattern(
   pattern: unknown,
   messageId: string,
@@ -108,12 +144,14 @@ function assertValidIcuPattern(
     throw new CatalogFormatError(`${adapterId} message "${messageId}" must be a string`);
   }
 
-  try {
-    parseIcuMessage(pattern);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+  const problem = icuSyntaxProblem(pattern, messageId, adapterId);
+  if (problem) throw new CatalogFormatError(problem);
+}
+
+function throwIcuSyntaxProblems(problems: string[]): void {
+  if (problems.length) {
     throw new CatalogFormatError(
-      `${adapterId} message "${messageId}" has invalid ICU syntax: ${detail}`,
+      `ICU validation failed:\n${problems.map((problem) => `  - ${problem}`).join("\n")}`,
     );
   }
 }
@@ -127,6 +165,7 @@ export class FormatJsJsonAdapter implements CatalogAdapter {
     }
 
     const messages = Object.create(null) as Record<string, CatalogMessage>;
+    const icuProblems: string[] = [];
     for (const [messageId, rawMessage] of Object.entries(document)) {
       if (!messageId) {
         throw new CatalogFormatError("FormatJS message IDs must be non-empty strings");
@@ -143,7 +182,8 @@ export class FormatJsJsonAdapter implements CatalogAdapter {
             `FormatJS target entry "${messageId}" must be a message string or descriptor`,
           );
         }
-        assertValidIcuPattern(pattern, messageId, this.id);
+        const icuProblem = icuSyntaxProblem(pattern, messageId, this.id);
+        if (icuProblem) icuProblems.push(icuProblem);
         messages[messageId] = { pattern, metadata: {} };
         continue;
       }
@@ -158,7 +198,8 @@ export class FormatJsJsonAdapter implements CatalogAdapter {
           `FormatJS source entry "${messageId}" needs a string defaultMessage`,
         );
       }
-      assertValidIcuPattern(rawMessage.defaultMessage, messageId, this.id);
+      const icuProblem = icuSyntaxProblem(rawMessage.defaultMessage, messageId, this.id);
+      if (icuProblem) icuProblems.push(icuProblem);
 
       const description = rawMessage.description;
       if (description !== undefined && typeof description !== "string" && !isRecord(description)) {
@@ -175,6 +216,7 @@ export class FormatJsJsonAdapter implements CatalogAdapter {
       };
     }
 
+    throwIcuSyntaxProblems(icuProblems);
     return { locale: context.locale, messages };
   }
 
@@ -213,6 +255,7 @@ export class IcuJsonAdapter implements CatalogAdapter {
     }
 
     const messages = Object.create(null) as Record<string, CatalogMessage>;
+    const icuProblems: string[] = [];
     for (const [messageId, pattern] of Object.entries(document)) {
       if (!messageId) {
         throw new CatalogFormatError("ICU JSON message IDs must be non-empty strings");
@@ -220,10 +263,12 @@ export class IcuJsonAdapter implements CatalogAdapter {
       if (typeof pattern !== "string") {
         throw new CatalogFormatError(`ICU JSON entry "${messageId}" must be a message string`);
       }
-      assertValidIcuPattern(pattern, messageId, this.id);
+      const icuProblem = icuSyntaxProblem(pattern, messageId, this.id);
+      if (icuProblem) icuProblems.push(icuProblem);
       messages[messageId] = { pattern, metadata: {} };
     }
 
+    throwIcuSyntaxProblems(icuProblems);
     return { locale: context.locale, messages };
   }
 

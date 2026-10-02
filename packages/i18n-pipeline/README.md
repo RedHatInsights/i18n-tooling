@@ -11,7 +11,7 @@ The reusable workflow builds the CLI from this source; consumers do not need an 
 | `formatjs-json` | FormatJS descriptors: `{ "id": { "defaultMessage": "...", "description": "..." } }` | Flat compiled messages: `{ "id": "..." }` |
 | `icu-json`      | Flat message-code-to-ICU-pattern JSON                                               | Flat message-code-to-ICU-pattern JSON     |
 
-The FormatJS adapter retains string/object descriptions and other descriptor metadata. Both built-ins validate ICU syntax with FormatJS's `@formatjs/icu-messageformat-parser`; consumers should also run native framework compilation and validation.
+The FormatJS adapter retains string/object descriptions and other descriptor metadata. Both built-ins validate ICU syntax with FormatJS's `@formatjs/icu-messageformat-parser`; consumers should also run native framework compilation and validation. ICU failure reports list each malformed message ID, its line and column within the pattern, and a readable parser diagnostic.
 
 ## CLI
 
