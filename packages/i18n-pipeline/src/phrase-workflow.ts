@@ -46,7 +46,8 @@ export interface PhraseWorkflowConfig {
  */
 export type PhraseBatchPhase =
   "creating" | "unknown" | "importing" | "ready" | "completed" | "failed" | "superseded";
-export type PhraseLocalePhase = "pending" | "exporting" | "failed" | "pr-created";
+export type PhraseLocalePhase =
+  "pending" | "exporting" | "failed" | "validation-failed" | "pr-created";
 
 export interface PhraseBatchRecord {
   schema: 1;
@@ -316,10 +317,23 @@ function hasRetryableFailures(record: PhraseBatchRecord): boolean {
   return (
     record.phase === "failed" ||
     (record.phase === "completed" &&
-      Object.values(record.locales).some((locale) => locale.phase === "failed"))
+      Object.values(record.locales).some(
+        (locale) => locale.phase === "failed" || locale.phase === "validation-failed",
+      ))
   );
 }
 
+function needsReconciliation(record: PhraseBatchRecord): boolean {
+  return (
+    RECONCILABLE_PHASES.has(record.phase) ||
+    (record.phase === "completed" &&
+      Object.values(record.locales).some((locale) => locale.phase === "validation-failed"))
+  );
+}
+
+function hasValidationFailure(record: PhraseBatchRecord): boolean {
+  return Object.values(record.locales).some((locale) => locale.phase === "validation-failed");
+}
 function assessReadiness(jobs: PhraseJobPart[]): LocaleReadiness {
   const finalLevel = Math.max(...jobs.map((job) => job.lastWorkflowLevel ?? job.workflowLevel));
   const finalJobs = jobs.filter((job) => job.workflowLevel === finalLevel);
@@ -423,7 +437,7 @@ export class PhraseWorkflow {
     for (const key of await this.dependencies.state.listBatchKeys()) {
       try {
         const stored = await this.dependencies.state.readBatch(key);
-        if (!stored || !RECONCILABLE_PHASES.has(stored.record.phase)) continue;
+        if (!stored || !needsReconciliation(stored.record)) continue;
         await this.reconcileBatch(stored, results);
       } catch (error) {
         results.push({ batchKey: key, phase: "retrying", reason: safeFailureReason(error) });
@@ -648,9 +662,11 @@ export class PhraseWorkflow {
         record.locales[target.phraseLocale]?.phase === "pr-created" ||
         readiness.get(target.phraseLocale)?.phase === "ready",
     );
+    const wasValidationRetry = hasValidationFailure(record);
+    if (wasValidationRetry) record.phase = "ready";
     for (const target of record.config.targetLocales) {
       // closeBatch may have run for an earlier locale even if persisting it then failed.
-      if (record.phase !== "ready") return;
+      if (record.phase !== "ready" && !(wasValidationRetry && record.phase === "completed")) return;
       const push = (result: Omit<PhraseReconcileResult, "batchKey" | "phraseLocale">) =>
         results.push({ batchKey: record.key, phraseLocale: target.phraseLocale, ...result });
       const failLocale = async (reason: string) => {
@@ -661,28 +677,43 @@ export class PhraseWorkflow {
 
       const existingLocale = record.locales[target.phraseLocale];
       if (existingLocale?.phase === "pr-created") {
-        push({
-          phase: "pr-created",
-          ...(existingLocale.pullRequestUrl
-            ? { pullRequestUrl: existingLocale.pullRequestUrl }
-            : {}),
-        });
+        if (!wasValidationRetry) {
+          push({
+            phase: "pr-created",
+            ...(existingLocale.pullRequestUrl
+              ? { pullRequestUrl: existingLocale.pullRequestUrl }
+              : {}),
+          });
+        }
         continue;
       }
       // Failed locales were reported by the run that failed them; do not fail every later run.
       if (existingLocale?.phase === "failed") continue;
+      if (existingLocale?.phase === "validation-failed") {
+        // The translator may have corrected the Phrase job since the previous export.
+        record.locales[target.phraseLocale] = { phase: "pending" };
+      }
 
       const ready = readiness.get(target.phraseLocale);
       if (ready?.phase === "failed") {
         await failLocale(ready.reason);
+        if (wasValidationRetry) record.phase = "completed";
         continue;
       }
       if (localePolicy(record, target.phraseLocale) === "all-locales") {
+        const validationFailedLocale = Object.entries(record.locales).find(
+          ([, locale]) => locale.phase === "validation-failed",
+        )?.[0];
+        if (validationFailedLocale) {
+          push({ phase: "pending" });
+          continue;
+        }
         const failedLocale = Object.entries(record.locales).find(
           ([, locale]) => locale.phase === "failed",
         )?.[0];
         if (failedLocale) {
           await failLocale(`Blocked: locale ${failedLocale} failed in this all-locales batch`);
+          if (wasValidationRetry) record.phase = "completed";
           continue;
         }
         if (!allLocalesReady) {
@@ -743,12 +774,26 @@ export class PhraseWorkflow {
         const permanent =
           error instanceof PhraseCatalogValidationError ||
           (error instanceof PhraseRepositoryError && error.permanent);
-        if (permanent) await failLocale(error.message);
+        if (error instanceof PhraseCatalogValidationError) {
+          record.locales[target.phraseLocale] = {
+            phase: "validation-failed",
+            failureReason: error.message,
+          };
+          record.phase = "completed";
+          revision = await this.dependencies.state.updateBatch(record, revision);
+          push({ phase: "failed", reason: error.message });
+        } else if (permanent) await failLocale(error.message);
         else push({ phase: "retrying", reason: safeFailureReason(error) });
       }
     }
 
-    if (!unresolvedTargets(record).length) {
+    if (
+      !hasValidationFailure(record) &&
+      record.config.targetLocales.every((target) => {
+        const phase = record.locales[target.phraseLocale]?.phase;
+        return phase === "pr-created" || phase === "failed";
+      })
+    ) {
       record.phase = "completed";
       await this.dependencies.state.updateBatch(record, revision);
     }
