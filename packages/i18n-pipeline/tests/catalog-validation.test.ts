@@ -216,6 +216,40 @@ describe("catalog project validation", () => {
     expect(errors[0]).toContain('argument mismatch for "greeting": source [name], target [user]');
   });
 
+  it("reports every invalid ICU message with a location and readable parser detail", async () => {
+    await createProject();
+    await writeFile(
+      join(projectRoot!, "locales/en.json"),
+      JSON.stringify({
+        greeting: { defaultMessage: "Hello {name" },
+        items: { defaultMessage: "{count, plural, one {# item}}" },
+      }),
+    );
+
+    const result = await runValidation({
+      version: 1,
+      checks: [
+        {
+          source: { path: "locales/en.json", adapter: "formatjs-json", locale: "en" },
+          targets: [],
+        },
+      ],
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors[0]).toContain(
+      'Source catalog "locales/en.json" failed adapter validation',
+    );
+    expect(result.errors[0]).toContain(
+      '  - formatjs-json message "greeting" has invalid ICU syntax at pattern line 1, column 7: ' +
+        "Expected argument closing brace (EXPECT_ARGUMENT_CLOSING_BRACE)",
+    );
+    expect(result.errors[0]).toContain(
+      '  - formatjs-json message "items" has invalid ICU syntax at pattern line 1, column 29: ' +
+        "Missing other clause (MISSING_OTHER_CLAUSE)",
+    );
+  });
+
   it("reports generated catalogs that differ from the generator output", async () => {
     await createProject();
     await writeFile(join(projectRoot!, "locales/fr.messages"), "greeting = Salut {name}\n");

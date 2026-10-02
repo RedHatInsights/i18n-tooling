@@ -59,6 +59,42 @@ describe("frontend-i18n CLI", () => {
     expect(errors).toEqual([]);
   });
 
+  it("reports all ICU syntax errors with message IDs, locations, and readable details", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-icu-errors-"));
+    await mkdir(join(projectRoot, "locales"));
+    await writeFile(join(projectRoot, "package.json"), "{}\n");
+    await writeFile(
+      join(projectRoot, "locales/fr.json"),
+      JSON.stringify({
+        greeting: "Hello {name",
+        items: "{count, plural, one {# item}}",
+      }),
+    );
+    const output: string[] = [];
+    const errors: string[] = [];
+
+    const exitCode = await runCli(
+      ["validate", "--catalog", "locales/fr.json", "--adapter", "icu-json", "--locale", "fr"],
+      {
+        cwd: projectRoot,
+        env: {},
+        stdout: (message) => output.push(message),
+        stderr: (message) => errors.push(message),
+      },
+    );
+
+    expect(exitCode).toBe(1);
+    expect(output).toEqual([]);
+    expect(errors).toEqual([
+      'Catalog validation failed for "locales/fr.json":\n' +
+        "ICU validation failed:\n" +
+        '  - icu-json message "greeting" has invalid ICU syntax at pattern line 1, column 7: ' +
+        "Expected argument closing brace (EXPECT_ARGUMENT_CLOSING_BRACE)\n" +
+        '  - icu-json message "items" has invalid ICU syntax at pattern line 1, column 29: ' +
+        "Missing other clause (MISSING_OTHER_CLAUSE)",
+    ]);
+  });
+
   it("converts a FormatJS source catalog through the shared adapter model", async () => {
     projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-convert-"));
     await mkdir(join(projectRoot, "locales"));

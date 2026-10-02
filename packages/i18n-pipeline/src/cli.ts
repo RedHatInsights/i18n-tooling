@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
+  CatalogFormatError,
   checkCatalogs as compareCatalogs,
   convertCatalog as convertCatalogDocument,
   createCatalogAdapterRegistry,
@@ -13,6 +14,7 @@ import {
   serializeCatalogDocument,
   validateCatalogProject,
   type AdapterContext,
+  type Catalog,
   type CatalogAdapter,
   type CatalogRole,
 } from "./index.js";
@@ -182,8 +184,8 @@ function messageCount(count: number): string {
 
 async function validateCatalog(
   args: string[],
-  { cwd, env, stdout }: Required<Pick<CliOptions, "cwd" | "env" | "stdout">>,
-): Promise<void> {
+  { cwd, env, stdout, stderr }: Required<Pick<CliOptions, "cwd" | "env" | "stdout" | "stderr">>,
+): Promise<boolean> {
   const values = parseOptions(args, {
     adapter: { type: "string" },
     catalog: { type: "string" },
@@ -205,11 +207,19 @@ async function validateCatalog(
   const adapter = registry.get(adapterId);
   const context = createContext(locale, role, options);
   const document = parseCatalogFile(content, "Catalog", adapter, context);
-  const catalog = adapter.read(document, context);
+  let catalog: Catalog;
+  try {
+    catalog = adapter.read(document, context);
+  } catch (error) {
+    if (!(error instanceof CatalogFormatError)) throw error;
+    stderr(`Catalog validation failed for "${catalogPath}":\n${error.message}`);
+    return false;
+  }
   stdout(
     `Validated ${messageCount(Object.keys(catalog.messages).length)} ` +
       `(adapter=${adapterId}, locale=${locale}, role=${role}).`,
   );
+  return true;
 }
 
 async function checkCatalog(
@@ -571,8 +581,7 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
       return (await checkCatalog(args, { cwd, env, stdout, stderr })) ? 0 : 1;
     }
     if (command === "validate") {
-      await validateCatalog(args, { cwd, env, stdout });
-      return 0;
+      return (await validateCatalog(args, { cwd, env, stdout, stderr })) ? 0 : 1;
     }
     if (command === "validate-project") {
       return (await validateProject(args, { cwd, stdout, stderr })) ? 0 : 1;
