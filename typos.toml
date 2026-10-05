@@ -2,6 +2,8 @@
 HCC = "HCC"
 ICU = "ICU"
 Lingui = "Lingui"
+# Ordinal suffix in selectordinal ICU test messages (e.g. #nd).
+nd = "nd"
 RBAC = "RBAC"
 RedHat = "RedHat"
 TMS = "TMS"

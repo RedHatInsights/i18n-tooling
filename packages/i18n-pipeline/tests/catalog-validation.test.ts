@@ -216,6 +216,115 @@ describe("catalog project validation", () => {
     expect(errors[0]).toContain('argument mismatch for "greeting": source [name], target [user]');
   });
 
+  it("warns about plural semantics in the source without failing validation", async () => {
+    await createProject();
+    const configPath = join(projectRoot!, "validation.json");
+    const config = JSON.parse(await readFile(configPath, "utf8")) as {
+      checks: Array<{ targets: unknown[] }>;
+      generated: unknown[];
+    };
+    config.generated = [];
+    config.checks[0]!.targets = [];
+    await writeFile(configPath, JSON.stringify(config));
+    await writeFile(
+      join(projectRoot!, "locales/en.json"),
+      JSON.stringify({
+        remove: { defaultMessage: "{count, plural, one {{name}} other {# accounts}}" },
+        items: { defaultMessage: "{count, plural, zero {None} other {# items}}" },
+      }),
+    );
+    const run = async (env: NodeJS.ProcessEnv) => {
+      const output: string[] = [];
+      const exitCode = await runCli(["validate-project", "--config", "validation.json"], {
+        cwd: projectRoot,
+        env,
+        stdout: (message) => output.push(message),
+        stderr: () => undefined,
+      });
+      return { exitCode, output };
+    };
+
+    const local = await run({});
+    expect(local.exitCode).toBe(0);
+    expect(local.output[0]).toMatch(
+      /^Catalog warnings:\n- Source catalog locales\/en.json: "items"/,
+    );
+    expect(local.output[0]).toContain('"remove": {name} appears only in the "one" branch');
+    expect(local.output.at(-1)).toContain("Catalog validation passed");
+
+    const actions = await run({ GITHUB_ACTIONS: "true" });
+    expect(actions.exitCode).toBe(0);
+    expect(
+      actions.output.filter((line) => line.startsWith("::warning title=frontend-i18n::")),
+    ).toHaveLength(2);
+  });
+
+  it("explains argument mismatches caused by plural category branches in the source", async () => {
+    await createProject();
+    await writeTmsConfig();
+    await writeFile(
+      join(projectRoot!, "locales/en.json"),
+      JSON.stringify({
+        remove: { defaultMessage: "{count, plural, one {{name}} other {# accounts}}" },
+      }),
+    );
+    await writeFile(
+      join(projectRoot!, "locales/zh-CN.json"),
+      JSON.stringify({ remove: "{count, plural, other {# 个帐户}}" }),
+    );
+    const result = await runValidation({ version: 1, tmsConfig: "phrase-tms.json", checks: [] });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors[0]).toContain(
+      'argument mismatch for "remove": source [count, name], target [count] ' +
+        '(source renders {name} only in the "one" branch of plural {count}',
+    );
+  });
+
+  it("fails on lost exact plural branches and warns about target typography", async () => {
+    await createProject();
+    await writeTmsConfig();
+    await writeFile(
+      join(projectRoot!, "locales/en.json"),
+      JSON.stringify({
+        greeting: { defaultMessage: "Hello {name}" },
+        remove: {
+          defaultMessage: "{count, plural, =1 {Remove {name}?} other {Remove # accounts?}}",
+        },
+        items: { defaultMessage: "{total, plural, =1 {one item} other {# items}}" },
+      }),
+    );
+    await writeFile(
+      join(projectRoot!, "locales/fr-icu.json"),
+      JSON.stringify({
+        greeting: "Bonjour {name} !",
+        remove: "{count, plural, =1 {Supprimer {name}\u00a0?} other {Supprimer # comptes\u00a0?}}",
+        items: "{total, plural, =1 {un article} other {# articles}}",
+      }),
+    );
+    await writeFile(
+      join(projectRoot!, "locales/zh-CN.json"),
+      JSON.stringify({
+        greeting: "你好 {name}",
+        remove: "{count, plural, other {删除 {name} # 个}}",
+        items: "{total, number} 个",
+      }),
+    );
+
+    const result = await runValidation({ version: 1, tmsConfig: "phrase-tms.json", checks: [] });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.output[0]).toContain(
+      'Target catalog locales/fr-icu.json: "greeting": a regular space precedes',
+    );
+    expect(result.errors[0]).toContain(
+      'Target catalog locales/zh-CN.json: "remove": plural {count} lost exact branch =1',
+    );
+    expect(result.errors[0]).toContain(
+      'Target catalog locales/zh-CN.json: "items": plural {total} lost exact branch =1',
+    );
+  });
+
   it("reports every invalid ICU message with a location and readable parser detail", async () => {
     await createProject();
     await writeFile(

@@ -17,6 +17,24 @@ The FormatJS adapter retains string/object descriptions and other descriptor met
 
 `check` compares source and target message IDs and named ICU arguments, including arguments nested in plural/select branches. Use `--source-adapter` and `--target-adapter` when the catalogs use different formats.
 
+`validate --role source` and `validate-project` also warn about source plural semantics that per-locale ICU validation cannot see. Warnings do not fail validation; under GitHub Actions they become annotations.
+
+- **`plural-category-only-arguments`** — an argument appears only under a CLDR category (`zero`, `one`, `two`, `few`, `many`) and never under `other`. Categories are locale grammar, not numbers: zh selects only `other`, so translation tools drop the `one` branch and its argument, and ru `one` also matches 21. Use an exact `=1` branch for content that depends on the count: `{count, plural, =1 {{name} will be removed.} other {# accounts will be removed.}}`.
+- **`unused-plural-category`** — a branch uses a category the source locale never selects, such as `zero` in English. Use `=0`.
+- **`unformatted-count-argument`** — a plural selector or count-like argument (`count`, `total`, `*Count`, …) is printed as `{count}`, which renders raw digits. Use `{count, number}` or `#` so fr renders `1 234 567`.
+
+`check`, `validate-project`, and Phrase reconciliation also check each translation against its source and target locale. Errors fail the locale; Phrase reconciliation lists warnings in the locale PR description.
+
+| Rule                             | Severity | Locales        | Finding                                                                                                                              |
+| -------------------------------- | -------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `missing-exact-plural-selector`  | error    | all            | The translation dropped a source `=N` branch.                                                                                        |
+| `plural-count-dropped`           | warning  | all            | The source `other` branch shows the count; the translation's does not. FormatJS treats `#` inside a nested `select` as literal text. |
+| `unused-plural-category`         | warning  | all            | The translation has a category its locale never selects, such as `one` in zh, ja, or ko.                                             |
+| `korean-particle-after-argument` | warning  | ko             | A bare 이/가, 은/는, 을/를, 과/와, or (으)로 follows a runtime value. Use `을(를)`-style forms or rephrase.                          |
+| `french-punctuation-space`       | warning  | fr (not fr-CA) | A regular space precedes `: ; ! ? »` or follows `«`. Use U+00A0 or U+202F.                                                           |
+
+When a target loses an argument because the source used a category branch, the mismatch error names the source branch to fix.
+
 ```bash
 frontend-i18n validate \
   --adapter formatjs-json \
