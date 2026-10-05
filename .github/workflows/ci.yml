@@ -283,6 +283,16 @@ jobs:
     permissions:
       contents: read
 
+  catalog-only-workflow-self-test:
+    name: Reusable catalog-only workflow self-test
+    uses: $/.github/workflows/i18n-validate.yml
+    with:
+      node-version: "22"
+      catalog-only: true
+      validation-config: packages/i18n-pipeline/tests/fixtures/openapi-i18n/catalog-validation.json
+    permissions:
+      contents: read
+
   markdown:
     name: Markdown lint (Node 22)
     runs-on: ubuntu-latest
@@ -414,6 +424,7 @@ jobs:
       - cli-smoke
       - schema-contracts
       - reusable-workflow-self-test
+      - catalog-only-workflow-self-test
     runs-on: ubuntu-latest
     steps:
       - name: Require every core check to succeed

@@ -1,17 +1,18 @@
 # `@redhat-cloud-services/i18n-pipeline`
 
-Node.js 22+ workspace package for repository-owned locale catalogs. It provides a normalized `Catalog` model, built-in FormatJS and keyed ICU JSON adapters, adapter-owned text codecs, ICU pattern validation, generated-catalog sync, and the `frontend-i18n` CLI.
+Node.js 22+ workspace package for repository-owned locale catalogs. It provides a normalized `Catalog` model, built-in FormatJS, keyed ICU JSON, and OpenAPI Problem Details adapters, adapter-owned text codecs, ICU pattern validation, generated-catalog sync, and the `frontend-i18n` CLI.
 
 The reusable workflow builds the CLI from this source; consumers do not need an npm dependency on this repository. This repository does not publish workspace packages to npm. Framework extraction and compilation stay with each consumer's native tooling. Catalog-format adapters normalize repository artifacts; TMS-provider adapters are a separate future seam.
 
 ## Built-in adapters
 
-| ID              | Source catalog                                                                      | Target catalog                            |
-| --------------- | ----------------------------------------------------------------------------------- | ----------------------------------------- |
-| `formatjs-json` | FormatJS descriptors: `{ "id": { "defaultMessage": "...", "description": "..." } }` | Flat compiled messages: `{ "id": "..." }` |
-| `icu-json`      | Flat message-code-to-ICU-pattern JSON                                               | Flat message-code-to-ICU-pattern JSON     |
+| ID                       | Source catalog                                                                      | Target catalog                            |
+| ------------------------ | ----------------------------------------------------------------------------------- | ----------------------------------------- |
+| `formatjs-json`          | FormatJS descriptors: `{ "id": { "defaultMessage": "...", "description": "..." } }` | Flat compiled messages: `{ "id": "..." }` |
+| `icu-json`               | Flat message-code-to-ICU-pattern JSON                                               | Flat message-code-to-ICU-pattern JSON     |
+| `openapi-problem-details` | OpenAPI 3 Problem Details schemas annotated with `x-i18n.message`                    | Source-only; convert to `icu-json`        |
 
-The FormatJS adapter retains string/object descriptions and other descriptor metadata. Both built-ins validate ICU syntax with FormatJS's `@formatjs/icu-messageformat-parser`; consumers should also run native framework compilation and validation. ICU failure reports list each malformed message ID, its line and column within the pattern, and a readable parser diagnostic.
+The FormatJS adapter retains string/object descriptions and other descriptor metadata. The JSON adapters validate ICU syntax with FormatJS's `@formatjs/icu-messageformat-parser`; the OpenAPI adapter also parses ICU arguments and checks them against the schema. Consumers should run native framework compilation and validation where applicable. ICU failure reports list each malformed message ID, its line and column within the pattern, and a readable parser diagnostic.
 
 ## CLI
 
@@ -53,7 +54,17 @@ frontend-i18n convert \
   --target-adapter icu-json \
   --output i18n/en.json \
   --locale en
+
+frontend-i18n convert \
+  --source docs/source/specs/v2/openapi.yaml \
+  --source-adapter openapi-problem-details \
+  --target-adapter icu-json \
+  --output i18n/en.json \
+  --locale en \
+  --target-role source
 ```
+
+The OpenAPI adapter reads OpenAPI 3 JSON or YAML. It extracts component schemas whose required `code` property has a single string `const`/`enum` and an `x-i18n: { message: "..." }` extension. The schema must also require a typed object `params`; every ICU argument must name a required property in that object. Local component `$ref`s and `allOf` composition are supported. The adapter is source-only and intended for contracts generated from a higher-level source such as TypeSpec.
 
 `validate` also reads `I18N_CATALOG_ADAPTER`, `I18N_CATALOG_PATH`, `I18N_CATALOG_ROLE`, `I18N_CATALOG_LOCALE`, and `I18N_CATALOG_CONFIG`, which lets the reusable workflow pass settings without building shell commands from inputs.
 
@@ -103,7 +114,7 @@ Use `frontend-i18n validate-project --config <path>` for a repository-wide valid
 - **`generated`** runs its configured executable with an argument array (no shell), substituting `{output}` with a temporary file path, and compares the result with the checked-in file. With an `adapter` (plus `role` and `locale`), both documents are parsed as catalogs. Without one, both are compared as plain JSON, which suits runtime aggregates such as a locale-keyed `data.json`. Prefer calling the consumer's own package script with an output override (FormatJS CLI options take the last value, so `-- --out-file {output}` redirects `translations:extract`) over copying its arguments; copied arguments drift from the script developers actually run. Generators must honor `{output}` without other side effects. The validator never rewrites checked-in files; `updateCommand` is only a failure hint.
 - **`catalogDirectories`** lists directories whose files (default extension `.json`) must all be declared by a check, a TMS target, or a generated entry. It catches a locale file added without a TMS mapping, or a stale file left after a locale was removed.
 
-The reusable workflow accepts this file through `validation-config`, so consumers do not need a validation script. See the [schema](../../schemas/catalog-validation-config.schema.json), the [consumer example](../../examples/phrase-consumer/.github/i18n/catalog-validation.json), and the [consumer onboarding checklist](../../docs/consumer-onboarding.md).
+The reusable workflow accepts this file through `validation-config`, so consumers do not need a validation script. Non-JavaScript repositories can set `catalog-only: true`; this skips consumer dependency installation and FormatJS source lint, requires `validation-config`, and runs the shared catalog validator only. See the [schema](../../schemas/catalog-validation-config.schema.json), the [consumer example](../../examples/phrase-consumer/.github/i18n/catalog-validation.json), and the [consumer onboarding checklist](../../docs/consumer-onboarding.md).
 
 ## Custom adapters
 

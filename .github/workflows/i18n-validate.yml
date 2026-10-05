@@ -23,6 +23,11 @@ on:
         required: false
         type: string
         default: ""
+      catalog-only:
+        description: Skip consumer dependencies and JavaScript source lint; requires validation-config
+        required: false
+        type: boolean
+        default: false
       catalog-adapter:
         description: Registered catalog adapter ID
         required: false
@@ -93,7 +98,7 @@ jobs:
             ${{ runner.os }}-bun-
 
       - name: Cache npm dependencies
-        if: inputs.package-manager == 'npm'
+        if: inputs.package-manager == 'npm' && inputs.catalog-only != true
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.npm
@@ -101,7 +106,18 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-npm-
 
+      - name: Require validation config for catalog-only mode
+        if: inputs.catalog-only == true
+        env:
+          VALIDATION_CONFIG: ${{ inputs.validation-config }}
+        run: |
+          if [ -z "$VALIDATION_CONFIG" ]; then
+            echo "catalog-only mode requires validation-config" >&2
+            exit 1
+          fi
+
       - name: Install consumer dependencies
+        if: inputs.catalog-only != true
         env:
           PACKAGE_MANAGER: ${{ inputs.package-manager }}
         run: |
@@ -123,10 +139,12 @@ jobs:
         working-directory: i18n-tooling-source/packages/i18n-pipeline
 
       - name: Build source-catalog ESLint plugin
+        if: inputs.catalog-only != true
         run: npm run build --workspace @redhat-cloud-services/eslint-plugin-i18n
         working-directory: i18n-tooling-source
 
       - name: Lint consumer source message IDs
+        if: inputs.catalog-only != true
         env:
           I18N_CATALOG_PATH: ${{ inputs.catalog-path }}
           I18N_SOURCE_GLOB: ${{ inputs.source-glob }}

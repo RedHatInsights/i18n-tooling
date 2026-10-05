@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { isCliEntryPoint, runCli } from "../src/cli.js";
@@ -142,6 +142,50 @@ describe("frontend-i18n CLI", () => {
       '{\n  "greeting": "Hello {name}"\n}\n',
     );
     expect(output).toEqual(["Converted catalog from formatjs-json to icu-json (locale=en)."]);
+  });
+
+  it("converts OpenAPI Problem Details schemas from YAML into an ICU source catalog", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-openapi-convert-"));
+    await mkdir(join(projectRoot, "specs"));
+    await writeFile(join(projectRoot, "package.json"), "{}\n");
+    const fixturePath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "fixtures/openapi-i18n/problem-details.yaml",
+    );
+    await writeFile(join(projectRoot, "specs/openapi.yaml"), await readFile(fixturePath, "utf8"));
+    const output: string[] = [];
+
+    const exitCode = await runCli(
+      [
+        "convert",
+        "--source",
+        "specs/openapi.yaml",
+        "--source-adapter",
+        "openapi-problem-details",
+        "--target-adapter",
+        "icu-json",
+        "--output",
+        "i18n/en.json",
+        "--locale",
+        "en",
+        "--target-role",
+        "source",
+      ],
+      {
+        cwd: projectRoot,
+        env: {},
+        stdout: (message) => output.push(message),
+        stderr: (message) => output.push(message),
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(await readFile(join(projectRoot, "i18n/en.json"), "utf8")).toBe(
+      '{\n  "insights-rbac.role.not-found": "Role {roleName} was not found."\n}\n',
+    );
+    expect(output).toEqual([
+      "Converted catalog from openapi-problem-details to icu-json (locale=en).",
+    ]);
   });
 
   it("passes when source and target IDs and ICU arguments match", async () => {

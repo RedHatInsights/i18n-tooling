@@ -14,6 +14,15 @@ afterEach(async () => {
 });
 
 describe("catalog adapter plugins", () => {
+  it("uses built-in adapters without requiring a consumer package.json", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-adapter-no-package-"));
+
+    const registry = await createCatalogAdapterRegistry(projectRoot);
+
+    expect(registry.get("openapi-problem-details").id).toBe("openapi-problem-details");
+    expect(registry.get("icu-json").id).toBe("icu-json");
+  });
+
   it("loads configured adapter modules and checks their stable IDs", async () => {
     projectRoot = await mkdtemp(join(tmpdir(), "i18n-adapter-plugin-"));
     await writeFile(

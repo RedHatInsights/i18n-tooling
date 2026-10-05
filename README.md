@@ -79,7 +79,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and consumer workflow 
 
 ## Shared validation workflow
 
-The reusable `i18n-validate.yml` workflow checks out tooling source at the called workflow's commit, builds the CLI and ESLint plugin, and checks consumer source message IDs against the configured catalog. The source glob defaults to `src/**/*.{js,jsx,ts,tsx}` and can be overridden with `source-glob`; include files that declare reusable messages too. The ESLint check rejects missing catalog entries, missing or dynamic inline IDs, and opaque descriptor expressions. Declare reusable descriptors with `defineMessages` so their IDs are checked at the definition. The same step runs `eslint-plugin-formatjs` ICU rules: invalid ICU, plurals without `other`, a hard-coded `1` in a `one` branch, and plural offsets fail; inline tags, sentence fragments, `{count}` instead of `#`, multiple plurals, and selectors with more than 20 combinations are warnings. Set `validation-config` to run `frontend-i18n validate-project` directly, including generated-catalog sync, without a consumer validation script. `validation-command` remains the backward-compatible fallback when no config is supplied. Consumers do not need an npm dependency on this repository, and this repository does not publish workspace packages to npm.
+The reusable `i18n-validate.yml` workflow checks out tooling source at the called workflow's commit, builds the CLI and ESLint plugin, and checks consumer source message IDs against the configured catalog. The source glob defaults to `src/**/*.{js,jsx,ts,tsx}` and can be overridden with `source-glob`; include files that declare reusable messages too. The ESLint check rejects missing catalog entries, missing or dynamic inline IDs, and opaque descriptor expressions. Declare reusable descriptors with `defineMessages` so their IDs are checked at the definition. The same step runs `eslint-plugin-formatjs` ICU rules: invalid ICU, plurals without `other`, a hard-coded `1` in a `one` branch, and plural offsets fail; inline tags, sentence fragments, `{count}` instead of `#`, multiple plurals, and selectors with more than 20 combinations are warnings. Set `validation-config` to run `frontend-i18n validate-project` directly, including generated-catalog sync, without a consumer validation script. `validation-command` remains the backward-compatible fallback when no config is supplied. Non-JavaScript consumers can set `catalog-only: true` to skip consumer dependency installation and source lint; this mode requires `validation-config` and still checks catalog validity and generated-file sync. Consumers do not need an npm dependency on this repository, and this repository does not publish workspace packages to npm.
 
 ## Consumer examples
 
@@ -101,6 +101,19 @@ jobs:
 ```
 
 Replace `<reviewed-commit-sha>` with a reviewed commit SHA. The reusable workflow checks out the consumer repository and `i18n-tooling` at the exact commit of the called workflow (`job.workflow_sha`). It installs consumer dependencies with the selected package manager and the tooling workspace with Bun, builds the CLI and ESLint plugin, then lints the configured source glob against `catalog-path`. The rule recognizes FormatJS `formatMessage`, `defineMessage(s)`, and `<FormattedMessage>` forms; IDs must be static and present in the catalog. With `validation-config`, the workflow runs the shared `validate-project` command directly. Its config names source/target files and adapters and can run native generators into temporary output files to verify checked-in catalogs are current. See the [catalog validation example](examples/phrase-consumer/.github/i18n/catalog-validation.json) and [config schema](schemas/catalog-validation-config.schema.json). Without that input, the workflow runs `validation-command` through `npm run`; simple consumers can also use `frontend-i18n validate` or `frontend-i18n check` directly with `I18N_CATALOG_*` settings. Neither package needs npm publication. Pinning the reusable workflow pins the CLI and rule source too.
+
+A Python service can validate contract-generated catalogs without installing application dependencies or linting JavaScript:
+
+```yaml
+jobs:
+  i18n-catalog:
+    uses: RedHatInsights/i18n-tooling/.github/workflows/i18n-validate.yml@<reviewed-commit-sha>
+    with:
+      catalog-only: true
+      validation-config: .github/i18n/catalog-validation.json
+```
+
+The config should generate the English ICU catalog from the checked-in OpenAPI contract, then validate it and any delivered target locales.
 
 ## FEO Frontend template localization
 

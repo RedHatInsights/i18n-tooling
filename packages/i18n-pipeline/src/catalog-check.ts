@@ -40,7 +40,7 @@ function collectArguments(elements: MessageFormatElement[], names: Set<string>):
   }
 }
 
-function argumentNames(pattern: string, messageId: string, role: string): string[] {
+export function getIcuArgumentNames(pattern: string, messageId: string, role: string): string[] {
   try {
     const names = new Set<string>();
     collectArguments(parseIcuMessage(pattern), names);
@@ -62,8 +62,8 @@ export function checkCatalogs(source: Catalog, target: Catalog): CatalogCheckRes
   const argumentMismatches: ArgumentMismatch[] = [];
 
   for (const id of sharedIds) {
-    const sourceArguments = argumentNames(source.messages[id]!.pattern, id, "Source");
-    const targetArguments = argumentNames(target.messages[id]!.pattern, id, "Target");
+    const sourceArguments = getIcuArgumentNames(source.messages[id]!.pattern, id, "Source");
+    const targetArguments = getIcuArgumentNames(target.messages[id]!.pattern, id, "Target");
     if (
       sourceArguments.length !== targetArguments.length ||
       sourceArguments.some((name, index) => name !== targetArguments[index])
