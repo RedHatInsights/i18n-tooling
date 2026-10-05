@@ -36,6 +36,7 @@
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
     "eslint": "^9.0.0",
+    "eslint-plugin-formatjs": "8.1.0",
     "markdownlint-cli2": "0.23.3",
     "prettier": "^3.0.0",
     "typescript-eslint": "^8.0.0"

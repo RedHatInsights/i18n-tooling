@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { checkCatalogs } from "./catalog-check.js";
+import { describeArgumentMismatch, lintTargetCatalog } from "./icu-lint.js";
 import { parseCatalogDocument, serializeCatalogDocument } from "./catalog-document.js";
 import type { Catalog, CatalogAdapter, CatalogAdapterRegistry } from "./index.js";
 import {
@@ -188,6 +189,17 @@ type LocaleReadiness =
   | { phase: "ready"; finalJob: PhraseJobPart }
   | { phase: "pending" }
   | { phase: "failed"; reason: string };
+
+const MAX_PULL_REQUEST_WARNINGS = 50;
+
+/** Lists non-blocking translation lint findings for the locale PR reviewer. */
+function translationWarningsSection(warnings: string[]): string {
+  if (!warnings.length) return "";
+  const shown = warnings.slice(0, MAX_PULL_REQUEST_WARNINGS).map((warning) => `- ${warning}`);
+  const hidden = warnings.length - shown.length;
+  if (hidden > 0) shown.push(`- ...and ${hidden} more`);
+  return `\nTranslation warnings (review before merging):\n${shown.join("\n")}\n`;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -729,7 +741,7 @@ export class PhraseWorkflow {
       record.locales[target.phraseLocale] = { phase: "exporting" };
       revision = await this.dependencies.state.updateBatch(record, revision);
       try {
-        const content = await this.exportTarget(
+        const { content, warnings } = await this.exportTarget(
           record,
           target,
           ready.finalJob,
@@ -761,7 +773,8 @@ export class PhraseWorkflow {
             `Batch: ${record.key}\n` +
             `Source commit: ${record.sourceCommit}\n` +
             `Source SHA-256: ${record.sourceDigest}\n` +
-            `Final job: ${ready.finalJob.uid}\n`,
+            `Final job: ${ready.finalJob.uid}\n` +
+            translationWarningsSection(warnings),
           path: target.outputPath,
           content,
         });
@@ -805,7 +818,7 @@ export class PhraseWorkflow {
     finalJob: PhraseJobPart,
     sourceCatalog: Catalog,
     targetAdapter: CatalogAdapter,
-  ): Promise<Uint8Array> {
+  ): Promise<{ content: Uint8Array; warnings: string[] }> {
     const exportRequestId = await this.dependencies.phrase.startTargetDownload(
       record.config.projectUid,
       finalJob.uid,
@@ -836,8 +849,14 @@ export class PhraseWorkflow {
       if (comparison.extraIds.length) problems.push(`extra IDs: ${comparison.extraIds.join(", ")}`);
       if (comparison.argumentMismatches.length) {
         problems.push(
-          `ICU argument mismatches: ${comparison.argumentMismatches.map((item) => item.id).join(", ")}`,
+          `ICU argument mismatches: ${comparison.argumentMismatches
+            .map((item) => describeArgumentMismatch(sourceCatalog.messages[item.id]!.pattern, item))
+            .join(", ")}`,
         );
+      }
+      const warnings: string[] = [];
+      for (const finding of lintTargetCatalog(sourceCatalog, targetCatalog)) {
+        (finding.severity === "error" ? problems : warnings).push(finding.message);
       }
       if (problems.length) throw new Error(problems.join("; "));
       const serialized = serializeCatalogDocument(
@@ -845,7 +864,7 @@ export class PhraseWorkflow {
         targetAdapter,
         context,
       );
-      return new TextEncoder().encode(serialized);
+      return { content: new TextEncoder().encode(serialized), warnings };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new PhraseCatalogValidationError(

@@ -9,6 +9,9 @@ import {
   checkCatalogs as compareCatalogs,
   convertCatalog as convertCatalogDocument,
   createCatalogAdapterRegistry,
+  describeArgumentMismatch,
+  lintSourceCatalog,
+  lintTargetCatalog,
   parseCatalogDocument,
   parseCatalogValidationConfig,
   serializeCatalogDocument,
@@ -182,6 +185,25 @@ function messageCount(count: number): string {
   return `${count} message${count === 1 ? "" : "s"}`;
 }
 
+function escapeAnnotation(message: string): string {
+  return message.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+}
+
+/** Prints non-failing findings; GitHub Actions renders them as warning annotations. */
+function reportWarnings(
+  warnings: string[],
+  { env, stdout }: Required<Pick<CliOptions, "env" | "stdout">>,
+): void {
+  if (!warnings.length) return;
+  if (env.GITHUB_ACTIONS === "true") {
+    for (const warning of warnings) {
+      stdout(`::warning title=frontend-i18n::${escapeAnnotation(warning)}`);
+    }
+    return;
+  }
+  stdout(`Catalog warnings:\n${warnings.map((warning) => `- ${warning}`).join("\n")}`);
+}
+
 async function validateCatalog(
   args: string[],
   { cwd, env, stdout, stderr }: Required<Pick<CliOptions, "cwd" | "env" | "stdout" | "stderr">>,
@@ -214,6 +236,12 @@ async function validateCatalog(
     if (!(error instanceof CatalogFormatError)) throw error;
     stderr(`Catalog validation failed for "${catalogPath}":\n${error.message}`);
     return false;
+  }
+  if (role === "source") {
+    reportWarnings(
+      lintSourceCatalog(catalog).map((warning) => warning.message),
+      { env, stdout },
+    );
   }
   stdout(
     `Validated ${messageCount(Object.keys(catalog.messages).length)} ` +
@@ -290,10 +318,14 @@ async function checkCatalog(
   }
   for (const mismatch of result.argumentMismatches) {
     problems.push(
-      `Argument mismatch for "${mismatch.id}": source [${mismatch.source.join(", ")}], ` +
-        `target [${mismatch.target.join(", ")}]`,
+      `Argument mismatch for ${describeArgumentMismatch(source.messages[mismatch.id]!.pattern, mismatch)}`,
     );
   }
+  const warnings: string[] = [];
+  for (const finding of lintTargetCatalog(source, target)) {
+    (finding.severity === "error" ? problems : warnings).push(finding.message);
+  }
+  reportWarnings(warnings, { env, stdout });
 
   if (problems.length) {
     stderr(`Catalog check failed:\n${problems.map((problem) => `- ${problem}`).join("\n")}`);
@@ -491,7 +523,7 @@ async function convertCatalog(
 
 async function validateProject(
   args: string[],
-  { cwd, stdout, stderr }: Required<Pick<CliOptions, "cwd" | "stdout" | "stderr">>,
+  { cwd, env, stdout, stderr }: Required<Pick<CliOptions, "cwd" | "env" | "stdout" | "stderr">>,
 ): Promise<boolean> {
   const values = parseOptions(args, { config: { type: "string" } });
   if (!values.config) throw new Error("validate-project requires --config");
@@ -500,6 +532,7 @@ async function validateProject(
   );
   const registry = await createCatalogAdapterRegistry(cwd);
   const result = await validateCatalogProject(cwd, config, registry);
+  reportWarnings(result.warnings, { env, stdout });
   if (result.problems.length) {
     stderr(
       `Catalog validation failed:\n${result.problems.map((problem) => `- ${problem}`).join("\n")}`,
@@ -584,7 +617,7 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
       return (await validateCatalog(args, { cwd, env, stdout, stderr })) ? 0 : 1;
     }
     if (command === "validate-project") {
-      return (await validateProject(args, { cwd, stdout, stderr })) ? 0 : 1;
+      return (await validateProject(args, { cwd, env, stdout, stderr })) ? 0 : 1;
     }
     if (command === "convert") {
       await convertCatalog(args, { cwd, stdout });

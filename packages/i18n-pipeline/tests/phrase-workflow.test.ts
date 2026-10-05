@@ -658,6 +658,35 @@ describe("PhraseWorkflow submission", () => {
     expect(phrase.createJobCalls).toBe(1);
   });
 
+  it("lists translation lint warnings in the locale pull request", async () => {
+    const phrase = new FakePhrase();
+    phrase.targetBytes = new TextEncoder().encode(
+      JSON.stringify({ greeting: { defaultMessage: "Bonjour {name} !", description: "Greeting" } }),
+    );
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state: new MemoryStateStore(),
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+
+    const [result] = await workflow.reconcile();
+
+    expect(result?.phase).toBe("pr-created");
+    expect(repository.pullRequests[0]?.body).toContain(
+      'Translation warnings (review before merging):\n- "greeting": a regular space precedes',
+    );
+  });
+
   it("reconciles a completed final job into a validated locale pull request", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
@@ -702,6 +731,7 @@ describe("PhraseWorkflow submission", () => {
     expect(JSON.parse(new TextDecoder().decode(repository.pullRequests[0]?.content))).toEqual({
       greeting: "Bonjour {name}",
     });
+    expect(repository.pullRequests[0]?.body).not.toContain("Translation warnings");
 
     expect((await state.listBatches())[0]?.record.phase).toBe("completed");
 
@@ -948,6 +978,41 @@ describe("PhraseWorkflow submission", () => {
     expect(phrase.events).toContain("phrase:export:job-step-2");
   });
 
+  it("rejects a Phrase translation that replaces an exact plural with a number", async () => {
+    const exactSourceBytes = new TextEncoder().encode(
+      JSON.stringify({
+        items: { defaultMessage: "{count, plural, =1 {one item} other {# items}}" },
+      }),
+    );
+    const phrase = new FakePhrase();
+    phrase.targetBytes = new TextEncoder().encode(
+      JSON.stringify({ items: "{count, number} articles" }),
+    );
+    const repository = new FakeRepository();
+    repository.baseSourceBytes = exactSourceBytes;
+    repository.pinnedSourceBytes = exactSourceBytes;
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state: new MemoryStateStore(),
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes: exactSourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+
+    const [result] = await workflow.reconcile();
+
+    expect(result?.phase).toBe("failed");
+    expect(result?.reason).toContain('"items": plural {count} lost exact branch =1');
+    expect(repository.pullRequests).toHaveLength(0);
+  });
+
   it("retries a validation-failed locale from the same completed Phrase job", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
@@ -980,6 +1045,7 @@ describe("PhraseWorkflow submission", () => {
 
     expect(first[0]?.phase).toBe("failed");
     expect(first[0]?.reason).toContain("ICU argument mismatches");
+    expect(first[0]?.reason).toContain('"greeting": source [name], target [count]');
     expect(failed?.record.phase).toBe("completed");
     expect(failed?.record.locales.fr?.phase).toBe("validation-failed");
     expect(repository.pullRequests).toHaveLength(0);

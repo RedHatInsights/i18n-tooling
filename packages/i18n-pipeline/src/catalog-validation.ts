@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import { checkCatalogs } from "./catalog-check.js";
 import { parseCatalogDocument } from "./catalog-document.js";
+import { describeArgumentMismatch, lintSourceCatalog, lintTargetCatalog } from "./icu-lint.js";
 import { parsePhraseTmsConfig } from "./phrase-config.js";
 import type {
   AdapterContext,
@@ -61,6 +62,8 @@ export interface CatalogValidationConfig {
 
 export interface CatalogValidationResult {
   problems: string[];
+  /** Lint findings that do not fail validation; see {@link lintSourceCatalog}. */
+  warnings: string[];
   sourceCount: number;
   targetCount: number;
   generatedCount: number;
@@ -385,8 +388,8 @@ function comparisonProblems(
     problems.push(`${prefix}extra in target: ${result.extraIds.join(", ")}`);
   for (const mismatch of result.argumentMismatches) {
     problems.push(
-      `${prefix}argument mismatch for "${mismatch.id}": ` +
-        `source [${mismatch.source.join(", ")}], target [${mismatch.target.join(", ")}]`,
+      `${prefix}argument mismatch for ` +
+        describeArgumentMismatch(source.messages[mismatch.id]!.pattern, mismatch),
     );
   }
   return problems;
@@ -461,6 +464,8 @@ export async function validateCatalogProject(
   registry: Pick<CatalogAdapterRegistry, "get">,
 ): Promise<CatalogValidationResult> {
   const problems: string[] = [];
+  const warnings: string[] = [];
+  const lintedSources = new Set<string>();
   let sourceCount = 0;
   let targetCount = 0;
   let generatedCount = 0;
@@ -514,6 +519,14 @@ export async function validateCatalogProject(
       problems.push(errorMessage(error));
       continue;
     }
+    if (!lintedSources.has(check.source.path)) {
+      lintedSources.add(check.source.path);
+      warnings.push(
+        ...lintSourceCatalog(source.catalog).map(
+          (warning) => `Source catalog ${check.source.path}: ${warning.message}`,
+        ),
+      );
+    }
 
     for (const targetReference of check.targets) {
       if (
@@ -541,6 +554,10 @@ export async function validateCatalogProject(
             targetReference.path,
           ),
         );
+        for (const finding of lintTargetCatalog(source.catalog, target.catalog)) {
+          const message = `Target catalog ${targetReference.path}: ${finding.message}`;
+          (finding.severity === "error" ? problems : warnings).push(message);
+        }
       } catch (error) {
         problems.push(errorMessage(error));
       }
@@ -551,5 +568,5 @@ export async function validateCatalogProject(
     ...(await undeclaredCatalogProblems(projectRoot, config.catalogDirectories, declaredPaths)),
   );
 
-  return { problems, sourceCount, targetCount, generatedCount, pendingTargetCount };
+  return { problems, warnings, sourceCount, targetCount, generatedCount, pendingTargetCount };
 }

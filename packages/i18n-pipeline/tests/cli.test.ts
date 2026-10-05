@@ -214,6 +214,89 @@ describe("frontend-i18n CLI", () => {
     ]);
   });
 
+  it("fails check when a target replaces a source exact plural with a number", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-exact-plural-"));
+    await mkdir(join(projectRoot, "locales"));
+    await writeFile(join(projectRoot, "package.json"), "{}\n");
+    await writeFile(
+      join(projectRoot, "locales/en.json"),
+      JSON.stringify({
+        items: { defaultMessage: "{count, plural, =1 {one item} other {# items}}" },
+      }),
+    );
+    await writeFile(
+      join(projectRoot, "locales/fr.json"),
+      JSON.stringify({ items: "{count, number} items" }),
+    );
+    const errors: string[] = [];
+
+    const exitCode = await runCli(
+      [
+        "check",
+        "--source",
+        "locales/en.json",
+        "--target",
+        "locales/fr.json",
+        "--target-locale",
+        "fr",
+      ],
+      {
+        cwd: projectRoot,
+        env: {},
+        stdout: () => undefined,
+        stderr: (message) => errors.push(message),
+      },
+    );
+
+    expect(exitCode).toBe(1);
+    expect(errors[0]).toContain('"items": plural {count} lost exact branch =1');
+  });
+
+  it("warns about source plural semantics and explains the target mismatch they cause", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-plural-"));
+    await mkdir(join(projectRoot, "locales"));
+    await writeFile(join(projectRoot, "package.json"), "{}\n");
+    await writeFile(
+      join(projectRoot, "locales/en.json"),
+      JSON.stringify({ remove: "{count, plural, one {{name}} other {# accounts}}" }),
+    );
+    await writeFile(
+      join(projectRoot, "locales/zh-CN.json"),
+      JSON.stringify({ remove: "{count, plural, other {# 个帐户}}" }),
+    );
+    const output: string[] = [];
+    const errors: string[] = [];
+    const options = {
+      cwd: projectRoot,
+      env: { I18N_CATALOG_ADAPTER: "icu-json" },
+      stdout: (message: string) => output.push(message),
+      stderr: (message: string) => errors.push(message),
+    };
+
+    expect(await runCli(["validate", "--catalog", "locales/en.json"], options)).toBe(0);
+    expect(output[0]).toContain(
+      'Catalog warnings:\n- "remove": {name} appears only in the "one" branch',
+    );
+    expect(
+      await runCli(
+        ["validate", "--catalog", "locales/zh-CN.json", "--role", "target", "--locale", "zh-CN"],
+        options,
+      ),
+    ).toBe(0);
+    expect(output.filter((line) => line.startsWith("Catalog warnings"))).toHaveLength(1);
+
+    expect(
+      await runCli(
+        ["check", "--source", "locales/en.json", "--target", "locales/zh-CN.json"],
+        options,
+      ),
+    ).toBe(1);
+    expect(errors.at(-1)).toContain(
+      '- Argument mismatch for "remove": source [count, name], target [count] ' +
+        '(source renders {name} only in the "one" branch of plural {count}',
+    );
+  });
+
   it("shows general and per-command help", async () => {
     const output: string[] = [];
     const errors: string[] = [];

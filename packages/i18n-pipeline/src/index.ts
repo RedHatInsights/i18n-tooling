@@ -5,6 +5,17 @@ import { parse as parseIcuMessage } from "@formatjs/icu-messageformat-parser";
 export { checkCatalogs, type ArgumentMismatch, type CatalogCheckResult } from "./catalog-check.js";
 export { parseCatalogDocument, serializeCatalogDocument } from "./catalog-document.js";
 export {
+  argumentMismatchHint,
+  describeArgumentMismatch,
+  lintSourceCatalog,
+  lintSourceMessage,
+  lintTargetCatalog,
+  lintTargetMessage,
+  type IcuLintFinding,
+  type IcuLintRule,
+  type IcuLintSeverity,
+} from "./icu-lint.js";
+export {
   parseCatalogValidationConfig,
   validateCatalogProject,
   type CatalogDirectory,
