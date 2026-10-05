@@ -38,6 +38,7 @@ export default [
         "error",
         { catalog: "packages/eslint-plugin-i18n/tests/fixtures/en.json" },
       ],
+      "i18n/extractable-message-descriptor": "error",
     },
   },
 ];

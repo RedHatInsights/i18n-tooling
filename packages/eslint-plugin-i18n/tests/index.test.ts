@@ -6,4 +6,9 @@ describe("plugin metadata", () => {
   it("uses the package version", () => {
     expect(plugin.meta.version).toBe(packageMetadata.version);
   });
+
+  it("registers the extraction-position rule in the recommended config", () => {
+    expect(plugin.rules["extractable-message-descriptor"]).toBeDefined();
+    expect(plugin.configs?.recommended.rules["i18n/extractable-message-descriptor"]).toBe("error");
+  });
 });

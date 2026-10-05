@@ -18,6 +18,7 @@ export default [
     plugins: { formatjs, i18n },
     rules: {
       "i18n/no-missing-default-catalog-entry": ["error", { catalog }],
+      "i18n/extractable-message-descriptor": "error",
 
       // ICU correctness: these break or mistranslate messages in some locales.
       "formatjs/no-invalid-icu": "error",
