@@ -188,6 +188,17 @@ Submission and reconciliation use separate concurrency groups, so a queued recon
 
 The reusable workflows are generic; they do not add `rbac-ui` configuration or schedule wiring. Live Phrase job creation and secret setup remain explicit acceptance steps.
 
+### Phrase TM/TB inventory (read-only)
+
+To pick resources for a matching pilot, run from this repository's worktree with a Platform API token from a secret manager:
+
+```sh
+PHRASE_PLATFORM_API_TOKEN="$(op read 'op://<vault>/<item>/credential')" \
+  node scripts/phrase-resource-inventory.mjs --region eu --output inventory/phrase-resources.csv
+```
+
+The ignored, private (`0600`) CSV lists token-visible translation memories and term bases, sorted by type and descending entry count. Columns include name, UID, TM source/target languages or TB languages, segment/term count, per-language counts, client, domain, subdomain, business unit, and creation date. The script pages through all visible resources, reads only listing/metadata GET endpoints at least 500 ms apart, retries throttled requests, and fails rather than writing an incomplete inventory. No TMX/TBX or segment/term text is exported. It does not list glossaries or establish rights to reuse a resource. Use a new output path for each run; existing files are not overwritten. `--region us` selects the US API hosts.
+
 A service can validate its service-owned keyed ICU JSON catalog the same way:
 
 ```yaml
