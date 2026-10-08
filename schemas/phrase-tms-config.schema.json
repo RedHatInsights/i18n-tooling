@@ -87,6 +87,9 @@
         "path": {
           "type": "string",
           "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*/$)(?!.*(?:^|/)\\.\\.?(/|$)).+$"
+        },
+        "generateSourceCatalog": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false

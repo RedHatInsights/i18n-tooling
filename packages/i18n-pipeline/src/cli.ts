@@ -25,7 +25,7 @@ import { GitHubPhraseRepository } from "./github-phrase-repository.js";
 import { PhraseClient, type PhraseClientOptions } from "./phrase-client.js";
 import { parsePhraseTmsConfig } from "./phrase-config.js";
 import { PhraseWorkflow, type PhraseReconcileResult } from "./phrase-workflow.js";
-import { extractFeoCatalog, inlineFeoLocale, type FeoCatalog } from "./feo-template.js";
+import { formatFeoCatalog, inlineFeoLocale, type FeoCatalog } from "./feo-template.js";
 
 export interface CliOptions {
   cwd?: string;
@@ -445,7 +445,13 @@ async function runTmsCommand(
       );
     }
     if (!sourceCommit) throw new Error("Pass --source-commit or set GITHUB_SHA");
-    const sourceBytes = await readFile(resolve(options.cwd, parsed.workflow.sourceCatalog.path));
+    const sourceBytes = parsed.workflow.frontendTemplate?.generateSourceCatalog
+      ? new TextEncoder().encode(
+          formatFeoCatalog(
+            await readFile(resolve(options.cwd, parsed.workflow.frontendTemplate.path), "utf8"),
+          ),
+        )
+      : await readFile(resolve(options.cwd, parsed.workflow.sourceCatalog.path));
     const batch = await workflow.submit({
       repository: repositoryName,
       baseRef,
@@ -584,7 +590,7 @@ async function runFeoCommand(
   if (subcommand === "extract") {
     if (!values.output) throw new Error("feo extract requires --output");
     path = resolve(cwd, values.output);
-    generated = `${JSON.stringify(extractFeoCatalog(template), null, 2)}\n`;
+    generated = formatFeoCatalog(template);
   } else {
     if (!values.source || !values.target || !values.locale)
       throw new Error("feo inline requires --source, --target and --locale");

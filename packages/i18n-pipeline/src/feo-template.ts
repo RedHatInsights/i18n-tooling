@@ -145,6 +145,10 @@ export function extractFeoCatalog(template: string): FeoCatalog {
   return collect(parse(template)).catalog;
 }
 
+export function formatFeoCatalog(template: string): string {
+  return `${JSON.stringify(extractFeoCatalog(template), null, 2)}\n`;
+}
+
 function parse(template: string): Document {
   const doc = parseDocument(template, { uniqueKeys: true, keepSourceTokens: true });
   if (doc.errors.length) throw new Error(`Invalid Frontend template: ${doc.errors[0]!.message}`);

@@ -11,7 +11,7 @@ import {
 } from "./phrase-client.js";
 import type { CreatePhraseJobInput, PhraseJobCreation, PhraseJobPart } from "./phrase-client.js";
 import { validatePhraseWorkflowConfig } from "./phrase-config.js";
-import { inlineFeoLocale, type FeoCatalog } from "./feo-template.js";
+import { formatFeoCatalog, inlineFeoLocale, type FeoCatalog } from "./feo-template.js";
 
 export type LocaleCompletionPolicy = "per-locale" | "all-locales";
 
@@ -35,7 +35,7 @@ export interface PhraseWorkflowConfig {
   };
   targetAdapter?: string;
   targetOptions?: Record<string, unknown>;
-  frontendTemplate?: { path: string };
+  frontendTemplate?: { path: string; generateSourceCatalog?: boolean };
   targetLocales: PhraseTargetLocale[];
   completionPolicy: {
     default: LocaleCompletionPolicy;
@@ -389,6 +389,22 @@ export class PhraseWorkflow {
     this.pollIntervalMs = dependencies.pollIntervalMs ?? 2_000;
   }
 
+  private async readSourceCatalog(
+    config: PhraseWorkflowConfig,
+    ref: string,
+  ): Promise<Uint8Array | null> {
+    if (config.frontendTemplate?.generateSourceCatalog) {
+      const template = await this.dependencies.repository.readFile(
+        config.frontendTemplate.path,
+        ref,
+      );
+      return template
+        ? new TextEncoder().encode(formatFeoCatalog(new TextDecoder().decode(template)))
+        : null;
+    }
+    return this.dependencies.repository.readFile(config.sourceCatalog.path, ref);
+  }
+
   async submit(input: PhraseSubmitInput): Promise<PhraseBatchRecord> {
     validatePhraseWorkflowConfig(input.config);
     if (!input.repository.trim() || !input.baseRef.trim() || !input.sourceCommit.trim()) {
@@ -419,10 +435,7 @@ export class PhraseWorkflow {
     this.dependencies.catalogAdapters.get(targetAdapter);
 
     const sourceDigest = digest(input.sourceBytes);
-    const pinnedSourceBytes = await this.dependencies.repository.readFile(
-      input.config.sourceCatalog.path,
-      input.sourceCommit,
-    );
+    const pinnedSourceBytes = await this.readSourceCatalog(input.config, input.sourceCommit);
     if (!pinnedSourceBytes || digest(pinnedSourceBytes) !== sourceDigest) {
       throw new PhraseWorkflowError(
         "Source bytes do not match the source file at the requested commit",
@@ -591,10 +604,9 @@ export class PhraseWorkflow {
       }
     }
 
-    const sourcePath = record.config.sourceCatalog.path;
     const [pinnedSourceBytes, currentSourceBytes] = await Promise.all([
-      this.dependencies.repository.readFile(sourcePath, record.sourceCommit),
-      this.dependencies.repository.readFile(sourcePath, record.baseRef),
+      this.readSourceCatalog(record.config, record.sourceCommit),
+      this.readSourceCatalog(record.config, record.baseRef),
     ]);
     if (!pinnedSourceBytes || digest(pinnedSourceBytes) !== record.sourceDigest) {
       await this.closeBatch(
@@ -751,10 +763,7 @@ export class PhraseWorkflow {
           sourceCatalog,
           targetAdapter,
         );
-        const latestSourceBytes = await this.dependencies.repository.readFile(
-          sourcePath,
-          record.baseRef,
-        );
+        const latestSourceBytes = await this.readSourceCatalog(record.config, record.baseRef);
         if (!latestSourceBytes || digest(latestSourceBytes) !== record.sourceDigest) {
           await this.closeBatch(
             record,

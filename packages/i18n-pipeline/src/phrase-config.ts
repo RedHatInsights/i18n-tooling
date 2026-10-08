@@ -131,6 +131,12 @@ export function validatePhraseWorkflowConfig(config: PhraseWorkflowConfig): void
   if (config.frontendTemplate) {
     validateRepoPath(config.frontendTemplate.path, "Frontend template path");
     if (
+      config.frontendTemplate.generateSourceCatalog &&
+      (config.sourceCatalog.adapter !== "formatjs-json" || config.sourceCatalog.locale !== "en")
+    ) {
+      throw new TypeError("Generated Frontend source catalog requires formatjs-json and en");
+    }
+    if (
       config.frontendTemplate.path === config.sourceCatalog.path ||
       config.targetLocales.some((locale) => locale.outputPath === config.frontendTemplate?.path)
     ) {
@@ -263,8 +269,19 @@ export function parsePhraseTmsConfig(value: unknown): PhraseTmsConfig {
   }
 
   const frontendTemplate = optionalRecord(root.frontendTemplate, 'TMS config "frontendTemplate"');
-  if (frontendTemplate)
-    rejectUnknownKeys(frontendTemplate, ["path"], 'TMS config "frontendTemplate"');
+  if (frontendTemplate) {
+    rejectUnknownKeys(
+      frontendTemplate,
+      ["path", "generateSourceCatalog"],
+      'TMS config "frontendTemplate"',
+    );
+    if (
+      frontendTemplate.generateSourceCatalog !== undefined &&
+      typeof frontendTemplate.generateSourceCatalog !== "boolean"
+    ) {
+      throw new TypeError('TMS config "frontendTemplate.generateSourceCatalog" must be a boolean');
+    }
+  }
   const targetOptions = optionalRecord(root.targetOptions, 'TMS config "targetOptions"');
   const targetAdapter = optionalString(root.targetAdapter, 'TMS config "targetAdapter"');
   const workflow: PhraseWorkflowConfig = {
@@ -287,6 +304,9 @@ export function parsePhraseTmsConfig(value: unknown): PhraseTmsConfig {
       ? {
           frontendTemplate: {
             path: requiredString(frontendTemplate.path, 'TMS config "frontendTemplate.path"'),
+            ...(frontendTemplate.generateSourceCatalog === true
+              ? { generateSourceCatalog: true }
+              : {}),
           },
         }
       : {}),

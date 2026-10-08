@@ -385,6 +385,62 @@ describe("frontend-i18n CLI", () => {
     );
   });
 
+  it("generates the Phrase source from Frontend YAML without a checked-in catalog", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-feo-phrase-"));
+    await mkdir(join(projectRoot, "deploy"));
+    await writeFile(join(projectRoot, "package.json"), "{}\n");
+    await writeFile(
+      join(projectRoot, "deploy/frontend.yaml"),
+      "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n        - id: roles\n          title: Roles\n",
+    );
+    await writeFile(
+      join(projectRoot, "phrase.json"),
+      JSON.stringify({
+        provider: "phrase",
+        project: { uid: "project-uid", region: "eu" },
+        sourceCatalog: {
+          path: "deploy/locales/insights-rbac-ui-feo-frontend-en.json",
+          adapter: "formatjs-json",
+          locale: "en",
+        },
+        frontendTemplate: { path: "deploy/frontend.yaml", generateSourceCatalog: true },
+        targetLocales: [
+          {
+            phraseLocale: "zh_cn",
+            repositoryLocale: "zh-CN",
+            outputPath: "deploy/locales/zh-CN.json",
+          },
+        ],
+      }),
+    );
+    const calls: string[] = [];
+    const errors: string[] = [];
+    const exitCode = await runCli(["tms", "submit", "--config", "phrase.json"], {
+      cwd: projectRoot,
+      env: {
+        PHRASE_PLATFORM_API_TOKEN: "protected-phrase-token",
+        GITHUB_TOKEN: "run-token",
+        GITHUB_REPOSITORY: "example/app",
+        GITHUB_REF: "refs/heads/phrase-pilot",
+        GITHUB_SHA: "abc123",
+      },
+      fetch: async (input) => {
+        calls.push(input instanceof Request ? input.url : String(input));
+        return new Response("{}", { status: 404 });
+      },
+      stdout: () => undefined,
+      stderr: (message) => errors.push(message),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(errors[0]).toContain(
+      "Source bytes do not match the source file at the requested commit",
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("/contents/deploy/frontend.yaml?ref=abc123");
+    expect(calls[0]).not.toContain("insights-rbac-ui-feo-frontend-en.json");
+  });
+
   it.each([
     [
       "a partial service account",
