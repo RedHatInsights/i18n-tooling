@@ -126,6 +126,10 @@ The config should generate the English ICU catalog from the checked-in OpenAPI c
 
 Project validation can run these checks from a `feo` config section, where each `locales` object maps locale tags to repository-relative locale files. It compares the committed source catalog byte-for-byte with extraction output, then compares each configured template locale with inlining from its locale file. Source drift points to `feo extract`; locale drift points to `feo inline`. The validator also reports template, JSON, and translation errors without writing consumer files.
 
+## Pilot: include the Frontend template in a Phrase locale PR
+
+For the rbac-ui file-handoff pilot, optional `"frontendTemplate": { "path": "deploy/frontend.yaml" }` in the Phrase consumer config adds that YAML file to the same PR as the locale JSON. Reconciliation checks the submitted source catalog digest against the current base branch and verifies every English key still matches the YAML before writing either file. The YAML change is limited to the chosen `objects[].spec.locales.<locale>` mapping. This adapter is an optional Phrase integration layered on top of the Phrase-independent `feo` CLI; no automatic Phrase submission is introduced.
+
 ## Phrase TMS round trip
 
 The reusable Phrase workflows submit one validated source catalog and reconcile completed target jobs into ordinary locale-specific pull requests:
