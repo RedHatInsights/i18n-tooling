@@ -11,6 +11,7 @@ import {
 } from "./phrase-client.js";
 import type { CreatePhraseJobInput, PhraseJobCreation, PhraseJobPart } from "./phrase-client.js";
 import { validatePhraseWorkflowConfig } from "./phrase-config.js";
+import { inlineFeoLocale, type FeoCatalog } from "./feo-template.js";
 
 export type LocaleCompletionPolicy = "per-locale" | "all-locales";
 
@@ -34,6 +35,7 @@ export interface PhraseWorkflowConfig {
   };
   targetAdapter?: string;
   targetOptions?: Record<string, unknown>;
+  frontendTemplate?: { path: string };
   targetLocales: PhraseTargetLocale[];
   completionPolicy: {
     default: LocaleCompletionPolicy;
@@ -92,6 +94,7 @@ export interface PhraseLocalePullRequest {
   body: string;
   path: string;
   content: Uint8Array;
+  additionalFiles?: { path: string; content: Uint8Array }[];
 }
 
 export interface PhraseWorkflowRepository {
@@ -762,8 +765,36 @@ export class PhraseWorkflow {
           );
           return;
         }
+        const additionalFiles: { path: string; content: Uint8Array }[] = [];
+        if (record.config.frontendTemplate) {
+          const path = record.config.frontendTemplate.path;
+          const templateBytes = await this.dependencies.repository.readFile(path, record.baseRef);
+          if (!templateBytes)
+            throw new PhraseCatalogValidationError(`Missing Frontend template: ${path}`);
+          try {
+            const template = new TextDecoder().decode(templateBytes);
+            const descriptors = JSON.parse(
+              new TextDecoder().decode(pinnedSourceBytes),
+            ) as FeoCatalog;
+            const translated = JSON.parse(new TextDecoder().decode(content)) as Record<
+              string,
+              string
+            >;
+            additionalFiles.push({
+              path,
+              content: new TextEncoder().encode(
+                inlineFeoLocale(template, descriptors, translated, target.repositoryLocale),
+              ),
+            });
+          } catch (error) {
+            throw new PhraseCatalogValidationError(
+              `Frontend template inline failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
         const localeSlug = target.repositoryLocale.replace(/[^A-Za-z0-9._-]+/g, "-");
         const pullRequestUrl = await this.dependencies.repository.createOrUpdatePullRequest({
+          ...(additionalFiles.length ? { additionalFiles } : {}),
           repository: record.repository,
           baseRef: record.baseRef,
           branch: `i18n/phrase-${record.key.slice(0, 16)}-${localeSlug}`,

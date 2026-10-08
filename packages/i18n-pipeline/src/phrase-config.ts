@@ -128,6 +128,15 @@ export function validatePhraseWorkflowConfig(config: PhraseWorkflowConfig): void
   }
   const phraseLocales = new Set<string>();
   const repositoryLocales = new Set<string>();
+  if (config.frontendTemplate) {
+    validateRepoPath(config.frontendTemplate.path, "Frontend template path");
+    if (
+      config.frontendTemplate.path === config.sourceCatalog.path ||
+      config.targetLocales.some((locale) => locale.outputPath === config.frontendTemplate?.path)
+    ) {
+      throw new TypeError("Frontend template must have its own path");
+    }
+  }
   const outputPaths = new Set<string>();
   for (const locale of config.targetLocales) {
     if (!locale.phraseLocale.trim() || !locale.repositoryLocale.trim()) {
@@ -175,6 +184,7 @@ export function parsePhraseTmsConfig(value: unknown): PhraseTmsConfig {
       "sourceCatalog",
       "targetAdapter",
       "targetOptions",
+      "frontendTemplate",
       "targetLocales",
       "completionPolicy",
     ],
@@ -252,6 +262,9 @@ export function parsePhraseTmsConfig(value: unknown): PhraseTmsConfig {
     );
   }
 
+  const frontendTemplate = optionalRecord(root.frontendTemplate, 'TMS config "frontendTemplate"');
+  if (frontendTemplate)
+    rejectUnknownKeys(frontendTemplate, ["path"], 'TMS config "frontendTemplate"');
   const targetOptions = optionalRecord(root.targetOptions, 'TMS config "targetOptions"');
   const targetAdapter = optionalString(root.targetAdapter, 'TMS config "targetAdapter"');
   const workflow: PhraseWorkflowConfig = {
@@ -270,6 +283,13 @@ export function parsePhraseTmsConfig(value: unknown): PhraseTmsConfig {
     },
     ...(targetAdapter ? { targetAdapter } : {}),
     ...(targetOptions ? { targetOptions } : {}),
+    ...(frontendTemplate
+      ? {
+          frontendTemplate: {
+            path: requiredString(frontendTemplate.path, 'TMS config "frontendTemplate.path"'),
+          },
+        }
+      : {}),
     targetLocales,
     completionPolicy: { default: policyDefault, ...(byLocale ? { byLocale } : {}) },
   };

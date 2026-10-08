@@ -233,15 +233,20 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     }
 
     await this.ensureBranch(input.branch, input.baseRef);
-    const current = await this.getFile(input.path, input.branch);
-    if (!current || !Buffer.from(current.bytes).equals(Buffer.from(input.content))) {
-      await this.putFile(
-        input.path,
-        input.content,
-        input.branch,
-        `i18n: update ${input.path} from Phrase`,
-        current?.sha,
-      );
+    for (const file of [
+      { path: input.path, content: input.content },
+      ...(input.additionalFiles ?? []),
+    ]) {
+      const current = await this.getFile(file.path, input.branch);
+      if (!current || !Buffer.from(current.bytes).equals(Buffer.from(file.content))) {
+        await this.putFile(
+          file.path,
+          file.content,
+          input.branch,
+          `i18n: update ${file.path} from Phrase`,
+          current?.sha,
+        );
+      }
     }
     const open = existing.find(
       (pullRequest) => pullRequest.state === "open" && pullRequest.html_url,

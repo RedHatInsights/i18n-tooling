@@ -41,6 +41,18 @@ describe("Phrase TMS config parser", () => {
     });
   });
 
+  it("accepts a separate Frontend template path for the locale PR", () => {
+    expect(
+      parsePhraseTmsConfig({ ...minimalConfig, frontendTemplate: { path: "deploy/frontend.yaml" } })
+        .workflow.frontendTemplate,
+    ).toEqual({ path: "deploy/frontend.yaml" });
+    for (const path of ["../frontend.yaml", "locales/en.json", "locales/fr.json"]) {
+      expect(() =>
+        parsePhraseTmsConfig({ ...minimalConfig, frontendTemplate: { path } }),
+      ).toThrow();
+    }
+  });
+
   it.each(["./locales/en.json", "locales//en.json", "locales/en.json/", "locales/../en.json"])(
     "rejects the non-canonical source path %s",
     (path) => {

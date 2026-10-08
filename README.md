@@ -108,6 +108,10 @@ Replace `<reviewed-commit-sha>` with a reviewed commit SHA. The reusable workflo
 
 `frontend-i18n feo inline --template deploy/frontend.yaml --source deploy/locales/translation-template.json --target deploy/locales/zh-CN.json --locale zh-CN` writes only `objects[].spec.locales.zh-CN` into existing YAML, preserving other fields and comments. It rejects stale English source and unknown or empty translations. Add `--check` to either command for CI drift detection without writing. Missing translations are omitted for downstream English fallback. These commands do not need Phrase, credentials, or GitHub workflows; the Frontend CRD, operator, publisher, and Chrome overlay are separate work.
 
+## Pilot: include the Frontend template in a Phrase locale PR
+
+For the rbac-ui file-handoff pilot, optional `"frontendTemplate": { "path": "deploy/frontend.yaml" }` in the Phrase consumer config adds that YAML file to the same PR as the locale JSON. Reconciliation checks the submitted source catalog digest against the current base branch and verifies every English key still matches the YAML before writing either file. The YAML change is limited to the chosen `objects[].spec.locales.<locale>` mapping. This adapter is an optional Phrase integration layered on top of the Phrase-independent `feo` CLI; no automatic Phrase submission is introduced.
+
 ## Phrase TMS round trip
 
 The reusable Phrase workflows submit one validated source catalog and reconcile completed target jobs into ordinary locale-specific pull requests:

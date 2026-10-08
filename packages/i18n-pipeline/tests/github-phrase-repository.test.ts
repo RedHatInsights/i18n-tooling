@@ -98,6 +98,42 @@ describe("GitHubPhraseRepository", () => {
     );
   });
 
+  it("writes both JSON and Frontend YAML before opening the locale PR", async () => {
+    const writes: string[] = [];
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("/pulls?")) return response([]);
+      if (url.endsWith("/git/ref/heads/i18n/phrase-batch-fr"))
+        return response({ object: { sha: "branch" } });
+      if (url.includes("/contents/") && init?.method === "GET") return response({}, 404);
+      if (url.includes("/contents/") && init?.method === "PUT") {
+        writes.push(url);
+        return response({ content: { sha: "blob" } });
+      }
+      if (url.endsWith("/pulls") && init?.method === "POST") {
+        expect(writes).toHaveLength(2);
+        return response({ html_url: "https://github.com/example/app/pull/7" }, 201);
+      }
+      throw new Error(`Unexpected GitHub request: ${url}`);
+    };
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "token",
+      stateBranch: "i18n-state",
+      fetch,
+    });
+    await repository.createOrUpdatePullRequest({
+      ...pullRequest,
+      additionalFiles: [
+        { path: "deploy/frontend.yaml", content: new TextEncoder().encode("kind: Template\n") },
+      ],
+    });
+    expect(writes.map((url) => url.slice(url.indexOf("/contents/")))).toEqual([
+      "/contents/locales/fr.json",
+      "/contents/deploy/frontend.yaml",
+    ]);
+  });
+
   it("uses state-file SHA as compare-and-swap revision", async () => {
     const record = batchRecord();
     record.phase = "ready";

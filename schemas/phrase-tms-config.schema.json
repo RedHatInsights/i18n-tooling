@@ -80,6 +80,17 @@
       "type": "object",
       "additionalProperties": true
     },
+    "frontendTemplate": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*/$)(?!.*(?:^|/)\\.\\.?(/|$)).+$"
+        }
+      },
+      "additionalProperties": false
+    },
     "targetLocales": {
       "type": "array",
       "minItems": 1,
