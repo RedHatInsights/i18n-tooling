@@ -30,27 +30,49 @@ function identifier(node: YAMLMap, name: string, label: string): string {
   return value;
 }
 
-function frontendSpecs(doc: Document): YAMLMap[] {
+function frontendSpecs(doc: Document): { specs: YAMLMap[]; prefixes: string[] } {
   const root = mapping(doc.contents, "Template");
   if (text(root.get("kind", true), "Template.kind") !== "Template")
     throw new Error("Expected an OpenShift Template");
   const objects = root.get("objects", true);
   if (!isSeq(objects)) throw new Error("Template.objects must be a sequence");
   const specs: YAMLMap[] = [];
+  const frontends: YAMLMap[] = [];
   for (const object of objects.items) {
     if (isMap(object) && object.get("kind") === "Frontend") {
+      frontends.push(object);
       specs.push(mapping(object.get("spec", true), "Frontend.spec"));
     }
   }
-  return specs;
+  if (frontends.length < 2) return { specs, prefixes: specs.map(() => "") };
+  const seen = new Set<string>();
+  const prefixes = frontends.map((object) => {
+    const metadata = mapping(object.get("metadata", true), "Frontend.metadata");
+    const name = text(metadata.get("name", true), "Frontend.metadata.name");
+    if (seen.has(name)) throw new Error(`Duplicate Frontend.metadata.name: ${name}`);
+    seen.add(name);
+    return `objects.${name}.spec.`;
+  });
+  return { specs, prefixes };
 }
 
-function collect(doc: Document): { catalog: FeoCatalog; specs: YAMLMap[]; owned: Set<string>[] } {
-  const specs = frontendSpecs(doc);
+function collect(doc: Document): {
+  catalog: FeoCatalog;
+  specs: YAMLMap[];
+  owned: Set<string>[];
+  prefixes: string[];
+} {
+  const { specs, prefixes } = frontendSpecs(doc);
   const owned: Set<string>[] = [];
   if (!specs.length) throw new Error("Template has no Frontend objects");
   const catalog: FeoCatalog = {};
+  let frontendPrefix = "";
+  function unique(key: string, seen: Set<string>): void {
+    if (seen.has(key)) throw new Error(`Duplicate FEO message key: ${key}`);
+    seen.add(key);
+  }
   function add(key: string, node: YAMLMap, field: string, context: string): void {
+    const qualifiedKey = `${frontendPrefix}${key}`;
     const value = node.get(field, true);
     if (value === undefined || (isScalar(value) && value.value === "")) return;
     let message: string;
@@ -70,8 +92,12 @@ function collect(doc: Document): { catalog: FeoCatalog; specs: YAMLMap[]; owned:
       message = value.value;
     }
     if (!message.trim()) return;
-    if (Object.hasOwn(catalog, key)) throw new Error(`Duplicate FEO message key: ${key}`);
-    catalog[key] = { defaultMessage: message, description: `${field} of ${context}` };
+    if (Object.hasOwn(catalog, qualifiedKey))
+      throw new Error(`Duplicate FEO message key: ${qualifiedKey}`);
+    catalog[qualifiedKey] = {
+      defaultMessage: message,
+      description: `${field} of ${frontendPrefix}${context}`,
+    };
   }
   function entries(
     spec: YAMLMap,
@@ -82,24 +108,29 @@ function collect(doc: Document): { catalog: FeoCatalog; specs: YAMLMap[]; owned:
     const items = spec.get(list, true);
     if (items === undefined) return;
     if (!isSeq(items)) throw new Error(`${list} must be a sequence`);
+    const seen = new Set<string>();
     for (const raw of items.items) {
       const item = mapping(raw, list);
       const key = prefix(item);
+      unique(key, seen);
       for (const field of fields) add(`${key}.${field}`, item, field, key);
     }
   }
   function nav(items: unknown, prefix: string): void {
     if (!isSeq(items)) throw new Error(`${prefix}.navItems/routes must be a sequence`);
+    const seen = new Set<string>();
     for (const raw of items.items) {
       const item = mapping(raw, prefix);
       if (item.has("segmentRef")) continue;
       const key = `${prefix}.${identifier(item, "id", prefix)}`;
+      unique(key, seen);
       for (const field of ["title", "product"]) add(`${key}.${field}`, item, field, key);
       const routes = item.get("routes", true);
       if (routes !== undefined) nav(routes, `${key}.routes`);
     }
   }
-  for (const spec of specs) {
+  for (const [index, spec] of specs.entries()) {
+    frontendPrefix = prefixes[index]!;
     const before = new Set(Object.keys(catalog));
     entries(
       spec,
@@ -117,9 +148,11 @@ function collect(doc: Document): { catalog: FeoCatalog; specs: YAMLMap[]; owned:
     const segments = spec.get("bundleSegments", true);
     if (segments !== undefined) {
       if (!isSeq(segments)) throw new Error("bundleSegments must be a sequence");
+      const seen = new Set<string>();
       for (const raw of segments.items) {
         const item = mapping(raw, "bundleSegments");
         const key = `bundleSegments.${identifier(item, "bundleId", "bundleSegments")}.${identifier(item, "segmentId", "bundleSegments")}.navItems`;
+        unique(key, seen);
         const navItems = item.get("navItems", true);
         if (navItems !== undefined) nav(navItems, key);
       }
@@ -138,6 +171,7 @@ function collect(doc: Document): { catalog: FeoCatalog; specs: YAMLMap[]; owned:
     owned,
     catalog: Object.fromEntries(Object.entries(catalog).sort(([a], [b]) => a.localeCompare(b))),
     specs,
+    prefixes,
   };
 }
 
@@ -161,21 +195,23 @@ export function inlineFeoLocale(
   if (!/^[a-z]{2,3}(?:-[A-Za-z0-9]+)*$/.test(locale) || locale === "en")
     throw new Error(`Invalid target locale: ${locale}`);
   const doc = parse(template);
-  const { catalog, specs, owned } = collect(doc);
+  const { catalog, specs, owned, prefixes } = collect(doc);
   for (const key of new Set([...Object.keys(source), ...Object.keys(catalog)])) {
     if (source[key]?.defaultMessage !== catalog[key]?.defaultMessage) {
       throw new Error(`English source changed for ${key}; regenerate and resubmit catalog`);
     }
   }
   for (const [key, value] of Object.entries(target)) {
-    if (!(key in catalog)) throw new Error(`Unknown translation key: ${key}`);
+    if (!Object.hasOwn(catalog, key)) throw new Error(`Unknown translation key: ${key}`);
     if (typeof value !== "string" || !value.trim()) throw new Error(`Invalid translation: ${key}`);
   }
   const sorted = Object.fromEntries(Object.entries(target).sort(([a], [b]) => a.localeCompare(b)));
   const changes: { start: number; end: number; text: string }[] = [];
   for (const [index, spec] of specs.entries()) {
     const ownTarget = Object.fromEntries(
-      Object.entries(sorted).filter(([key]) => owned[index]!.has(key)),
+      Object.entries(sorted)
+        .filter(([key]) => owned[index]!.has(key))
+        .map(([key, value]) => [key.slice(prefixes[index]!.length), value]),
     );
     const locales = spec.get("locales", true);
     const existing = locales === undefined ? undefined : mapping(locales, "spec.locales");
@@ -193,19 +229,64 @@ export function inlineFeoLocale(
         : spec.items[0]?.key && isScalar(spec.items[0].key) && spec.items[0].key.range
           ? indentAt(spec.items[0].key.range[0])
           : 6;
+    // Keep comments on translated keys while replacing only this locale's mapping.
+    const localeMap = pair && isMap(pair.value) ? pair.value : undefined;
+    if (localeMap) {
+      for (const item of [...localeMap.items]) {
+        const key =
+          isScalar(item.key) && typeof item.key.value === "string" ? item.key.value : null;
+        if (key === null || !Object.hasOwn(ownTarget, key)) {
+          localeMap.items.splice(localeMap.items.indexOf(item), 1);
+        } else if (isScalar(item.value) && typeof item.value.value === "string") {
+          item.value.value = ownTarget[key]!;
+        } else {
+          localeMap.set(key, ownTarget[key]!);
+        }
+      }
+      for (const [key, value] of Object.entries(ownTarget)) {
+        if (!localeMap.has(key)) localeMap.set(key, value);
+      }
+    }
+    // yaml attaches an inline comment after `fr:` to the following mapping.
+    let headerComment: string | undefined;
+    if (keyRange && localeMap?.commentBefore) {
+      const lineEnd = template.indexOf("\n", keyRange[1]);
+      const suffix = template.slice(keyRange[1], lineEnd < 0 ? template.length : lineEnd);
+      const comment = suffix.match(/^:\s*(#.*)$/)?.[1];
+      const [first, ...rest] = localeMap.commentBefore.split("\n");
+      if (comment && first?.trim() === comment.slice(1).trim()) {
+        headerComment = comment;
+        localeMap.commentBefore = rest.join("\n") || undefined;
+      }
+    }
     // YAML nodes carry source ranges: splice only this locale's mapping, never reprint the Template.
-    const content = existing ? { [locale]: ownTarget } : { locales: { [locale]: ownTarget } };
+    const content = existing
+      ? { [locale]: localeMap ?? ownTarget }
+      : { locales: { [locale]: ownTarget } };
     const block = stringify(content, { lineWidth: 0 })
       .split("\n")
       .filter(Boolean)
-      .map((line) => `${" ".repeat(indent)}${line}\n`)
+      .map(
+        (line, index) =>
+          `${" ".repeat(indent)}${line}${index === 0 && headerComment ? ` ${headerComment}` : ""}\n`,
+      )
       .join("");
     if (keyRange && valueRange) {
       changes.push({ start: keyRange[0] - indent, end: valueRange[1], text: block });
     } else if (existing?.range) {
-      changes.push({ start: existing.range[1], end: existing.range[1], text: block });
+      const offset = existing.range[1];
+      changes.push({
+        start: offset,
+        end: offset,
+        text: `${offset && template[offset - 1] !== "\n" ? "\n" : ""}${block}`,
+      });
     } else if (spec.range) {
-      changes.push({ start: spec.range[1], end: spec.range[1], text: block });
+      const offset = spec.range[1];
+      changes.push({
+        start: offset,
+        end: offset,
+        text: `${offset && template[offset - 1] !== "\n" ? "\n" : ""}${block}`,
+      });
     }
   }
   let result = template;
