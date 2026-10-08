@@ -240,6 +240,39 @@ describe("Catalog adapters", () => {
     );
   });
 
+  it.each(["literal first", "annotation first"])(
+    "extracts a code literal and x-i18n annotation split across allOf members (%s)",
+    (order) => {
+      const context = { locale: "en", role: "source" as const, options: {} };
+      const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
+      const literal = {
+        type: "object",
+        required: ["code", "params"],
+        properties: {
+          code: { type: "string", const: "insights-rbac.role.not-found" },
+          params: { type: "object" },
+        },
+      };
+      const annotation = {
+        properties: { code: { "x-i18n": { message: "Role not found." } } },
+      };
+      const document = {
+        openapi: "3.1.0",
+        components: {
+          schemas: {
+            RoleNotFoundProblem: {
+              allOf: order === "literal first" ? [literal, annotation] : [annotation, literal],
+            },
+          },
+        },
+      };
+
+      expect(
+        adapter.read(document, context).messages["insights-rbac.role.not-found"]?.pattern,
+      ).toBe("Role not found.");
+    },
+  );
+
   it("does not treat a component $ref alias as a second message definition", () => {
     const context = { locale: "en", role: "source" as const, options: {} };
     const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
@@ -259,6 +292,67 @@ describe("Catalog adapters", () => {
               params: { type: "object" },
             },
           },
+        },
+      },
+    };
+
+    expect(Object.keys(adapter.read(document, context).messages)).toEqual([
+      "insights-rbac.role.not-found",
+    ]);
+  });
+
+  it("resolves a localized code property through a component $ref", () => {
+    const context = { locale: "en", role: "source" as const, options: {} };
+    const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
+    const document = {
+      openapi: "3.1.0",
+      components: {
+        schemas: {
+          LocalizedCode: {
+            type: "string",
+            const: "insights-rbac.role.not-found",
+            "x-i18n": { message: "Role not found." },
+          },
+          RoleNotFoundProblem: {
+            type: "object",
+            required: ["code", "params"],
+            properties: {
+              code: { $ref: "#/components/schemas/LocalizedCode" },
+              params: { type: "object" },
+            },
+          },
+        },
+      },
+    };
+
+    expect(adapter.read(document, context).messages["insights-rbac.role.not-found"]?.pattern).toBe(
+      "Role not found.",
+    );
+  });
+
+  it("does not treat a pure allOf $ref alias as a second message definition", () => {
+    const context = { locale: "en", role: "source" as const, options: {} };
+    const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
+    const document = {
+      openapi: "3.1.0",
+      components: {
+        schemas: {
+          RoleNotFoundProblem: {
+            type: "object",
+            required: ["code", "params"],
+            properties: {
+              code: {
+                const: "insights-rbac.role.not-found",
+                "x-i18n": { message: "Role not found." },
+              },
+              params: { type: "object" },
+            },
+          },
+          RoleNotFoundAlias: {
+            description: "Alias for API consumers",
+            allOf: [{ $ref: "#/components/schemas/RoleNotFoundProblem" }],
+          },
+          NestedAlias: { allOf: [{ $ref: "#/components/schemas/RoleNotFoundAlias" }] },
         },
       },
     };

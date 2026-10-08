@@ -40,6 +40,9 @@ function mergeSchema(
     if (targetProperties.params !== undefined && sourceProperties.params !== undefined) {
       properties.params = { allOf: [targetProperties.params, sourceProperties.params] };
     }
+    if (targetProperties.code !== undefined && sourceProperties.code !== undefined) {
+      properties.code = { allOf: [targetProperties.code, sourceProperties.code] };
+    }
     merged.properties = properties;
   }
   const targetRequired = Array.isArray(target.required) ? target.required : [];
@@ -92,16 +95,17 @@ function resolveSchema(
   return mergeSchema(resolved, localSchema);
 }
 
-function hasI18nExtension(
+function schemaMatches(
   value: unknown,
   schemas: Record<string, unknown>,
+  predicate: (schema: Record<string, unknown>) => boolean,
   referenceChain = new Set<string>(),
 ): boolean {
   if (!isRecord(value)) return false;
-  if (value[I18N_EXTENSION] !== undefined) return true;
+  if (predicate(value)) return true;
   if (
     Array.isArray(value.allOf) &&
-    value.allOf.some((member) => hasI18nExtension(member, schemas, referenceChain))
+    value.allOf.some((member) => schemaMatches(member, schemas, predicate, referenceChain))
   ) {
     return true;
   }
@@ -116,35 +120,25 @@ function hasI18nExtension(
   if (referenceChain.has(name) || !isRecord(schemas[name])) return false;
   const nextChain = new Set(referenceChain);
   nextChain.add(name);
-  return hasI18nExtension(schemas[name], schemas, nextChain);
+  return schemaMatches(schemas[name], schemas, predicate, nextChain);
 }
 
-function hasLocalizedCodeProperty(
-  value: unknown,
-  schemas: Record<string, unknown>,
-  referenceChain = new Set<string>(),
-): boolean {
-  if (!isRecord(value)) return false;
-  const properties = isRecord(value.properties) ? value.properties : {};
-  if (properties.code !== undefined && hasI18nExtension(properties.code, schemas)) return true;
-  if (
-    Array.isArray(value.allOf) &&
-    value.allOf.some((member) => hasLocalizedCodeProperty(member, schemas, referenceChain))
-  ) {
-    return true;
-  }
-  if (typeof value.$ref !== "string" || !value.$ref.startsWith(COMPONENTS_SCHEMA_REF)) return false;
+function hasLocalizedCodeProperty(value: unknown, schemas: Record<string, unknown>): boolean {
+  return schemaMatches(value, schemas, (schema) => {
+    const properties = isRecord(schema.properties) ? schema.properties : {};
+    return (
+      properties.code !== undefined &&
+      schemaMatches(properties.code, schemas, (code) => code[I18N_EXTENSION] !== undefined)
+    );
+  });
+}
 
-  let name: string;
-  try {
-    name = pointerName(value.$ref);
-  } catch {
+function isReferenceAlias(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (Object.keys(value).some((key) => !["$ref", "allOf", "summary", "description"].includes(key)))
     return false;
-  }
-  if (referenceChain.has(name) || !isRecord(schemas[name])) return false;
-  const nextChain = new Set(referenceChain);
-  nextChain.add(name);
-  return hasLocalizedCodeProperty(schemas[name], schemas, nextChain);
+  if (typeof value.$ref === "string") return value.allOf === undefined;
+  return Array.isArray(value.allOf) && value.allOf.length === 1 && isReferenceAlias(value.allOf[0]);
 }
 
 function codeValue(schema: Record<string, unknown>, schemaName: string): string {
@@ -277,13 +271,7 @@ export class OpenApiProblemDetailsAdapter implements CatalogAdapter {
     const messages = Object.create(null) as Catalog["messages"];
 
     for (const [schemaName, rawSchema] of Object.entries(schemas)) {
-      if (
-        isRecord(rawSchema) &&
-        typeof rawSchema.$ref === "string" &&
-        Object.keys(rawSchema).every((key) => ["$ref", "summary", "description"].includes(key))
-      ) {
-        continue;
-      }
+      if (isReferenceAlias(rawSchema)) continue;
       if (!hasLocalizedCodeProperty(rawSchema, schemas)) continue;
       const schema = resolveSchema(rawSchema, schemas);
       const extracted = extractMessage(schema, schemaName, schemas);
