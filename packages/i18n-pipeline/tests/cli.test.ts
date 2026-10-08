@@ -307,7 +307,7 @@ describe("frontend-i18n CLI", () => {
         stderr: (message) => errors.push(message),
       }),
     ).toBe(0);
-    expect(output[0]).toContain("<check|validate|validate-project|convert|tms|version|help>");
+    expect(output[0]).toContain("<check|validate|validate-project|convert|feo|tms|version|help>");
 
     expect(
       await runCli(["check", "--help"], {
@@ -327,7 +327,7 @@ describe("frontend-i18n CLI", () => {
     ).toBe(1);
     expect(unknownErrors[0]).toContain('Unknown command "unknown"');
     expect(unknownErrors[0]).toContain(
-      "Usage: frontend-i18n <check|validate|validate-project|convert|tms|version|help>",
+      "Usage: frontend-i18n <check|validate|validate-project|convert|feo|tms|version|help>",
     );
   });
 

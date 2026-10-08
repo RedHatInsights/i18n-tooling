@@ -34,7 +34,8 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@formatjs/icu-messageformat-parser": "^3.5.20"
+    "@formatjs/icu-messageformat-parser": "^3.5.20",
+    "yaml": "^2.8.2"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
