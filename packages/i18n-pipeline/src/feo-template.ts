@@ -201,6 +201,10 @@ export function feoTemplateLocales(template: string): string[] {
   return [...locales].sort();
 }
 
+export function formatFeoCatalog(template: string): string {
+  return serializeFeoCatalog(extractFeoCatalog(template));
+}
+
 function parse(template: string): Document {
   const doc = parseDocument(template, { uniqueKeys: true, keepSourceTokens: true });
   if (doc.errors.length) throw new Error(`Invalid Frontend template: ${doc.errors[0]!.message}`);

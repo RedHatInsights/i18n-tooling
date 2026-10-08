@@ -53,6 +53,31 @@ describe("Phrase TMS config parser", () => {
     }
   });
 
+  it("opts into generating a FormatJS source catalog from Frontend YAML", () => {
+    const config = {
+      ...minimalConfig,
+      sourceCatalog: {
+        path: "deploy/locales/insights-rbac-ui-feo-frontend-en.json",
+        adapter: "formatjs-json",
+        locale: "en",
+      },
+      frontendTemplate: { path: "deploy/frontend.yaml", generateSourceCatalog: true },
+    };
+    expect(parsePhraseTmsConfig(config).workflow.frontendTemplate).toEqual(config.frontendTemplate);
+    expect(() =>
+      parsePhraseTmsConfig({
+        ...config,
+        frontendTemplate: { ...config.frontendTemplate, generateSourceCatalog: "yes" },
+      }),
+    ).toThrow(/must be a boolean/);
+    expect(() =>
+      parsePhraseTmsConfig({
+        ...config,
+        sourceCatalog: { ...config.sourceCatalog, adapter: "icu-json" },
+      }),
+    ).toThrow(/formatjs-json/);
+  });
+
   it.each(["./locales/en.json", "locales//en.json", "locales/en.json/", "locales/../en.json"])(
     "rejects the non-canonical source path %s",
     (path) => {

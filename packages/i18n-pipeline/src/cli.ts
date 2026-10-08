@@ -29,6 +29,7 @@ import { parsePhraseTmsConfig, targetAdapterId } from "./phrase-config.js";
 import { PhraseWorkflow, type PhraseReconcileResult } from "./phrase-workflow.js";
 import {
   extractFeoCatalog,
+  formatFeoCatalog,
   inlineFeoLocale,
   serializeFeoCatalog,
   type FeoCatalog,
@@ -468,10 +469,20 @@ async function runTmsCommand(
   const safeConfigPath = await resolveTmsInputPath(options.cwd, configPath, "TMS config");
   const config = await readJson(safeConfigPath, "TMS config");
   const parsed = parsePhraseTmsConfig(config);
-  const sourceCatalogPath =
-    command === "submit"
-      ? await resolveTmsInputPath(options.cwd, parsed.workflow.sourceCatalog.path, "Source catalog")
-      : undefined;
+  // A generated-source FEO config reads the Frontend template instead of a checked-in catalog.
+  const generatedFrom = parsed.workflow.frontendTemplate?.generateSourceCatalog
+    ? parsed.workflow.frontendTemplate
+    : undefined;
+  const submitInputPath =
+    command !== "submit"
+      ? undefined
+      : generatedFrom
+        ? await resolveTmsInputPath(options.cwd, generatedFrom.path, "Frontend template")
+        : await resolveTmsInputPath(
+            options.cwd,
+            parsed.workflow.sourceCatalog.path,
+            "Source catalog",
+          );
   const catalogAdapters = builtInCatalogAdapters([
     parsed.workflow.sourceCatalog.adapter,
     targetAdapterId(parsed.workflow),
@@ -522,7 +533,9 @@ async function runTmsCommand(
       );
     }
     if (!sourceCommit) throw new Error("Pass --source-commit or set GITHUB_SHA");
-    const sourceBytes = await readFile(sourceCatalogPath!);
+    const sourceBytes = generatedFrom
+      ? new TextEncoder().encode(formatFeoCatalog(await readFile(submitInputPath!, "utf8")))
+      : await readFile(submitInputPath!);
     const batch = await workflow.submit({
       repository: repositoryName,
       baseRef,
