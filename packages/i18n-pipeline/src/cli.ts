@@ -25,6 +25,7 @@ import { GitHubPhraseRepository } from "./github-phrase-repository.js";
 import { PhraseClient, type PhraseClientOptions } from "./phrase-client.js";
 import { parsePhraseTmsConfig } from "./phrase-config.js";
 import { PhraseWorkflow, type PhraseReconcileResult } from "./phrase-workflow.js";
+import { extractFeoCatalog, inlineFeoLocale, type FeoCatalog } from "./feo-template.js";
 
 export interface CliOptions {
   cwd?: string;
@@ -34,7 +35,7 @@ export interface CliOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-const ROOT_HELP = `Usage: frontend-i18n <check|validate|validate-project|convert|tms|version|help> [options]
+const ROOT_HELP = `Usage: frontend-i18n <check|validate|validate-project|convert|feo|tms|version|help> [options]
 
 Commands:
   check             Compare source and target catalogs
@@ -42,12 +43,19 @@ Commands:
   validate-project  Check configured catalogs and generated-catalog sync
   convert           Convert a catalog between adapters
   tms               Submit and reconcile translation batches
+  feo               Extract and inline Frontend template translations
   version           Print the package version
   help              Show help, optionally for one command
 
 Use frontend-i18n <command> --help for command options.`;
 
 const COMMAND_HELP: Record<string, string> = {
+  feo: `Usage: frontend-i18n feo <extract|inline> [options]
+
+  extract --template <yaml> --output <json> [--check]
+  inline --template <yaml> --source <json> --target <json> --locale <tag> [--check]
+
+--check verifies checked-in output without writing. Inline updates only spec.locales.<locale>.`,
   check: `Usage: frontend-i18n check --source <path> --target <path> [options]
 
 Options:
@@ -552,6 +560,57 @@ async function validateProject(
   return true;
 }
 
+async function runFeoCommand(
+  args: string[],
+  cwd: string,
+  stdout: (message: string) => void,
+): Promise<void> {
+  const [subcommand, ...rest] = args;
+  if (subcommand !== "extract" && subcommand !== "inline")
+    throw new Error("feo requires extract or inline");
+  const values = parseOptions(rest, {
+    template: { type: "string" },
+    output: { type: "string" },
+    source: { type: "string" },
+    target: { type: "string" },
+    locale: { type: "string" },
+    check: { type: "boolean" },
+  });
+  if (!values.template) throw new Error("feo requires --template");
+  const templatePath = resolve(cwd, values.template);
+  const template = await readFile(templatePath, "utf8");
+  let path: string;
+  let generated: string;
+  if (subcommand === "extract") {
+    if (!values.output) throw new Error("feo extract requires --output");
+    path = resolve(cwd, values.output);
+    generated = `${JSON.stringify(extractFeoCatalog(template), null, 2)}\n`;
+  } else {
+    if (!values.source || !values.target || !values.locale)
+      throw new Error("feo inline requires --source, --target and --locale");
+    path = templatePath;
+    const source = (await readJson(
+      resolve(cwd, values.source),
+      "FEO source catalog",
+    )) as FeoCatalog;
+    const target = (await readJson(resolve(cwd, values.target), "FEO target catalog")) as Record<
+      string,
+      string
+    >;
+    generated = inlineFeoLocale(template, source, target, values.locale);
+  }
+  if (values.check) {
+    const current = await readFile(path, "utf8").catch(() => "");
+    if (current !== generated)
+      throw new Error(`${path} is out of sync with the FEO ${subcommand} output`);
+    stdout(`FEO ${subcommand} output is in sync.`);
+  } else {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, generated, "utf8");
+    stdout(`Updated ${path}.`);
+  }
+}
+
 export async function runCli(argv: string[], options: CliOptions = {}): Promise<number> {
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
@@ -596,6 +655,10 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
         stdout,
         fetch: options.fetch,
       });
+    }
+    if (command === "feo") {
+      await runFeoCommand(args, cwd, stdout);
+      return 0;
     }
     if (command === "version") {
       const manifest = await readJson(

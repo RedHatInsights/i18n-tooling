@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { parse } from "yaml";
 import { isCliEntryPoint, runCli } from "../src/cli.js";
 
 let projectRoot: string | undefined;
@@ -297,6 +298,87 @@ describe("frontend-i18n CLI", () => {
     );
   });
 
+  it("extracts, inlines and checks a multi-Frontend template without writing in check mode", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-feo-"));
+    const templatePath = join(projectRoot, "frontend.yaml");
+    const sourcePath = join(projectRoot, "locales/source.json");
+    const targetPath = join(projectRoot, "locales/fr.json");
+    const template = `kind: Template
+objects:
+  - kind: Frontend
+    metadata:
+      name: first
+    spec:
+      module:
+        defaultDocumentTitle: First
+  - kind: Frontend
+    metadata:
+      name: second
+    spec:
+      module:
+        defaultDocumentTitle: Second
+`;
+    await writeFile(templatePath, template);
+    const errors: string[] = [];
+    const run = (args: string[]) =>
+      runCli(["feo", ...args], {
+        cwd: projectRoot,
+        stdout: () => undefined,
+        stderr: (message) => errors.push(message),
+      });
+    const extract = ["extract", "--template", "frontend.yaml", "--output", "locales/source.json"];
+    const inline = [
+      "inline",
+      "--template",
+      "frontend.yaml",
+      "--source",
+      "locales/source.json",
+      "--target",
+      "locales/fr.json",
+      "--locale",
+      "fr",
+    ];
+
+    expect(await run([...extract, "--check"])).toBe(1);
+    await expect(readFile(sourcePath, "utf8")).rejects.toThrow();
+    expect(await run(extract)).toBe(0);
+    expect(await run([...extract, "--check"])).toBe(0);
+    const source = JSON.parse(await readFile(sourcePath, "utf8"));
+    expect(Object.keys(source)).toEqual([
+      "objects.first.spec.module.defaultDocumentTitle",
+      "objects.second.spec.module.defaultDocumentTitle",
+    ]);
+    await writeFile(
+      targetPath,
+      JSON.stringify({
+        "objects.first.spec.module.defaultDocumentTitle": "Premier",
+        "objects.second.spec.module.defaultDocumentTitle": "Deuxième",
+      }),
+    );
+    expect(await run([...inline, "--check"])).toBe(1);
+    expect(await readFile(templatePath, "utf8")).toBe(template);
+    expect(await run(inline)).toBe(0);
+    const updated = await readFile(templatePath, "utf8");
+    const objects = parse(updated).objects;
+    expect(objects[0].spec.locales.fr).toEqual({ "module.defaultDocumentTitle": "Premier" });
+    expect(objects[1].spec.locales.fr).toEqual({ "module.defaultDocumentTitle": "Deuxième" });
+    expect(await run([...inline, "--check"])).toBe(0);
+    expect(await readFile(templatePath, "utf8")).toBe(updated);
+    expect(await run([...extract, "--check"])).toBe(0);
+
+    await writeFile(targetPath, '{"__proto__":"unknown"}');
+    expect(await run(inline)).toBe(1);
+    expect(errors.at(-1)).toContain("Unknown translation key: __proto__");
+    expect(await readFile(templatePath, "utf8")).toBe(updated);
+    await writeFile(
+      templatePath,
+      updated.replace("defaultDocumentTitle: First", "defaultDocumentTitle: Changed"),
+    );
+    expect(await run([...extract, "--check"])).toBe(1);
+    expect(await run([...inline, "--check"])).toBe(1);
+    expect(errors.at(-1)).toContain("English source changed");
+  });
+
   it("shows general and per-command help", async () => {
     const output: string[] = [];
     const errors: string[] = [];
@@ -307,7 +389,7 @@ describe("frontend-i18n CLI", () => {
         stderr: (message) => errors.push(message),
       }),
     ).toBe(0);
-    expect(output[0]).toContain("<check|validate|validate-project|convert|tms|version|help>");
+    expect(output[0]).toContain("<check|validate|validate-project|convert|feo|tms|version|help>");
 
     expect(
       await runCli(["check", "--help"], {
@@ -327,7 +409,7 @@ describe("frontend-i18n CLI", () => {
     ).toBe(1);
     expect(unknownErrors[0]).toContain('Unknown command "unknown"');
     expect(unknownErrors[0]).toContain(
-      "Usage: frontend-i18n <check|validate|validate-project|convert|tms|version|help>",
+      "Usage: frontend-i18n <check|validate|validate-project|convert|feo|tms|version|help>",
     );
   });
 
