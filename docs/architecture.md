@@ -36,8 +36,9 @@ Built-in adapter IDs:
 
 - **`formatjs-json`** reads FormatJS extracted source descriptors (`id -> {defaultMessage, description}`) and flat compiled target messages (`id -> string`). Phrase target exports may also use descriptor objects; the target reader extracts only `defaultMessage` and the writer emits flat `id -> string` output. This matches `rbac-ui`'s `translation-template.json` and `translations.json` artifacts.
 - **`icu-json`** reads/writes flat `message code -> ICU pattern` JSON for service-owned errors. Problem Details carry the same `code`, raw typed `params`, and English `detail` fallback.
+- **`openapi-problem-details`** reads OpenAPI 3 JSON/YAML component schemas. It extracts code/ICU-message pairs from `x-i18n.message` on a literal `code` property and verifies each ICU argument is a required property of the typed `params` object. Use it as a source adapter and convert to `icu-json`.
 
-Both built-ins validate ICU syntax using FormatJS's official `@formatjs/icu-messageformat-parser`. Consumers still run their native compiler/extractor: syntax validation does not replace framework compilation or source-catalog checks.
+The JSON adapters validate ICU syntax using FormatJS's official `@formatjs/icu-messageformat-parser`; the OpenAPI adapter validates extracted patterns and parameter names. Consumers still run their native compiler/extractor: catalog validation does not replace framework compilation or source-code checks.
 
 ### Extending catalog formats
 
@@ -56,9 +57,9 @@ Install a Node package that default-exports a `CatalogAdapter`, then map the sta
 }
 ```
 
-The package is loaded at runtime by the Node CLI. Its exported `id` must match the configured ID. Adapter-specific options come from an optional JSON config file and are passed as `context.options`. Optional `parseDocument(content, context)` and `serializeDocument(document, context)` methods let adapters read and write formats such as YAML or PO; without them, the CLI uses JSON. The reusable workflow selects only an adapter ID and config path; it does not dynamically choose GitHub `uses` references or package names.
+The package is loaded at runtime by the Node CLI. Its exported `id` must match the configured ID. Adapter-specific options come from an optional JSON config file and are passed as `context.options`. Optional `parseDocument(content, context)` and `serializeDocument(document, context)` methods let adapters read and write formats such as YAML or PO; without them, the CLI uses JSON. A consumer `package.json` is optional when using only built-in adapters; custom adapter registration requires it. The reusable workflow selects only an adapter ID and config path; it does not dynamically choose GitHub `uses` references or package names.
 
-Django gettext is enabled in `insights-rbac`, but there are no current PO catalogs or catalog workflow. The POC therefore introduces keyed ICU JSON instead of adding a PO conversion path. i18next, Lingui, and PO adapters remain future plugins.
+Django gettext is enabled in `insights-rbac`, but there are no current PO catalogs. The service can keep legacy gettext unchanged and validate its contract-generated keyed ICU JSON through the catalog-only reusable workflow. i18next, Lingui, and PO adapters remain future plugins.
 
 ## Runtime and framework tooling
 
@@ -100,7 +101,7 @@ The reusable submit and reconcile workflows use protected environment secrets fo
 
 ## Reusable workflow
 
-The GitHub workflow sets up Node.js 22+ and supports Bun or npm for dependency installation. With `validation-config`, it invokes `frontend-i18n validate-project` directly; a JSON plan declares catalog paths, adapters, locale contexts, and generated-file sync commands. Each generator runs with an argument array (no shell) and writes to a temporary output path for comparison. Otherwise, the workflow retains `validation-command` through `npm run`. Simple commands can continue using adapter ID, path, role, locale, and optional JSON config through `I18N_CATALOG_*` environment variables.
+The GitHub workflow sets up Node.js 22+ and supports Bun or npm for consumer dependency installation. With `validation-config`, it invokes `frontend-i18n validate-project` directly; a JSON plan declares catalog paths, adapters, locale contexts, and generated-file sync commands. Each generator runs with an argument array (no shell) and writes to a temporary output path for comparison. Otherwise, the workflow retains `validation-command` through `npm run`. Non-JavaScript consumers set `catalog-only: true` to skip consumer dependency installation and FormatJS source lint while retaining the shared catalog checks. Simple commands can continue using adapter ID, path, role, locale, and optional JSON config through `I18N_CATALOG_*` environment variables.
 
 Workflow inputs are not interpolated into shell code, and a format adapter ID never selects a dynamic GitHub `uses` reference. Custom adapter packages must be installed and pinned by the consumer environment.
 

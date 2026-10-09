@@ -141,4 +141,400 @@ describe("Catalog adapters", () => {
     expect(read).toThrowError(CatalogFormatError);
     expect(read).toThrowError(/icu-json message "greeting" has invalid ICU syntax/);
   });
+
+  it("extracts Problem Details codes and ICU messages from OpenAPI YAML", async () => {
+    const source = await readFile(
+      new URL("./fixtures/openapi-i18n/problem-details.yaml", import.meta.url),
+      "utf8",
+    );
+    const context = { locale: "en", role: "source" as const, options: {} };
+    const registry = new CatalogAdapterRegistry();
+    const adapter = registry.get("openapi-problem-details");
+    const document = adapter.parseDocument!(source, context);
+
+    const catalog = adapter.read(document, context);
+    const converted = convertCatalog(document, adapter, registry.get("icu-json"), context, context);
+
+    expect(catalog.messages["insights-rbac.role.not-found"]?.pattern).toBe(
+      "Role {roleName} was not found.",
+    );
+    expect(converted).toEqual({ "insights-rbac.role.not-found": "Role {roleName} was not found." });
+  });
+
+  it("parses JSON OpenAPI documents", () => {
+    const context = { locale: "en", role: "source" as const, options: {} };
+    const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
+    const document = {
+      openapi: "3.1.0",
+      components: {
+        schemas: {
+          RoleNotFound: {
+            type: "object",
+            required: ["code", "params"],
+            properties: {
+              code: {
+                type: "string",
+                const: "insights-rbac.role.not-found",
+                "x-i18n": { message: "Role {roleName} was not found." },
+              },
+              params: {
+                type: "object",
+                required: ["roleName"],
+                properties: { roleName: { type: "string" } },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    expect(adapter.parseDocument!(JSON.stringify(document), context)).toEqual(document);
+    expect(adapter.read(document, context).messages["insights-rbac.role.not-found"]?.pattern).toBe(
+      "Role {roleName} was not found.",
+    );
+  });
+
+  it("keeps required params from both allOf members", () => {
+    const context = { locale: "en", role: "source" as const, options: {} };
+    const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
+    const document = {
+      openapi: "3.1.0",
+      components: {
+        schemas: {
+          BaseParams: {
+            type: "object",
+            required: ["roleName"],
+            properties: { roleName: { type: "string" } },
+          },
+          BaseProblem: {
+            type: "object",
+            required: ["params"],
+            properties: { params: { $ref: "#/components/schemas/BaseParams" } },
+          },
+          RoleNotFoundProblem: {
+            allOf: [
+              { $ref: "#/components/schemas/BaseProblem" },
+              {
+                type: "object",
+                required: ["code", "params"],
+                properties: {
+                  code: {
+                    const: "insights-rbac.role.not-found",
+                    "x-i18n": { message: "Role {roleName} not found ({requestId})." },
+                  },
+                  params: {
+                    type: "object",
+                    required: ["requestId"],
+                    properties: { requestId: { type: "string" } },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+    };
+
+    expect(adapter.read(document, context).messages["insights-rbac.role.not-found"]?.pattern).toBe(
+      "Role {roleName} not found ({requestId}).",
+    );
+  });
+
+  it.each(["literal first", "annotation first"])(
+    "extracts a code literal and x-i18n annotation split across allOf members (%s)",
+    (order) => {
+      const context = { locale: "en", role: "source" as const, options: {} };
+      const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
+      const literal = {
+        type: "object",
+        required: ["code", "params"],
+        properties: {
+          code: { type: "string", const: "insights-rbac.role.not-found" },
+          params: { type: "object" },
+        },
+      };
+      const annotation = {
+        properties: { code: { "x-i18n": { message: "Role not found." } } },
+      };
+      const document = {
+        openapi: "3.1.0",
+        components: {
+          schemas: {
+            RoleNotFoundProblem: {
+              allOf: order === "literal first" ? [literal, annotation] : [annotation, literal],
+            },
+          },
+        },
+      };
+
+      expect(
+        adapter.read(document, context).messages["insights-rbac.role.not-found"]?.pattern,
+      ).toBe("Role not found.");
+    },
+  );
+
+  it("does not treat a component $ref alias as a second message definition", () => {
+    const context = { locale: "en", role: "source" as const, options: {} };
+    const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
+    const document = {
+      openapi: "3.1.0",
+      components: {
+        schemas: {
+          RoleNotFoundAlias: { $ref: "#/components/schemas/RoleNotFoundProblem" },
+          RoleNotFoundProblem: {
+            type: "object",
+            required: ["code", "params"],
+            properties: {
+              code: {
+                const: "insights-rbac.role.not-found",
+                "x-i18n": { message: "Role not found." },
+              },
+              params: { type: "object" },
+            },
+          },
+        },
+      },
+    };
+
+    expect(Object.keys(adapter.read(document, context).messages)).toEqual([
+      "insights-rbac.role.not-found",
+    ]);
+  });
+
+  it("resolves a localized code property through a component $ref", () => {
+    const context = { locale: "en", role: "source" as const, options: {} };
+    const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
+    const document = {
+      openapi: "3.1.0",
+      components: {
+        schemas: {
+          LocalizedCode: {
+            type: "string",
+            const: "insights-rbac.role.not-found",
+            "x-i18n": { message: "Role not found." },
+          },
+          RoleNotFoundProblem: {
+            type: "object",
+            required: ["code", "params"],
+            properties: {
+              code: { $ref: "#/components/schemas/LocalizedCode" },
+              params: { type: "object" },
+            },
+          },
+        },
+      },
+    };
+
+    expect(adapter.read(document, context).messages["insights-rbac.role.not-found"]?.pattern).toBe(
+      "Role not found.",
+    );
+  });
+
+  it("does not treat a pure allOf $ref alias as a second message definition", () => {
+    const context = { locale: "en", role: "source" as const, options: {} };
+    const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
+    const document = {
+      openapi: "3.1.0",
+      components: {
+        schemas: {
+          RoleNotFoundProblem: {
+            type: "object",
+            required: ["code", "params"],
+            properties: {
+              code: {
+                const: "insights-rbac.role.not-found",
+                "x-i18n": { message: "Role not found." },
+              },
+              params: { type: "object" },
+            },
+          },
+          RoleNotFoundAlias: {
+            description: "Alias for API consumers",
+            allOf: [{ $ref: "#/components/schemas/RoleNotFoundProblem" }],
+          },
+          NestedAlias: { allOf: [{ $ref: "#/components/schemas/RoleNotFoundAlias" }] },
+        },
+      },
+    };
+
+    expect(Object.keys(adapter.read(document, context).messages)).toEqual([
+      "insights-rbac.role.not-found",
+    ]);
+  });
+
+  it("rejects OpenAPI message codes that are not literals", () => {
+    const context = { locale: "en", role: "source" as const, options: {} };
+    const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
+    const document = {
+      openapi: "3.0.3",
+      components: {
+        schemas: {
+          InvalidCodeProblem: {
+            type: "object",
+            required: ["code", "params"],
+            properties: {
+              code: {
+                type: "string",
+                enum: ["insights-rbac.error.first", "insights-rbac.error.second"],
+                "x-i18n": { message: "A request failed." },
+              },
+              params: { type: "object" },
+            },
+          },
+        },
+      },
+    };
+
+    expect(() => adapter.read(document, context)).toThrowError(
+      /code must be a string const or a single-value enum/,
+    );
+  });
+
+  it("rejects malformed ICU messages in OpenAPI extensions", () => {
+    const context = { locale: "en", role: "source" as const, options: {} };
+    const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
+    const document = {
+      openapi: "3.0.3",
+      components: {
+        schemas: {
+          InvalidMessageProblem: {
+            type: "object",
+            required: ["code", "params"],
+            properties: {
+              code: {
+                type: "string",
+                enum: ["insights-rbac.role.not-found"],
+                "x-i18n": { message: "Role {roleName" },
+              },
+              params: {
+                type: "object",
+                required: ["roleName"],
+                properties: { roleName: { type: "string" } },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    expect(() => adapter.read(document, context)).toThrowError(/invalid ICU syntax/);
+  });
+
+  it("rejects OpenAPI messages with arguments missing from the params schema", () => {
+    const context = { locale: "en", role: "source" as const, options: {} };
+    const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
+    const document = {
+      openapi: "3.0.3",
+      components: {
+        schemas: {
+          InvalidProblem: {
+            type: "object",
+            required: ["code", "params"],
+            properties: {
+              code: {
+                type: "string",
+                enum: ["insights-rbac.role.not-found"],
+                "x-i18n": { message: "Role {roleName} was not found." },
+              },
+              params: { type: "object", properties: { role: { type: "string" } } },
+            },
+          },
+        },
+      },
+    };
+
+    expect(() => adapter.read(document, context)).toThrowError(CatalogFormatError);
+    expect(() => adapter.read(document, context)).toThrowError(/missing from params: roleName/);
+  });
+
+  it("rejects ICU arguments that are optional in the params schema", () => {
+    const context = { locale: "en", role: "source" as const, options: {} };
+    const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
+    const document = {
+      openapi: "3.0.3",
+      components: {
+        schemas: {
+          OptionalParamProblem: {
+            type: "object",
+            required: ["code", "params"],
+            properties: {
+              code: {
+                type: "string",
+                enum: ["insights-rbac.role.not-found"],
+                "x-i18n": { message: "Role {roleName} was not found." },
+              },
+              params: { type: "object", properties: { roleName: { type: "string" } } },
+            },
+          },
+        },
+      },
+    };
+
+    expect(() => adapter.read(document, context)).toThrowError(/not required in params: roleName/);
+  });
+
+  it("ignores unrelated schemas with unsupported external references", () => {
+    const context = { locale: "en", role: "source" as const, options: {} };
+    const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
+    const document = {
+      openapi: "3.0.3",
+      components: {
+        schemas: {
+          ExternalSchema: { allOf: [{ $ref: "https://example.test/schemas/External" }] },
+          RoleNotFoundProblem: {
+            type: "object",
+            required: ["code", "params"],
+            properties: {
+              code: {
+                type: "string",
+                enum: ["insights-rbac.role.not-found"],
+                "x-i18n": { message: "Role not found." },
+              },
+              params: { type: "object" },
+            },
+          },
+        },
+      },
+    };
+
+    expect(adapter.read(document, context).messages["insights-rbac.role.not-found"]?.pattern).toBe(
+      "Role not found.",
+    );
+  });
+
+  it("rejects target-role use of the source-only OpenAPI adapter", () => {
+    const context = { locale: "fr", role: "target" as const, options: {} };
+    const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
+    const document = {
+      openapi: "3.0.3",
+      components: { schemas: {} },
+    };
+
+    expect(() => adapter.read(document, context)).toThrowError(/source-only adapter/);
+  });
+
+  it("rejects duplicate OpenAPI message codes", () => {
+    const context = { locale: "en", role: "source" as const, options: {} };
+    const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
+    const localizedSchema = {
+      type: "object",
+      required: ["code", "params"],
+      properties: {
+        code: {
+          type: "string",
+          enum: ["insights-rbac.role.not-found"],
+          "x-i18n": { message: "Role not found." },
+        },
+        params: { type: "object", properties: {} },
+      },
+    };
+    const document = {
+      openapi: "3.0.3",
+      components: { schemas: { FirstProblem: localizedSchema, SecondProblem: localizedSchema } },
+    };
+
+    expect(() => adapter.read(document, context)).toThrowError(
+      /duplicate.*insights-rbac.role.not-found/i,
+    );
+  });
 });

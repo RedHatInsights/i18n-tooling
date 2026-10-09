@@ -2,7 +2,15 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parse as parseIcuMessage } from "@formatjs/icu-messageformat-parser";
-export { checkCatalogs, type ArgumentMismatch, type CatalogCheckResult } from "./catalog-check.js";
+import { CatalogFormatError } from "./catalog-format-error.js";
+import { OpenApiProblemDetailsAdapter } from "./openapi-problem-details-adapter.js";
+export {
+  checkCatalogs,
+  getIcuArgumentNames,
+  type ArgumentMismatch,
+  type CatalogCheckResult,
+} from "./catalog-check.js";
+export { CatalogFormatError } from "./catalog-format-error.js";
 export { parseCatalogDocument, serializeCatalogDocument } from "./catalog-document.js";
 export {
   argumentMismatchHint,
@@ -97,13 +105,6 @@ export interface CatalogAdapter {
   serializeDocument?(document: unknown, context: AdapterContext): string;
   read(document: unknown, context: AdapterContext): Catalog;
   write(catalog: Catalog, context: AdapterContext): unknown;
-}
-
-export class CatalogFormatError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "CatalogFormatError";
-  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -297,6 +298,7 @@ export class CatalogAdapterRegistry {
   private readonly adapters = new Map<string, CatalogAdapter>([
     ["formatjs-json", new FormatJsJsonAdapter()],
     ["icu-json", new IcuJsonAdapter()],
+    ["openapi-problem-details", new OpenApiProblemDetailsAdapter()],
   ]);
 
   register(adapter: CatalogAdapter): void {
@@ -334,7 +336,14 @@ export async function createCatalogAdapterRegistry(
 ): Promise<CatalogAdapterRegistry> {
   const registry = new CatalogAdapterRegistry();
   const manifestPath = resolve(projectRoot, "package.json");
-  const manifest: unknown = JSON.parse(await readFile(manifestPath, "utf8"));
+  let manifestContents: string;
+  try {
+    manifestContents = await readFile(manifestPath, "utf8");
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") return registry;
+    throw error;
+  }
+  const manifest: unknown = JSON.parse(manifestContents);
   if (!isRecord(manifest)) {
     throw new TypeError("Project package.json must contain a JSON object");
   }

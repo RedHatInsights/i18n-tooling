@@ -1,0 +1,35 @@
+openapi: 3.1.0
+info:
+  title: insights-rbac test contract
+  version: 1.0.0
+paths: {}
+components:
+  schemas:
+    ProblemDetails:
+      type: object
+      properties:
+        status:
+          type: integer
+    RoleNotFoundParams:
+      type: object
+      required:
+        - roleName
+      properties:
+        roleName:
+          type: string
+    RoleNotFoundProblem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemDetails"
+        - type: object
+          required:
+            - code
+            - params
+          properties:
+            code:
+              type: string
+              enum:
+                - insights-rbac.role.not-found
+              x-i18n:
+                message: "Role {roleName} was not found."
+            params:
+              $ref: "#/components/schemas/RoleNotFoundParams"
