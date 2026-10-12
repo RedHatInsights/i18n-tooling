@@ -88,6 +88,25 @@ The reusable `i18n-validate.yml` workflow checks out tooling source at the calle
 
 To onboard a new consumer, start with the [consumer onboarding checklist](docs/consumer-onboarding.md). It is written so a person or a coding agent can follow it step by step.
 
+## Onboarding skill
+
+The `i18n-onboarding` skill inspects a repository and drives `i18n-pipeline` to add catalog validation and optional Phrase, Konflux, and FEO localization. It works in Claude Code, Codex CLI, opencode, and Pi. Until the first npm release it needs `I18N_PIPELINE_CLI` to point at a locally built `packages/i18n-pipeline/dist/cli.js`.
+
+Install it for all four harnesses with one command:
+
+```bash
+npx skills add RedHatInsights/i18n-tooling -g -s i18n-onboarding -a claude-code -a codex -a opencode -a pi -y
+```
+
+This writes one copy to `~/.agents/skills/i18n-onboarding/` (read by Codex CLI, opencode, and Pi) and links it into `~/.claude/skills/` for Claude Code. Drop `-g` to install into the current repository instead (`.agents/skills/` and `.claude/skills/`). Update with `npx skills update -g -y`.
+
+Alternatives:
+
+- **Claude Code plugin:** `/plugin marketplace add RedHatInsights/i18n-tooling`, then `/plugin install i18n-onboarding@i18n-tooling`. Update with `/plugin marketplace update i18n-tooling`.
+- **Without third-party tools:** clone this repository and symlink `skills/i18n-onboarding` into `~/.agents/skills/` and `~/.claude/skills/`.
+
+Then ask the agent to onboard the repository to i18n tooling. The skill inspects first, asks one set of questions (tracks, Jira tickets, branch layout, how far to go), and then runs the selected tracks.
+
 `rbac-ui` can declare its FormatJS extraction/compile outputs and catalog checks without a custom validation script:
 
 ```yaml
