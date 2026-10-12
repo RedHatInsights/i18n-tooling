@@ -130,7 +130,7 @@ Project validation can run these checks from a `feo` config section, where each 
 
 The reusable Phrase workflows submit one validated source catalog and reconcile completed target jobs into ordinary locale-specific pull requests:
 
-- `.github/workflows/phrase-submit.yml` exposes `workflow_call` for manual source submission.
+- `.github/workflows/phrase-submit.yml` exposes `workflow_call` for source submission on merge or by hand.
 - `.github/workflows/phrase-reconcile.yml` exposes `workflow_call` for scheduled or manual reconciliation.
 - `i18n-pipeline tms submit --config <path>` validates and submits the pinned source revision. The PR base defaults to the pushed or dispatched branch; pull-request and tag runs must pass `--base-ref` (reusable-workflow input `base-ref`).
 - `i18n-pipeline tms reconcile --config <path>` reads durable batch state, waits for each locale's final Phrase workflow step to reach `COMPLETED`, downloads and validates the target catalog, and opens or updates one PR per locale.
@@ -181,10 +181,16 @@ Each `tms` run logs the chosen kind, for example `Phrase auth: service account (
 
 Put the secrets in a protected Actions environment and pass that environment as the reusable-workflow `environment` input. A caller may instead map repository/organization secrets to the same workflow-call secret names (GitHub secret names are case-insensitive). The CLI rejects credential-like keys (for example `apiToken`, `api_key`, `clientSecret`) anywhere in the config so tokens cannot enter batch-state files; the JSON schema does not enforce this. GitHub PR and state operations use the run's `GITHUB_TOKEN`, with `contents: write` and (for reconciliation) `pull-requests: write`; no personal GitHub token is used.
 
-A consumer owns the trigger and pins the reusable workflow to a reviewed commit. Example manual caller:
+A consumer owns the trigger and pins the reusable workflow to a reviewed commit. Example submit caller, run when a merge changes the source catalog or the Phrase config, or by hand:
 
 ```yaml
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - locales/translation-template.json
+      - .github/i18n/phrase-tms.json
   workflow_dispatch:
 jobs:
   submit:

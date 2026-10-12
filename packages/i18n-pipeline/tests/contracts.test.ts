@@ -89,6 +89,29 @@ describe("repository i18n contracts", () => {
     expect(workflow.split("    permissions:\n      contents: read")).toHaveLength(2);
   });
 
+  it("triggers the example Phrase callers on merge and on a schedule, with manual fallbacks", async () => {
+    const example = join(repositoryRoot, "examples/phrase-consumer/.github");
+    const readYaml = async (path: string) => parse(await readFile(join(example, path), "utf8"));
+    const config = JSON.parse(await readFile(join(example, "i18n/phrase-tms.json"), "utf8"));
+    const submit = await readYaml("workflows/phrase-submit.yml");
+    const reconcile = await readYaml("workflows/phrase-reconcile.yml");
+
+    expect(submit.on.push.branches).toEqual(["main"]);
+    expect(submit.on.push.paths).toEqual([
+      config.sourceCatalog.path,
+      ".github/i18n/phrase-tms.json",
+    ]);
+    expect(submit.on.workflow_dispatch.inputs["retry-failed"]).toMatchObject({
+      type: "boolean",
+      default: false,
+    });
+    expect(submit.jobs.submit.with["retry-failed"]).toBe("${{ inputs.retry-failed == true }}");
+
+    expect(reconcile.on.schedule).toHaveLength(1);
+    expect(reconcile.on.schedule[0].cron).toMatch(/^\S+ \S+ \S+ \S+ \S+$/);
+    expect(reconcile.on).toHaveProperty("workflow_dispatch");
+  });
+
   it("calls the reusable workflow with a real repository fixture", async () => {
     const workflow = await readFile(join(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
 

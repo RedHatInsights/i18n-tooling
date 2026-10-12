@@ -1,7 +1,19 @@
 name: Phrase submit
 
 on:
+  # A merge to the default branch that changes the source catalog or the Phrase config.
+  push:
+    branches:
+      - main
+    paths:
+      - locales/translation-template.json
+      - .github/i18n/phrase-tms.json
   workflow_dispatch:
+    inputs:
+      retry-failed:
+        description: Create a new Phrase job for failed outcomes of the current source
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -12,5 +24,6 @@ jobs:
     with:
       config-path: .github/i18n/phrase-tms.json
       environment: phrase-pilot
+      retry-failed: ${{ inputs.retry-failed == true }}
     permissions:
       contents: write
