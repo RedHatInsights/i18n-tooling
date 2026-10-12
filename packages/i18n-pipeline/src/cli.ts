@@ -25,7 +25,12 @@ import { GitHubPhraseRepository } from "./github-phrase-repository.js";
 import { PhraseClient, type PhraseClientOptions } from "./phrase-client.js";
 import { parsePhraseTmsConfig } from "./phrase-config.js";
 import { PhraseWorkflow, type PhraseReconcileResult } from "./phrase-workflow.js";
-import { extractFeoCatalog, inlineFeoLocale, type FeoCatalog } from "./feo-template.js";
+import {
+  extractFeoCatalog,
+  inlineFeoLocale,
+  serializeFeoCatalog,
+  type FeoCatalog,
+} from "./feo-template.js";
 import { runValidateCiCommand, VALIDATE_CI_HELP } from "./validate-ci.js";
 
 export interface CliOptions {
@@ -555,10 +560,11 @@ async function validateProject(
   const pending = result.pendingTargetCount
     ? `, ${count(result.pendingTargetCount, "pending TMS target")}`
     : "";
+  const feo = config.feo === undefined ? "" : `, ${count(config.feo.length, "FEO template")}`;
   stdout(
     `Catalog validation passed (${count(result.sourceCount, "source")}, ` +
       `${count(result.targetCount, "target")}, ${count(result.generatedCount, "generated catalog")}` +
-      `${pending}).`,
+      `${pending}${feo}).`,
   );
   return true;
 }
@@ -587,7 +593,7 @@ async function runFeoCommand(
   if (subcommand === "extract") {
     if (!values.output) throw new Error("feo extract requires --output");
     path = resolve(cwd, values.output);
-    generated = `${JSON.stringify(extractFeoCatalog(template), null, 2)}\n`;
+    generated = serializeFeoCatalog(extractFeoCatalog(template));
   } else {
     if (!values.source || !values.target || !values.locale)
       throw new Error("feo inline requires --source, --target and --locale");

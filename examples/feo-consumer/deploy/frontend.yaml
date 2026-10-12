@@ -1,0 +1,47 @@
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: feo-consumer
+objects:
+  - apiVersion: cloud.redhat.com/v1alpha1
+    kind: Frontend
+    metadata:
+      name: sample-console
+    spec:
+      bundleSegments:
+        - bundleId: access
+          segmentId: administration
+          navItems:
+            - id: accounts
+              title: Manage access
+              permissions:
+                - account:read
+            - id: groups
+              title: Manage access
+              permissions:
+                - group:read
+      searchEntries:
+        - id: people
+          title: User management
+          description: Manage people and their permissions
+          alt_title:
+            - People
+            - Accounts
+      serviceTiles:
+        - section: security
+          group: access
+          id: user-management
+          title: User access
+          description: Manage console access for your team
+      module:
+        defaultDocumentTitle: Access Management
+      locales:
+        zh-CN:
+          bundleSegments.access.administration.navItems.accounts.title: "[SAMPLE ONLY - NOT REVIEWED] 管理访问"
+          bundleSegments.access.administration.navItems.groups.title: "[SAMPLE ONLY - NOT REVIEWED] 管理访问"
+          module.defaultDocumentTitle: "[SAMPLE ONLY - NOT REVIEWED] 访问管理"
+          searchEntries.people.alt_title: "[SAMPLE ONLY - NOT REVIEWED] 人员|[SAMPLE ONLY - NOT REVIEWED] 账户"
+          searchEntries.people.description: "[SAMPLE ONLY - NOT REVIEWED] 管理人员及其权限"
+          searchEntries.people.title: "[SAMPLE ONLY - NOT REVIEWED] 用户管理"
+          serviceTiles.security.access.user-management.description: "[SAMPLE ONLY - NOT REVIEWED] 管理团队的控制台访问权限"
+          serviceTiles.security.access.user-management.title: "[SAMPLE ONLY - NOT REVIEWED] 用户访问"

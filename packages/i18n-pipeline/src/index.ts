@@ -32,6 +32,7 @@ export {
   type CatalogValidationCheck,
   type CatalogValidationConfig,
   type CatalogValidationResult,
+  type FeoTemplateValidation,
   type GeneratedCatalogCheck,
 } from "./catalog-validation.js";
 export {
