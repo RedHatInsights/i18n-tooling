@@ -1,4 +1,4 @@
-# Runtime image for `frontend-i18n validate-ci` in shared Konflux pipelines.
+# Runtime image for `i18n-pipeline validate-ci` in shared Konflux pipelines.
 #
 # The Node 22 and Node 24 stages run the repository test suite. The runtime
 # stage copies a marker from each, so the image only exists if both pass.
@@ -56,15 +56,15 @@ COPY --from=production /opt/i18n-tooling/packages/i18n-pipeline/dist /opt/i18n-t
 COPY --from=production /opt/i18n-tooling/packages/i18n-pipeline/node_modules /opt/i18n-tooling/packages/i18n-pipeline/node_modules
 COPY LICENSE /licenses/LICENSE
 RUN rm /tmp/node22.passed /tmp/node24.passed \
-    && ln -s /opt/i18n-tooling/packages/i18n-pipeline/dist/cli.js /usr/local/bin/frontend-i18n
+    && ln -s /opt/i18n-tooling/packages/i18n-pipeline/dist/cli.js /usr/local/bin/i18n-pipeline
 USER 1001
 # Prove the production install can load the lint stack: a zero-config consumer
 # with one valid message must pass in error mode.
 RUN mkdir -p /tmp/smoke/src \
     && printf '{"dependencies":{"react-intl":"7.0.0"}}' > /tmp/smoke/package.json \
     && printf 'import { defineMessages } from "react-intl";\nexport default defineMessages({ items: { id: "items", defaultMessage: "{count, plural, one {# item} other {# items}}" } });\n' > /tmp/smoke/src/messages.ts \
-    && frontend-i18n validate-ci --root /tmp/smoke --results-dir /tmp/smoke-results --mode error \
+    && i18n-pipeline validate-ci --root /tmp/smoke --results-dir /tmp/smoke-results --mode error \
     && test "$(cat /tmp/smoke-results/I18N_STATUS)" = pass \
     && test "$(cat /tmp/smoke-results/I18N_CONFIG)" = zero-config \
     && rm -rf /tmp/smoke /tmp/smoke-results
-ENTRYPOINT ["frontend-i18n"]
+ENTRYPOINT ["i18n-pipeline"]

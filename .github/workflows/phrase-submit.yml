@@ -83,7 +83,7 @@ jobs:
         run: bun install --frozen-lockfile
         working-directory: i18n-tooling-source
 
-      - name: Build frontend-i18n CLI
+      - name: Build i18n-pipeline CLI
         run: npm run build --workspace @redhat-cloud-services/i18n-pipeline
         working-directory: i18n-tooling-source
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://redhat.com/schemas/frontend-i18n/phrase-tms-config.json",
+  "$id": "https://redhat.com/schemas/i18n-pipeline/phrase-tms-config.json",
   "title": "Phrase TMS workflow configuration",
   "description": "Consumer-repository configuration for reusable Phrase submission and reconciliation workflows. Credentials must be provided as protected workflow secrets; the CLI rejects credential-like keys anywhere in this file.",
   "type": "object",

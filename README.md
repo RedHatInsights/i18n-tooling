@@ -18,7 +18,7 @@ HCC is the first consumer; tooling should not make every future consumer pretend
 | Package                                     | Role                                                                                                                                                                                             |
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `@redhat-cloud-services/eslint-plugin-i18n` | ESLint rules for message IDs, source catalogs, and ICU-oriented source checks.                                                                                                                   |
-| `@redhat-cloud-services/i18n-pipeline`      | Node.js package with the normalized catalog model, FormatJS and keyed ICU JSON adapters, adapter plugin loading, adapter-owned text codecs, generated-catalog sync, and the `frontend-i18n` CLI. |
+| `@redhat-cloud-services/i18n-pipeline`      | Node.js package with the normalized catalog model, FormatJS and keyed ICU JSON adapters, adapter plugin loading, adapter-owned text codecs, generated-catalog sync, and the `i18n-pipeline` CLI. |
 | `.github/workflows/`                        | Repository CI and reusable consumer validation.                                                                                                                                                  |
 
 The TypeScript packages target Node.js 22+. Bun 1.3.14 manages workspace dependencies, while package code and the CLI run under Node.js. Framework extraction and compilation remain in each consumer's native tooling.
@@ -79,7 +79,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and consumer workflow 
 
 ## Shared validation workflow
 
-The reusable `i18n-validate.yml` workflow checks out tooling source at the called workflow's commit, builds the CLI and ESLint plugin, and checks consumer source message IDs against the configured catalog. The source glob defaults to `src/**/*.{js,jsx,ts,tsx}` and can be overridden with `source-glob`; include files that declare reusable messages too. The ESLint check rejects missing catalog entries, missing or dynamic inline IDs, and opaque descriptor expressions. Declare reusable descriptors with `defineMessages` so their IDs are checked at the definition. The same step runs `eslint-plugin-formatjs` ICU rules: invalid ICU, plurals without `other`, a hard-coded `1` in a `one` branch, and plural offsets fail; inline tags, sentence fragments, `{count}` instead of `#`, multiple plurals, and selectors with more than 20 combinations are warnings. Set `validation-config` to run `frontend-i18n validate-project` directly, including generated-catalog sync, without a consumer validation script. `validation-command` remains the backward-compatible fallback when no config is supplied. Non-JavaScript consumers can set `catalog-only: true` to skip consumer dependency installation and source lint; this mode requires `validation-config` and still checks catalog validity and generated-file sync. Consumers do not need an npm dependency on this repository, and this repository does not publish workspace packages to npm.
+The reusable `i18n-validate.yml` workflow checks out tooling source at the called workflow's commit, builds the CLI and ESLint plugin, and checks consumer source message IDs against the configured catalog. The source glob defaults to `src/**/*.{js,jsx,ts,tsx}` and can be overridden with `source-glob`; include files that declare reusable messages too. The ESLint check rejects missing catalog entries, missing or dynamic inline IDs, and opaque descriptor expressions. Declare reusable descriptors with `defineMessages` so their IDs are checked at the definition. The same step runs `eslint-plugin-formatjs` ICU rules: invalid ICU, plurals without `other`, a hard-coded `1` in a `one` branch, and plural offsets fail; inline tags, sentence fragments, `{count}` instead of `#`, multiple plurals, and selectors with more than 20 combinations are warnings. Set `validation-config` to run `i18n-pipeline validate-project` directly, including generated-catalog sync, without a consumer validation script. `validation-command` remains the backward-compatible fallback when no config is supplied. Non-JavaScript consumers can set `catalog-only: true` to skip consumer dependency installation and source lint; this mode requires `validation-config` and still checks catalog validity and generated-file sync. Consumers do not need an npm dependency on this repository, and this repository does not publish workspace packages to npm.
 
 ## Consumer examples
 
@@ -100,7 +100,7 @@ jobs:
       catalog-locale: en
 ```
 
-Replace `<reviewed-commit-sha>` with a reviewed commit SHA. The reusable workflow checks out the consumer repository and `i18n-tooling` at the exact commit of the called workflow (`job.workflow_sha`). It installs consumer dependencies with the selected package manager and the tooling workspace with Bun, builds the CLI and ESLint plugin, then lints the configured source glob against `catalog-path`. The rule recognizes FormatJS `formatMessage`, `defineMessage(s)`, and `<FormattedMessage>` forms; IDs must be static and present in the catalog. With `validation-config`, the workflow runs the shared `validate-project` command directly. Its config names source/target files and adapters and can run native generators into temporary output files to verify checked-in catalogs are current. See the [catalog validation example](examples/phrase-consumer/.github/i18n/catalog-validation.json) and [config schema](schemas/catalog-validation-config.schema.json). Without that input, the workflow runs `validation-command` through `npm run`; simple consumers can also use `frontend-i18n validate` or `frontend-i18n check` directly with `I18N_CATALOG_*` settings. Neither package needs npm publication. Pinning the reusable workflow pins the CLI and rule source too.
+Replace `<reviewed-commit-sha>` with a reviewed commit SHA. The reusable workflow checks out the consumer repository and `i18n-tooling` at the exact commit of the called workflow (`job.workflow_sha`). It installs consumer dependencies with the selected package manager and the tooling workspace with Bun, builds the CLI and ESLint plugin, then lints the configured source glob against `catalog-path`. The rule recognizes FormatJS `formatMessage`, `defineMessage(s)`, and `<FormattedMessage>` forms; IDs must be static and present in the catalog. With `validation-config`, the workflow runs the shared `validate-project` command directly. Its config names source/target files and adapters and can run native generators into temporary output files to verify checked-in catalogs are current. See the [catalog validation example](examples/phrase-consumer/.github/i18n/catalog-validation.json) and [config schema](schemas/catalog-validation-config.schema.json). Without that input, the workflow runs `validation-command` through `npm run`; simple consumers can also use `i18n-pipeline validate` or `i18n-pipeline check` directly with `I18N_CATALOG_*` settings. Neither package needs npm publication. Pinning the reusable workflow pins the CLI and rule source too.
 
 A Python service can validate contract-generated catalogs without installing application dependencies or linting JavaScript:
 
@@ -117,9 +117,9 @@ The config should generate the English ICU catalog from the checked-in OpenAPI c
 
 ## FEO Frontend template localization
 
-`frontend-i18n feo extract --template deploy/frontend.yaml --output deploy/locales/translation-template.json` creates a FormatJS-style source JSON catalog from `Frontend` objects in an OpenShift Template. Stable keys mirror YAML fields, using item IDs rather than array indexes: `searchEntries.<id>.*`, `bundleSegments.<bundleId>.<segmentId>.navItems.<id>[.routes.<id>...].*`, `serviceTiles.<section>.<group>.<id>.*`, and `module.defaultDocumentTitle`. Search `alt_title` aliases are joined by `|`; an English alias containing `|` is rejected so the list remains unambiguous. Missing or duplicate IDs fail extraction; English and non-text fields stay hand-edited. With multiple Frontend objects, catalog keys gain an `objects.<metadata.name>.spec.` prefix (names must be present and unique); inlining removes that prefix so each Frontend's `spec.locales` keeps the local keys above. Single-Frontend keys stay unprefixed. Adding a second Frontend therefore changes existing catalog IDs; re-extract and migrate translations to the new IDs.
+`i18n-pipeline feo extract --template deploy/frontend.yaml --output deploy/locales/translation-template.json` creates a FormatJS-style source JSON catalog from `Frontend` objects in an OpenShift Template. Stable keys mirror YAML fields, using item IDs rather than array indexes: `searchEntries.<id>.*`, `bundleSegments.<bundleId>.<segmentId>.navItems.<id>[.routes.<id>...].*`, `serviceTiles.<section>.<group>.<id>.*`, and `module.defaultDocumentTitle`. Search `alt_title` aliases are joined by `|`; an English alias containing `|` is rejected so the list remains unambiguous. Missing or duplicate IDs fail extraction; English and non-text fields stay hand-edited. With multiple Frontend objects, catalog keys gain an `objects.<metadata.name>.spec.` prefix (names must be present and unique); inlining removes that prefix so each Frontend's `spec.locales` keeps the local keys above. Single-Frontend keys stay unprefixed. Adding a second Frontend therefore changes existing catalog IDs; re-extract and migrate translations to the new IDs.
 
-`frontend-i18n feo inline --template deploy/frontend.yaml --source deploy/locales/translation-template.json --target deploy/locales/zh-CN.json --locale zh-CN` writes only `objects[].spec.locales.zh-CN` into existing YAML, preserving other fields and comments. It rejects stale English source and unknown or empty translations. Add `--check` to either command for CI drift detection without writing. Missing translations are omitted for downstream English fallback. These commands do not need Phrase, credentials, or GitHub workflows; the Frontend CRD, operator, publisher, and Chrome overlay are separate work.
+`i18n-pipeline feo inline --template deploy/frontend.yaml --source deploy/locales/translation-template.json --target deploy/locales/zh-CN.json --locale zh-CN` writes only `objects[].spec.locales.zh-CN` into existing YAML, preserving other fields and comments. It rejects stale English source and unknown or empty translations. Add `--check` to either command for CI drift detection without writing. Missing translations are omitted for downstream English fallback. These commands do not need Phrase, credentials, or GitHub workflows; the Frontend CRD, operator, publisher, and Chrome overlay are separate work.
 
 ## Phrase TMS round trip
 
@@ -127,8 +127,8 @@ The reusable Phrase workflows submit one validated source catalog and reconcile 
 
 - `.github/workflows/phrase-submit.yml` exposes `workflow_call` for manual source submission.
 - `.github/workflows/phrase-reconcile.yml` exposes `workflow_call` for scheduled or manual reconciliation.
-- `frontend-i18n tms submit --config <path>` validates and submits the pinned source revision. The PR base defaults to the pushed or dispatched branch; pull-request and tag runs must pass `--base-ref` (reusable-workflow input `base-ref`).
-- `frontend-i18n tms reconcile --config <path>` reads durable batch state, waits for each locale's final Phrase workflow step to reach `COMPLETED`, downloads and validates the target catalog, and opens or updates one PR per locale.
+- `i18n-pipeline tms submit --config <path>` validates and submits the pinned source revision. The PR base defaults to the pushed or dispatched branch; pull-request and tag runs must pass `--base-ref` (reusable-workflow input `base-ref`).
+- `i18n-pipeline tms reconcile --config <path>` reads durable batch state, waits for each locale's final Phrase workflow step to reach `COMPLETED`, downloads and validates the target catalog, and opens or updates one PR per locale.
 
 Consumer configuration follows [the Phrase TMS config schema](schemas/phrase-tms-config.schema.json). For copyable caller/config examples and a test of the per-locale-to-runtime-data handoff, see the [Phrase consumer integration example](docs/phrase-consumer-integration.md):
 
@@ -236,18 +236,18 @@ jobs:
 Run the CLI directly with explicit options or use workflow environment settings. `check` compares source and target message IDs and named ICU arguments, including arguments nested inside plural/select branches:
 
 ```bash
-frontend-i18n validate \
+i18n-pipeline validate \
   --adapter icu-json \
   --catalog i18n/en.json \
   --role source \
   --locale en
 
-frontend-i18n check \
+i18n-pipeline check \
   --source locales/translation-template.json \
   --target locales/fr.json \
   --target-locale fr
 
-frontend-i18n convert \
+i18n-pipeline convert \
   --source locales/translation-template.json \
   --source-adapter formatjs-json \
   --target-adapter icu-json \
@@ -255,10 +255,10 @@ frontend-i18n convert \
   --locale en
 
 # Run a multi-catalog plan with generated-file sync checks
-frontend-i18n validate-project --config .github/i18n/catalog-validation.json
+i18n-pipeline validate-project --config .github/i18n/catalog-validation.json
 ```
 
-`validate-project` accepts multiple source/target pairs, with an adapter and locale for every file; the formats may differ. `tmsConfig` derives the locale checks from the Phrase config, and delivered targets are checked while missing ones count as pending. `generated` entries run a native generator into a temporary `{output}` file, without a shell, and fail when the checked-in file is stale. An entry without an adapter compares plain JSON, which covers runtime aggregates. `catalogDirectories` rejects catalog files that the plan does not declare. The optional `sourceLint` section enables source checks in `frontend-i18n validate-ci`; `validate-project` ignores it. `validate-ci` discovers the consumer config, applies its mode and deadline, and can write structured Tekton results. The validator never rewrites checked-in files. See the [package guide](packages/i18n-pipeline/README.md#generic-project-validation), the [CI validation command](packages/i18n-pipeline/README.md#ci-validation-command), the [schema](schemas/catalog-validation-config.schema.json), and the [consumer example](examples/phrase-consumer/.github/i18n/catalog-validation.json).
+`validate-project` accepts multiple source/target pairs, with an adapter and locale for every file; the formats may differ. `tmsConfig` derives the locale checks from the Phrase config, and delivered targets are checked while missing ones count as pending. `generated` entries run a native generator into a temporary `{output}` file, without a shell, and fail when the checked-in file is stale. An entry without an adapter compares plain JSON, which covers runtime aggregates. `catalogDirectories` rejects catalog files that the plan does not declare. The optional `sourceLint` section enables source checks in `i18n-pipeline validate-ci`; `validate-project` ignores it. `validate-ci` discovers the consumer config, applies its mode and deadline, and can write structured Tekton results. The validator never rewrites checked-in files. See the [package guide](packages/i18n-pipeline/README.md#generic-project-validation), the [CI validation command](packages/i18n-pipeline/README.md#ci-validation-command), the [schema](schemas/catalog-validation-config.schema.json), and the [consumer example](examples/phrase-consumer/.github/i18n/catalog-validation.json).
 
 ### Add a custom catalog adapter
 

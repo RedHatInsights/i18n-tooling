@@ -12,7 +12,7 @@ import {
 } from "./index.js";
 import type { ESLint as ESLintApi, Linter } from "eslint";
 
-export const VALIDATE_CI_HELP = `Usage: frontend-i18n validate-ci [options]
+export const VALIDATE_CI_HELP = `Usage: i18n-pipeline validate-ci [options]
 
 Options:
   --root <dir>             Consumer repository root (default: current directory)
@@ -259,7 +259,7 @@ function reportToResults(
 }
 
 function toolErrorText(error: unknown): string {
-  return `frontend-i18n validate-ci: ${errorMessage(error)}`;
+  return `i18n-pipeline validate-ci: ${errorMessage(error)}`;
 }
 
 function emitReport(
@@ -715,7 +715,7 @@ export async function runValidateCiCommand(
 ): Promise<number> {
   const modeResult = modeFromArgs(args);
   if (modeResult.usageError) {
-    options.stderr(`frontend-i18n validate-ci: ${modeResult.usageError}\n${VALIDATE_CI_HELP}`);
+    options.stderr(`i18n-pipeline validate-ci: ${modeResult.usageError}\n${VALIDATE_CI_HELP}`);
     return 2;
   }
   const mode = modeResult.mode ?? "warn";

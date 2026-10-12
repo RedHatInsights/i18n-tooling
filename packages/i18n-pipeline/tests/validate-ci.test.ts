@@ -180,7 +180,7 @@ afterEach(async () => {
   generatorPids = [];
 });
 
-describe("frontend-i18n validate-ci", () => {
+describe("i18n-pipeline validate-ci", () => {
   it("passes a configured consumer and prefers i18n/ over the GitHub config path", async () => {
     const root = await createRoot();
     await createPassProject(root);

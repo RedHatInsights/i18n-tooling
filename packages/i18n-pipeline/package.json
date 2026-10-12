@@ -19,6 +19,7 @@
     }
   },
   "bin": {
+    "i18n-pipeline": "./dist/cli.js",
     "frontend-i18n": "./dist/cli.js"
   },
   "files": [

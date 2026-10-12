@@ -1,6 +1,6 @@
 # `@redhat-cloud-services/i18n-pipeline`
 
-Node.js 22+ workspace package for repository-owned locale catalogs. It provides a normalized `Catalog` model, built-in FormatJS, keyed ICU JSON, and OpenAPI Problem Details adapters, adapter-owned text codecs, ICU pattern validation, generated-catalog sync, and the `frontend-i18n` CLI.
+Node.js 22+ workspace package for repository-owned locale catalogs. It provides a normalized `Catalog` model, built-in FormatJS, keyed ICU JSON, and OpenAPI Problem Details adapters, adapter-owned text codecs, ICU pattern validation, generated-catalog sync, and the `i18n-pipeline` CLI.
 
 The reusable workflow builds the CLI from this source; consumers do not need an npm dependency on this repository. This repository does not publish workspace packages to npm. Framework extraction and compilation stay with each consumer's native tooling. Catalog-format adapters normalize repository artifacts; TMS-provider adapters are a separate future seam.
 
@@ -37,25 +37,25 @@ The FormatJS adapter retains string/object descriptions and other descriptor met
 When a target loses an argument because the source used a category branch, the mismatch error names the source branch to fix.
 
 ```bash
-frontend-i18n validate \
+i18n-pipeline validate \
   --adapter formatjs-json \
   --catalog locales/translation-template.json \
   --role source \
   --locale en
 
-frontend-i18n check \
+i18n-pipeline check \
   --source locales/translation-template.json \
   --target locales/fr.json \
   --target-locale fr
 
-frontend-i18n convert \
+i18n-pipeline convert \
   --source locales/translation-template.json \
   --source-adapter formatjs-json \
   --target-adapter icu-json \
   --output i18n/en.json \
   --locale en
 
-frontend-i18n convert \
+i18n-pipeline convert \
   --source docs/source/specs/v2/openapi.yaml \
   --source-adapter openapi-problem-details \
   --target-adapter icu-json \
@@ -70,7 +70,7 @@ The OpenAPI adapter reads OpenAPI 3 JSON or YAML. It extracts component schemas 
 
 ## Generic project validation
 
-Use `frontend-i18n validate-project --config <path>` for a repository-wide validation plan. A plan can compare several catalogs, use different adapters for each input/output, derive locale checks from the Phrase TMS config, check generated files against fresh outputs, and reject catalog files nobody declared:
+Use `i18n-pipeline validate-project --config <path>` for a repository-wide validation plan. A plan can compare several catalogs, use different adapters for each input/output, derive locale checks from the Phrase TMS config, check generated files against fresh outputs, and reject catalog files nobody declared:
 
 ```json
 {
@@ -119,10 +119,10 @@ The reusable workflow accepts this file through `validation-config`, so consumer
 
 ## CI validation command
 
-`frontend-i18n validate-ci` discovers a consumer's configuration and combines optional source lint with the same catalog checks as `validate-project`:
+`i18n-pipeline validate-ci` discovers a consumer's configuration and combines optional source lint with the same catalog checks as `validate-project`:
 
 ```bash
-frontend-i18n validate-ci \
+i18n-pipeline validate-ci \
   --root /workspace/consumer \
   --mode error \
   --results-dir /tekton/results/i18n \
