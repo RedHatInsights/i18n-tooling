@@ -1,16 +1,16 @@
 # `@redhat-cloud-services/i18n-pipeline`
 
-Node.js 22+ workspace package for repository-owned locale catalogs. It provides a normalized `Catalog` model, built-in FormatJS, keyed ICU JSON, and OpenAPI Problem Details adapters, adapter-owned text codecs, ICU pattern validation, generated-catalog sync, and the `frontend-i18n` CLI.
+Node.js 22+ workspace package for repository-owned locale catalogs. It provides a normalized `Catalog` model, built-in FormatJS, keyed ICU JSON, and OpenAPI Problem Details adapters, adapter-owned text codecs, ICU pattern validation, generated-catalog sync, and the `i18n-pipeline` CLI.
 
 The reusable workflow builds the CLI from this source; consumers do not need an npm dependency on this repository. This repository does not publish workspace packages to npm. Framework extraction and compilation stay with each consumer's native tooling. Catalog-format adapters normalize repository artifacts; TMS-provider adapters are a separate future seam.
 
 ## Built-in adapters
 
-| ID                       | Source catalog                                                                      | Target catalog                            |
-| ------------------------ | ----------------------------------------------------------------------------------- | ----------------------------------------- |
-| `formatjs-json`          | FormatJS descriptors: `{ "id": { "defaultMessage": "...", "description": "..." } }` | Flat compiled messages: `{ "id": "..." }` |
-| `icu-json`               | Flat message-code-to-ICU-pattern JSON                                               | Flat message-code-to-ICU-pattern JSON     |
-| `openapi-problem-details` | OpenAPI 3 Problem Details schemas annotated with `x-i18n.message`                    | Source-only; convert to `icu-json`        |
+| ID                        | Source catalog                                                                      | Target catalog                            |
+| ------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------- |
+| `formatjs-json`           | FormatJS descriptors: `{ "id": { "defaultMessage": "...", "description": "..." } }` | Flat compiled messages: `{ "id": "..." }` |
+| `icu-json`                | Flat message-code-to-ICU-pattern JSON                                               | Flat message-code-to-ICU-pattern JSON     |
+| `openapi-problem-details` | OpenAPI 3 Problem Details schemas annotated with `x-i18n.message`                   | Source-only; convert to `icu-json`        |
 
 The FormatJS adapter retains string/object descriptions and other descriptor metadata. The JSON adapters validate ICU syntax with FormatJS's `@formatjs/icu-messageformat-parser`; the OpenAPI adapter also parses ICU arguments and checks them against the schema. Consumers should run native framework compilation and validation where applicable. ICU failure reports list each malformed message ID, its line and column within the pattern, and a readable parser diagnostic.
 
@@ -37,25 +37,25 @@ The FormatJS adapter retains string/object descriptions and other descriptor met
 When a target loses an argument because the source used a category branch, the mismatch error names the source branch to fix.
 
 ```bash
-frontend-i18n validate \
+i18n-pipeline validate \
   --adapter formatjs-json \
   --catalog locales/translation-template.json \
   --role source \
   --locale en
 
-frontend-i18n check \
+i18n-pipeline check \
   --source locales/translation-template.json \
   --target locales/fr.json \
   --target-locale fr
 
-frontend-i18n convert \
+i18n-pipeline convert \
   --source locales/translation-template.json \
   --source-adapter formatjs-json \
   --target-adapter icu-json \
   --output i18n/en.json \
   --locale en
 
-frontend-i18n convert \
+i18n-pipeline convert \
   --source docs/source/specs/v2/openapi.yaml \
   --source-adapter openapi-problem-details \
   --target-adapter icu-json \
@@ -70,7 +70,7 @@ The OpenAPI adapter reads OpenAPI 3 JSON or YAML. It extracts component schemas 
 
 ## Generic project validation
 
-Use `frontend-i18n validate-project --config <path>` for a repository-wide validation plan. A plan can compare several catalogs, use different adapters for each input/output, derive locale checks from the Phrase TMS config, check generated files against fresh outputs, and reject catalog files nobody declared:
+Use `i18n-pipeline validate-project --config <path>` for a repository-wide validation plan. A plan can compare several catalogs, use different adapters for each input/output, derive locale checks from the Phrase TMS config, check generated files against fresh outputs, and reject catalog files nobody declared:
 
 ```json
 {
@@ -113,8 +113,31 @@ Use `frontend-i18n validate-project --config <path>` for a repository-wide valid
 - **`tmsConfig`** adds one check from the Phrase config: its `sourceCatalog` against every `targetLocales[].outputPath`, read with `targetAdapter` (default: the source adapter) and the `repositoryLocale`. The locale mapping has one source of truth. A target whose file does not exist yet is reported as pending, not failed, so the plan works before the first translation PR lands.
 - **`generated`** runs its configured executable with an argument array (no shell), substituting `{output}` with a temporary file path, and compares the result with the checked-in file. With an `adapter` (plus `role` and `locale`), both documents are parsed as catalogs. Without one, both are compared as plain JSON, which suits runtime aggregates such as a locale-keyed `data.json`. Prefer calling the consumer's own package script with an output override (FormatJS CLI options take the last value, so `-- --out-file {output}` redirects `translations:extract`) over copying its arguments; copied arguments drift from the script developers actually run. Generators must honor `{output}` without other side effects. The validator never rewrites checked-in files; `updateCommand` is only a failure hint.
 - **`catalogDirectories`** lists directories whose files (default extension `.json`) must all be declared by a check, a TMS target, or a generated entry. It catches a locale file added without a TMS mapping, or a stale file left after a locale was removed.
+- **`sourceLint`** opts `validate-ci` into source-code lint. It has optional repository-relative `files` globs (default: `src/**/*.{js,jsx,ts,tsx}`) and an optional repository-relative `catalog` path. `validate-project` accepts this section and ignores it.
 
 The reusable workflow accepts this file through `validation-config`, so consumers do not need a validation script. Non-JavaScript repositories can set `catalog-only: true`; this skips consumer dependency installation and FormatJS source lint, requires `validation-config`, and runs the shared catalog validator only. See the [schema](../../schemas/catalog-validation-config.schema.json), the [consumer example](../../examples/phrase-consumer/.github/i18n/catalog-validation.json), and the [consumer onboarding checklist](../../docs/consumer-onboarding.md).
+
+## CI validation command
+
+`i18n-pipeline validate-ci` discovers a consumer's configuration and combines optional source lint with the same catalog checks as `validate-project`:
+
+```bash
+i18n-pipeline validate-ci \
+  --root /workspace/consumer \
+  --mode error \
+  --results-dir /tekton/results/i18n \
+  --timeout-seconds 600
+```
+
+`--root` defaults to the current directory. Relative `--root` paths are resolved from the current directory. Relative `--results-dir` paths are also resolved from the current directory; the directory is created when missing.
+
+Discovery checks `<root>/i18n/catalog-validation.json`, then `<root>/.github/i18n/catalog-validation.json`. The first file found selects configured validation: `sourceLint`, when present, runs before the configured catalog checks. A missing config enables zero-config ICU lint when `react-intl` or an `@formatjs/*` dependency is declared in `package.json`. That mode checks `src/**/*.{js,jsx,ts,tsx}` with only the four ICU error rules. Consumers with neither a config nor a FormatJS dependency are reported as not configured.
+
+Configured `sourceLint` runs those same four ICU rules at error severity, followed by the five translatability rules from `scripts/eslint-source.config.mjs` at warning severity. If `sourceLint.catalog` is set, `i18n/no-missing-default-catalog-entry` also runs at error severity against that source catalog. The ESLint version, parser, and plugins come from this CLI package; consumer ESLint configuration and inline disable comments do not affect the result. A source glob with no matches is allowed.
+
+When `--results-dir` is set, the command writes `I18N_STATUS`, `I18N_ERRORS`, `I18N_WARNINGS`, `I18N_MODE`, `I18N_CONFIG`, and `I18N_TOOL_VERSION` files without trailing newlines. It writes fallback tool-error values before discovery and replaces them with the completed result. Status is `pass`, `findings`, `not-configured`, or `tool-error`; config is `config`, `zero-config`, or `none`.
+
+The default mode is `warn`, which exits 0 for findings and tool errors. `--mode error` exits 1 for error findings or tool errors, and exits 0 for warning-only findings. Missing or invalid `--mode` values are usage errors and exit 2. `--timeout-seconds` is a positive integer and defaults to 600; the deadline covers the validation worker and terminates its process group, including configured generators and their ordinary child processes. Cleanup terminates the validation process group; a consumer command that deliberately detaches into its own session or process group is not terminated.
 
 ## Custom adapters
 
@@ -143,3 +166,5 @@ interface CatalogAdapter {
 ```
 
 The configured ID must match `adapter.id`. The optional JSON config file supplies adapter-specific `context.options`. Without document codecs, the CLI defaults to JSON; implement `parseDocument` and `serializeDocument` to handle text formats such as YAML or PO.
+
+Bare package specifiers resolve from the consumer root under ESM import conditions. Provide a package `main` field or an `exports` entry with an `import` or `default` condition. Dual-export packages use their ESM entry, not their CommonJS `require` entry.

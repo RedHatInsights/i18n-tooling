@@ -33,5 +33,9 @@
       "args": ["scripts/assemble-locales.mjs", "src/locales", "{output}"]
     }
   ],
-  "catalogDirectories": [{ "path": "src/locales" }]
+  "catalogDirectories": [{ "path": "src/locales" }],
+  "sourceLint": {
+    "files": ["src/**/*.{js,jsx,ts,tsx}"],
+    "catalog": "locales/en.json"
+  }
 }

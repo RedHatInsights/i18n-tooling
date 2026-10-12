@@ -15,11 +15,11 @@ afterEach(async () => {
   }
 });
 
-describe("frontend-i18n CLI", () => {
+describe("i18n-pipeline CLI", () => {
   it("recognizes itself as the entry point when started through a bin symlink", async () => {
     projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-entry-"));
     const cliFile = join(projectRoot, "dist/cli.js");
-    const binLink = join(projectRoot, "node_modules/.bin/frontend-i18n");
+    const binLink = join(projectRoot, "node_modules/.bin/i18n-pipeline");
     await mkdir(join(projectRoot, "dist"));
     await mkdir(join(projectRoot, "node_modules/.bin"), { recursive: true });
     await writeFile(cliFile, "");
@@ -433,7 +433,9 @@ objects:
         stderr: (message) => errors.push(message),
       }),
     ).toBe(0);
-    expect(output[0]).toContain("<check|validate|validate-project|convert|feo|tms|version|help>");
+    expect(output[0]).toContain(
+      "<check|validate|validate-project|validate-ci|convert|feo|tms|version|help>",
+    );
 
     expect(
       await runCli(["check", "--help"], {
@@ -441,8 +443,17 @@ objects:
         stderr: (message) => errors.push(message),
       }),
     ).toBe(0);
-    expect(output[1]).toContain("Usage: frontend-i18n check --source <path> --target <path>");
+    expect(output[1]).toContain("Usage: i18n-pipeline check --source <path> --target <path>");
     expect(errors).toEqual([]);
+
+    expect(
+      await runCli(["validate-ci", "--help"], {
+        stdout: (message) => output.push(message),
+        stderr: (message) => errors.push(message),
+      }),
+    ).toBe(0);
+    expect(output[2]).toContain("Usage: i18n-pipeline validate-ci [options]");
+    expect(output[2]).toContain("--results-dir <dir>");
 
     const unknownErrors: string[] = [];
     expect(
@@ -453,7 +464,7 @@ objects:
     ).toBe(1);
     expect(unknownErrors[0]).toContain('Unknown command "unknown"');
     expect(unknownErrors[0]).toContain(
-      "Usage: frontend-i18n <check|validate|validate-project|convert|feo|tms|version|help>",
+      "Usage: i18n-pipeline <check|validate|validate-project|validate-ci|convert|feo|tms|version|help>",
     );
   });
 
@@ -465,7 +476,7 @@ objects:
         stderr: () => undefined,
       }),
     ).toBe(0);
-    expect(help[0]).toContain("Usage: frontend-i18n tms submit --config <path>");
+    expect(help[0]).toContain("Usage: i18n-pipeline tms submit --config <path>");
     expect(
       await runCli(["tms", "--help"], {
         stdout: (message) => help.push(message),

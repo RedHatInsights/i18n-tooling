@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://redhat.com/schemas/frontend-i18n/problem-details-i18n.json",
+  "$id": "https://redhat.com/schemas/i18n-pipeline/problem-details-i18n.json",
   "title": "Localized RFC 9457 Problem Details",
   "description": "RFC 9457 Problem Details extended with a stable message code and raw typed parameters.",
   "type": "object",

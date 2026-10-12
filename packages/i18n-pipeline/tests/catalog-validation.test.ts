@@ -85,6 +85,7 @@ async function createProject(): Promise<void> {
           updateCommand: "npm run translations:generate",
         },
       ],
+      sourceLint: { files: ["src/**/*.tsx"], catalog: "locales/not-used.json" },
     }),
   );
 }
@@ -128,6 +129,33 @@ afterEach(async () => {
 });
 
 describe("catalog project validation", () => {
+  it("accepts and ignores sourceLint settings", async () => {
+    await createProject();
+    const parsed = parseCatalogValidationConfig(
+      JSON.parse(await readFile(join(projectRoot!, "validation.json"), "utf8")),
+    );
+
+    expect(parsed.sourceLint).toEqual({
+      files: ["src/**/*.tsx"],
+      catalog: "locales/not-used.json",
+    });
+    const result = await runValidation(parsed);
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("rejects sourceLint paths outside the consumer root", () => {
+    expect(() =>
+      parseCatalogValidationConfig({
+        version: 1,
+        checks: [],
+        generated: [
+          { path: "locales/en.json", command: "node", args: ["generate.mjs", "{output}"] },
+        ],
+        sourceLint: { catalog: "../outside.json" },
+      }),
+    ).toThrow("must be a repository-relative path without parent traversal");
+  });
+
   it("checks different adapters and verifies generated text catalogs without a consumer validator", async () => {
     await createProject();
     const output: string[] = [];
@@ -255,7 +283,7 @@ describe("catalog project validation", () => {
     const actions = await run({ GITHUB_ACTIONS: "true" });
     expect(actions.exitCode).toBe(0);
     expect(
-      actions.output.filter((line) => line.startsWith("::warning title=frontend-i18n::")),
+      actions.output.filter((line) => line.startsWith("::warning title=i18n-pipeline::")),
     ).toHaveLength(2);
   });
 

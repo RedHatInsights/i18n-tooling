@@ -26,6 +26,7 @@ import { PhraseClient, type PhraseClientOptions } from "./phrase-client.js";
 import { parsePhraseTmsConfig } from "./phrase-config.js";
 import { PhraseWorkflow, type PhraseReconcileResult } from "./phrase-workflow.js";
 import { extractFeoCatalog, inlineFeoLocale, type FeoCatalog } from "./feo-template.js";
+import { runValidateCiCommand, VALIDATE_CI_HELP } from "./validate-ci.js";
 
 export interface CliOptions {
   cwd?: string;
@@ -35,28 +36,29 @@ export interface CliOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-const ROOT_HELP = `Usage: frontend-i18n <check|validate|validate-project|convert|feo|tms|version|help> [options]
+const ROOT_HELP = `Usage: i18n-pipeline <check|validate|validate-project|validate-ci|convert|feo|tms|version|help> [options]
 
 Commands:
   check             Compare source and target catalogs
   validate          Validate one catalog's format and ICU syntax
   validate-project  Check configured catalogs and generated-catalog sync
+  validate-ci       Discover and validate a consumer repository for CI
   convert           Convert a catalog between adapters
   tms               Submit and reconcile translation batches
   feo               Extract and inline Frontend template translations
   version           Print the package version
   help              Show help, optionally for one command
 
-Use frontend-i18n <command> --help for command options.`;
+Use i18n-pipeline <command> --help for command options.`;
 
 const COMMAND_HELP: Record<string, string> = {
-  feo: `Usage: frontend-i18n feo <extract|inline> [options]
+  feo: `Usage: i18n-pipeline feo <extract|inline> [options]
 
   extract --template <yaml> --output <json> [--check]
   inline --template <yaml> --source <json> --target <json> --locale <tag> [--check]
 
 --check verifies checked-in output without writing. Inline updates only spec.locales.<locale>.`,
-  check: `Usage: frontend-i18n check --source <path> --target <path> [options]
+  check: `Usage: i18n-pipeline check --source <path> --target <path> [options]
 
 Options:
   --source-adapter <id>  Source adapter (default: formatjs-json)
@@ -66,7 +68,7 @@ Options:
   --source-config <path> Source adapter JSON config
   --target-config <path> Target adapter JSON config
   -h, --help             Show this help`,
-  validate: `Usage: frontend-i18n validate --catalog <path> [options]
+  validate: `Usage: i18n-pipeline validate --catalog <path> [options]
 
 Options:
   --adapter <id>  Catalog adapter (default: formatjs-json)
@@ -74,7 +76,7 @@ Options:
   --role <role>   Catalog role: source or target (default: source)
   --config <path> Adapter JSON config
   -h, --help      Show this help`,
-  "validate-project": `Usage: frontend-i18n validate-project --config <path>
+  "validate-project": `Usage: i18n-pipeline validate-project --config <path>
 
 Run configured source/target catalog checks and verify generated catalogs are current.
 The config may declare multiple adapters, native generator commands, a Phrase TMS config
@@ -84,7 +86,8 @@ declared catalogs.
 Options:
   --config <path>  Catalog validation JSON config
   -h, --help       Show this help`,
-  convert: `Usage: frontend-i18n convert --source <path> --output <path> --source-adapter <id> --target-adapter <id> [options]
+  "validate-ci": VALIDATE_CI_HELP,
+  convert: `Usage: i18n-pipeline convert --source <path> --output <path> --source-adapter <id> --target-adapter <id> [options]
 
 Options:
   --locale <tag>         Catalog locale (default: en)
@@ -93,16 +96,16 @@ Options:
   --source-config <path> Source adapter JSON config
   --target-config <path> Target adapter JSON config
   -h, --help             Show this help`,
-  tms: `Usage: frontend-i18n tms <submit|reconcile> [options]
+  tms: `Usage: i18n-pipeline tms <submit|reconcile> [options]
 
-Use frontend-i18n tms <command> --help for command options.
+Use i18n-pipeline tms <command> --help for command options.
 
 Environment:
   PHRASE_SERVICE_ACCOUNT_CLIENT_ID and PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET
                               Phrase Service Account (preferred), or
   PHRASE_PLATFORM_API_TOKEN   a user's Phrase Platform API token
   GITHUB_TOKEN                State-branch and pull-request access`,
-  "tms submit": `Usage: frontend-i18n tms submit --config <path> [options]
+  "tms submit": `Usage: i18n-pipeline tms submit --config <path> [options]
 
 Options:
   --repository <owner/name>   GitHub repository (default: GITHUB_REPOSITORY)
@@ -114,13 +117,13 @@ Options:
 
 The base branch defaults to the pushed or dispatched branch (GITHUB_REF=refs/heads/*).
 Pull-request and tag refs require an explicit --base-ref.`,
-  "tms reconcile": `Usage: frontend-i18n tms reconcile --config <path>
+  "tms reconcile": `Usage: i18n-pipeline tms reconcile --config <path>
 
 Options:
   --repository <owner/name>   GitHub repository (default: GITHUB_REPOSITORY)
   --config <path>             TMS JSON config path
   -h, --help                  Show this help`,
-  version: `Usage: frontend-i18n version
+  version: `Usage: i18n-pipeline version
 
 Prints the i18n-pipeline package version.`,
 };
@@ -205,7 +208,7 @@ function reportWarnings(
   if (!warnings.length) return;
   if (env.GITHUB_ACTIONS === "true") {
     for (const warning of warnings) {
-      stdout(`::warning title=frontend-i18n::${escapeAnnotation(warning)}`);
+      stdout(`::warning title=i18n-pipeline::${escapeAnnotation(warning)}`);
     }
     return;
   }
@@ -682,6 +685,9 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
     if (command === "validate-project") {
       return (await validateProject(args, { cwd, env, stdout, stderr })) ? 0 : 1;
     }
+    if (command === "validate-ci") {
+      return await runValidateCiCommand(args, { cwd, env, stdout, stderr });
+    }
     if (command === "convert") {
       await convertCatalog(args, { cwd, stdout });
       return 0;
@@ -689,7 +695,7 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
     throw new Error(`Unknown command "${command}"`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    stderr(`frontend-i18n: ${message}\n${COMMAND_HELP[command] ?? ROOT_HELP}`);
+    stderr(`i18n-pipeline: ${message}\n${COMMAND_HELP[command] ?? ROOT_HELP}`);
     return 1;
   }
 }
@@ -708,7 +714,7 @@ function realPath(path: string): string {
 
 /**
  * True when the script Node was asked to run is this module. Symlinks are resolved on both
- * sides: npm-style `.bin/frontend-i18n` links point here, and without resolving them the CLI
+ * sides: npm-style `.bin/i18n-pipeline` links point here, and without resolving them the CLI
  * would exit 0 without doing anything.
  */
 export function isCliEntryPoint(argvPath: string | undefined, moduleUrl: string): boolean {

@@ -19,15 +19,18 @@
     }
   },
   "bin": {
+    "i18n-pipeline": "./dist/cli.js",
     "frontend-i18n": "./dist/cli.js"
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsup src/index.ts src/cli.ts --format esm --dts",
+    "build": "tsup src/index.ts src/cli.ts src/validate-ci.ts --format esm --dts",
     "lint": "tsc --noEmit",
+    "pretest": "npm run build --workspace @redhat-cloud-services/eslint-plugin-i18n && npm run build",
     "test": "vitest run",
+    "pretest:coverage": "npm run build --workspace @redhat-cloud-services/eslint-plugin-i18n && npm run build",
     "test:coverage": "vitest run --coverage"
   },
   "engines": {
@@ -35,13 +38,18 @@
   },
   "dependencies": {
     "@formatjs/icu-messageformat-parser": "^3.5.20",
+    "@redhat-cloud-services/eslint-plugin-i18n": "0.1.0",
+    "eslint": "9.39.5",
+    "eslint-plugin-formatjs": "8.1.0",
+    "import-meta-resolve": "4.2.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.70.1",
     "yaml": "^2.8.2"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@vitest/coverage-v8": "^3.0.0",
+    "@vitest/coverage-v8": "^4.1.11",
     "tsup": "^8.0.0",
-    "typescript": "^5.0.0",
-    "vitest": "^3.0.0"
+    "vitest": "^4.1.11"
   }
 }

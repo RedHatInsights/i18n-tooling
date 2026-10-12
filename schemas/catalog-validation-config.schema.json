@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://redhat.com/schemas/frontend-i18n/catalog-validation-config.json",
+  "$id": "https://redhat.com/schemas/i18n-pipeline/catalog-validation-config.json",
   "title": "Catalog validation configuration",
-  "description": "Consumer-owned catalog checks and generated-file synchronization for frontend-i18n validate-project.",
+  "description": "Consumer-owned catalog checks and generated-file synchronization for i18n-pipeline validate-project.",
   "type": "object",
   "required": ["version", "checks"],
   "properties": {
@@ -135,6 +135,24 @@
         },
         "additionalProperties": false
       }
+    },
+    "sourceLint": {
+      "type": "object",
+      "description": "Optional source-code lint settings for i18n-pipeline validate-ci; ignored by validate-project.",
+      "properties": {
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/path"
+          },
+          "description": "Repository-relative source globs; defaults to src/**/*.{js,jsx,ts,tsx}."
+        },
+        "catalog": {
+          "$ref": "#/$defs/path",
+          "description": "Repository-relative default source catalog checked for missing message IDs."
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,
