@@ -137,7 +137,7 @@ Configured `sourceLint` runs those same four ICU rules at error severity, follow
 
 When `--results-dir` is set, the command writes `I18N_STATUS`, `I18N_ERRORS`, `I18N_WARNINGS`, `I18N_MODE`, `I18N_CONFIG`, and `I18N_TOOL_VERSION` files without trailing newlines. It writes fallback tool-error values before discovery and replaces them with the completed result. Status is `pass`, `findings`, `not-configured`, or `tool-error`; config is `config`, `zero-config`, or `none`.
 
-The default mode is `warn`, which exits 0 for findings and tool errors. `--mode error` exits 1 for error findings or tool errors, and exits 0 for warning-only findings. Missing or invalid `--mode` values are usage errors and exit 2. `--timeout-seconds` is a positive integer and defaults to 600; the deadline covers the validation worker and terminates its process group, including configured generators and their ordinary child processes.
+The default mode is `warn`, which exits 0 for findings and tool errors. `--mode error` exits 1 for error findings or tool errors, and exits 0 for warning-only findings. Missing or invalid `--mode` values are usage errors and exit 2. `--timeout-seconds` is a positive integer and defaults to 600; the deadline covers the validation worker and terminates its process group, including configured generators and their ordinary child processes. Cleanup terminates the validation process group; a consumer command that deliberately detaches into its own session or process group is not terminated.
 
 ## Custom adapters
 
@@ -166,3 +166,5 @@ interface CatalogAdapter {
 ```
 
 The configured ID must match `adapter.id`. The optional JSON config file supplies adapter-specific `context.options`. Without document codecs, the CLI defaults to JSON; implement `parseDocument` and `serializeDocument` to handle text formats such as YAML or PO.
+
+A bare package specifier must be resolvable with `require.resolve` from the consumer root. Provide a package `main` field or an `exports` entry with a `require` or `default` condition.

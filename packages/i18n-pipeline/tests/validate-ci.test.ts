@@ -1,4 +1,15 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -122,6 +133,7 @@ async function expectResults(
     config: string;
   },
 ): Promise<void> {
+  expect((await readdir(result.resultsDir)).sort()).toEqual([...resultNames].sort());
   expect(await readResults(result.resultsDir)).toEqual({
     I18N_STATUS: expected.status,
     I18N_ERRORS: String(expected.errors),
@@ -217,28 +229,30 @@ describe("frontend-i18n validate-ci", () => {
     });
   });
 
-  it("reports invalid ICU source as an error finding", async () => {
+  it("reports one error for an unparsable configured ICU message", async () => {
     const root = await createRoot();
     await createPassProject(root, { files: ["src/**/*.js"] });
     await writeProjectFile(
       root,
       "src/messages.js",
-      'formatMessage({ id: "bad", defaultMessage: "Hello {name" });\n',
+      'formatMessage({ id: "bad", defaultMessage: "{count, plural, one {item}}" });\n',
     );
 
     const result = await runValidateCi(root, ["--mode", "error"]);
 
     expect(result.exitCode).toBe(1);
-    expect(result.stderr.some((line) => line.includes("formatjs/no-invalid-icu"))).toBe(true);
-    const actual = await readResults(result.resultsDir);
-    expect(actual.I18N_STATUS).toBe("findings");
-    expect(Number(actual.I18N_ERRORS)).toBeGreaterThan(0);
-    expect(actual.I18N_WARNINGS).toBe(
-      String(result.stdout.filter((line) => line.includes(" warning ")).length),
+    expect(result.stderr).toHaveLength(1);
+    expect(result.stderr[0]).toContain(
+      "error formatjs/no-invalid-icu Failed to parse message string MISSING_OTHER_CLAUSE",
     );
-    expect(actual.I18N_MODE).toBe("error");
-    expect(actual.I18N_CONFIG).toBe("config");
-    expect(actual.I18N_TOOL_VERSION).toBe("0.1.0");
+    expect(result.stdout.filter((line) => line.includes(" warning "))).toEqual([]);
+    await expectResults(result, {
+      status: "findings",
+      errors: 1,
+      warnings: 0,
+      mode: "error",
+      config: "config",
+    });
   });
 
   it.each(["warn", "error"] as const)(
@@ -324,7 +338,6 @@ describe("frontend-i18n validate-ci", () => {
       "src/messages.ts",
       [
         "// eslint-disable-next-line formatjs/no-invalid-icu",
-        'formatMessage({ id: "invalid", defaultMessage: "Hello {name" });',
         'formatMessage({ id: "missing-other", defaultMessage: "{count, plural, one {one item}}" });',
         'formatMessage({ id: "one-number", defaultMessage: "{count, plural, one {1 item} other {# items}}" });',
         'formatMessage({ id: "offset", defaultMessage: "{count, plural, offset:1 one {one} other {# items}}" });',
@@ -337,9 +350,23 @@ describe("frontend-i18n validate-ci", () => {
 
     expect(result.exitCode).toBe(0);
     const ruleIds = new Set(
-      result.stderr.map((line) => line.match(/ error (\S+) /)?.[1]).filter(Boolean),
+      result.stderr
+        .map((line) => line.match(/ error (\S+) /)?.[1])
+        .filter((ruleId): ruleId is string => ruleId !== undefined),
     );
-    expect(ruleIds).toEqual(icuRules);
+    expect([...ruleIds].every((ruleId) => icuRules.has(ruleId))).toBe(true);
+    expect(ruleIds).toEqual(
+      new Set([
+        "formatjs/no-invalid-icu",
+        "formatjs/no-missing-icu-plural-one-placeholders",
+        "formatjs/no-offset",
+      ]),
+    );
+    const parseFailures = result.stderr.filter((line) =>
+      line.includes("Failed to parse message string"),
+    );
+    expect(parseFailures).toHaveLength(1);
+    expect(parseFailures[0]).toContain("error formatjs/no-invalid-icu");
     expect(
       result.stderr.some(
         (line) => line.startsWith("src/messages.ts:2:") && line.includes("formatjs/no-invalid-icu"),
@@ -351,6 +378,46 @@ describe("frontend-i18n validate-ci", () => {
       status: "findings",
       errors: result.stderr.length,
       warnings: 0,
+      config: "zero-config",
+    });
+  });
+
+  it("ignores .eslintignore without suppressing other Node warnings", async () => {
+    const root = await createRoot();
+    await writeProjectFile(
+      root,
+      "package.json",
+      JSON.stringify({ devDependencies: { "react-intl": "^6.0.0" } }),
+    );
+    await writeProjectFile(root, ".eslintignore", "src/ignored.js\n");
+    await writeProjectFile(
+      root,
+      "src/ignored.js",
+      'formatMessage({ id: "bad", defaultMessage: "{count, plural, one {item}}" });\n',
+    );
+    const warningPath = join(root, "warning.cjs");
+    await writeProjectFile(
+      root,
+      "warning.cjs",
+      'process.emitWarning("keep this warning", { type: "ConsumerWarning" });\n',
+    );
+
+    const result = await runValidateCi(root, ["--mode", "error"], {
+      NODE_OPTIONS: `--require ${JSON.stringify(warningPath)}`,
+    });
+
+    const stderr = result.stderr.join("\n");
+    expect(result.exitCode).toBe(1);
+    expect(stderr).not.toContain("ESLintIgnoreWarning");
+    expect(stderr).toContain("ConsumerWarning: keep this warning");
+    expect(result.stderr.filter((line) => line.includes(" error "))).toHaveLength(1);
+    expect(result.stderr.some((line) => /^src\/ignored\.js:1:\d+ error /.test(line))).toBe(true);
+    expect(result.stderr.some((line) => line.includes("formatjs/no-invalid-icu"))).toBe(true);
+    await expectResults(result, {
+      status: "findings",
+      errors: 1,
+      warnings: 0,
+      mode: "error",
       config: "zero-config",
     });
   });
@@ -407,6 +474,38 @@ describe("frontend-i18n validate-ci", () => {
       I18N_MODE: "warn",
       I18N_CONFIG: "none",
       I18N_TOOL_VERSION: "0.1.0",
+    });
+  });
+
+  it("replaces a result symlink without writing through it", async () => {
+    const root = await createRoot();
+    await writeProjectFile(root, "package.json", JSON.stringify({ name: "consumer" }));
+    const resultsDir = join(root, "results-symlink");
+    const outsidePath = join(root, "outside-status");
+    const statusPath = join(resultsDir, "I18N_STATUS");
+    await mkdir(resultsDir);
+    await writeFile(outsidePath, "leave this file alone", "utf8");
+    await symlink(outsidePath, statusPath);
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const exitCode = await runCli(["validate-ci", "--root", root, "--results-dir", resultsDir], {
+      cwd: packageRoot,
+      env: {},
+      stdout: (message) => stdout.push(message),
+      stderr: (message) => stderr.push(message),
+    });
+    const result: RunResult = { exitCode, stdout, stderr, resultsDir, root };
+
+    expect(exitCode).toBe(0);
+    expect(await readFile(outsidePath, "utf8")).toBe("leave this file alone");
+    const status = await lstat(statusPath);
+    expect(status.isFile()).toBe(true);
+    expect(status.isSymbolicLink()).toBe(false);
+    await expectResults(result, {
+      status: "not-configured",
+      errors: 0,
+      warnings: 0,
+      config: "none",
     });
   });
 
@@ -475,7 +574,68 @@ describe("frontend-i18n validate-ci", () => {
     await expectResults(result, { status: "pass", errors: 0, warnings: 0, config: "config" });
   });
 
-  it("reports an unparseable source file as one warning", async () => {
+  it("resolves a bare adapter package from a consumer in another directory tree", async () => {
+    const root = await createRoot();
+    expect(root.startsWith(packageRoot)).toBe(false);
+    await writeProjectFile(
+      root,
+      "package.json",
+      JSON.stringify({
+        dependencies: { "consumer-json-adapter": "1.0.0" },
+        i18nTooling: { catalogAdapters: { "consumer-json": "consumer-json-adapter" } },
+      }),
+    );
+    await writeProjectFile(
+      root,
+      "node_modules/consumer-json-adapter/package.json",
+      JSON.stringify({
+        name: "consumer-json-adapter",
+        version: "1.0.0",
+        type: "module",
+        main: "./index.mjs",
+      }),
+    );
+    await writeProjectFile(
+      root,
+      "node_modules/consumer-json-adapter/index.mjs",
+      `export default {
+        id: "consumer-json",
+        read(document, context) {
+          const messages = Object.fromEntries(Object.entries(document).map(([id, pattern]) => [
+            id,
+            { pattern, metadata: {} }
+          ]));
+          return { locale: context.locale, messages };
+        },
+        write(catalog) {
+          return Object.fromEntries(Object.entries(catalog.messages).map(([id, message]) => [
+            id,
+            message.pattern
+          ]));
+        }
+      };`,
+    );
+    await writeProjectFile(root, "locales/en.json", JSON.stringify({ greeting: "Hello {name}" }));
+    await writeProjectFile(root, "locales/fr.json", JSON.stringify({ greeting: "Hello {name}" }));
+    await writeConfig(root, {
+      version: 1,
+      checks: [
+        {
+          source: { path: "locales/en.json", adapter: "consumer-json", locale: "en" },
+          targets: [{ path: "locales/fr.json", adapter: "consumer-json", locale: "fr" }],
+        },
+      ],
+      generated: [],
+    });
+
+    const result = await runValidateCi(root);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toEqual([]);
+    await expectResults(result, { status: "pass", errors: 0, warnings: 0, config: "config" });
+  });
+
+  it("reports an unparsable source file as one warning", async () => {
     const root = await createRoot();
     await createPassProject(root, { files: ["src/**/*.ts"] });
     await writeProjectFile(root, "src/broken.ts", "const message: = ;\n");
@@ -506,7 +666,9 @@ describe("frontend-i18n validate-ci", () => {
         'const { spawn } = require("node:child_process");',
         'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });',
         "fs.writeFileSync(process.env.PIDS_PATH, JSON.stringify([process.pid, child.pid]));",
-        'fs.writeFileSync(process.env.FALLBACK_PATH, fs.readFileSync(process.env.RESULTS_DIR + "/I18N_STATUS", "utf8"));',
+        'const names = ["I18N_STATUS", "I18N_ERRORS", "I18N_WARNINGS", "I18N_MODE", "I18N_CONFIG", "I18N_TOOL_VERSION"];',
+        'const fallback = Object.fromEntries(names.map((name) => [name, fs.readFileSync(process.env.RESULTS_DIR + "/" + name, "utf8")]));',
+        "fs.writeFileSync(process.env.FALLBACK_PATH, JSON.stringify(fallback));",
         "setInterval(() => {}, 1000);",
       ].join("\n");
       await writeProjectFile(root, "package.json", JSON.stringify({ name: "generator-consumer" }));
@@ -557,7 +719,14 @@ describe("frontend-i18n validate-ci", () => {
       const [generatorPid, childPid] = JSON.parse(await readFile(pidsPath, "utf8")) as number[];
       generatorPids.push(generatorPid!, childPid!);
       await waitForProcessesToExit([generatorPid!, childPid!]);
-      expect(await readFile(fallbackPath, "utf8")).toBe("tool-error");
+      expect(JSON.parse(await readFile(fallbackPath, "utf8"))).toEqual({
+        I18N_STATUS: "tool-error",
+        I18N_ERRORS: "0",
+        I18N_WARNINGS: "0",
+        I18N_MODE: mode,
+        I18N_CONFIG: "none",
+        I18N_TOOL_VERSION: "0.1.0",
+      });
       expect(exitCode).toBe(mode === "warn" ? 0 : 1);
       expect(stderr.some((line) => line.includes("deadline exceeded after 2 seconds"))).toBe(true);
       expect(stdout.at(-1)).toContain("status=tool-error errors=0 warnings=0 config=config");
@@ -573,47 +742,51 @@ describe("frontend-i18n validate-ci", () => {
     },
   );
 
-  it("turns a crashed validation worker into a tool error and cleans up its process group", async () => {
-    const root = await createRoot();
-    const pidsPath = join(root, "crash-pids.json");
-    const generator = [
-      'const fs = require("node:fs");',
-      'const { spawn } = require("node:child_process");',
-      'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });',
-      "fs.writeFileSync(process.env.PIDS_PATH, JSON.stringify([process.pid, child.pid]));",
-      'process.kill(process.ppid, "SIGKILL");',
-      "setInterval(() => {}, 1000);",
-    ].join("\n");
-    await writeProjectFile(root, "package.json", JSON.stringify({ name: "crash-consumer" }));
-    await writeConfig(root, {
-      version: 1,
-      checks: [],
-      generated: [
-        {
-          path: "locales/generated.json",
-          command: process.execPath,
-          args: ["-e", generator, "{output}"],
-        },
-      ],
-    });
+  it.each(["warn", "error"] as const)(
+    "turns a crashed validation worker into a tool error and cleans up its process group in %s mode",
+    async (mode) => {
+      const root = await createRoot();
+      const pidsPath = join(root, "crash-pids.json");
+      const generator = [
+        'const fs = require("node:fs");',
+        'const { spawn } = require("node:child_process");',
+        'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });',
+        "fs.writeFileSync(process.env.PIDS_PATH, JSON.stringify([process.pid, child.pid]));",
+        'process.kill(process.ppid, "SIGKILL");',
+        "setInterval(() => {}, 1000);",
+      ].join("\n");
+      await writeProjectFile(root, "package.json", JSON.stringify({ name: "crash-consumer" }));
+      await writeConfig(root, {
+        version: 1,
+        checks: [],
+        generated: [
+          {
+            path: "locales/generated.json",
+            command: process.execPath,
+            args: ["-e", generator, "{output}"],
+          },
+        ],
+      });
 
-    const result = await runValidateCi(root, ["--mode", "warn"], { PIDS_PATH: pidsPath });
+      const result = await runValidateCi(root, ["--mode", mode], { PIDS_PATH: pidsPath });
 
-    const [generatorPid, childPid] = JSON.parse(await readFile(pidsPath, "utf8")) as number[];
-    generatorPids.push(generatorPid!, childPid!);
-    await waitForProcessesToExit([generatorPid!, childPid!]);
-    expect(result.exitCode).toBe(0);
-    expect(
-      result.stderr.some((line) => line.includes("Validation work exited with signal SIGKILL")),
-    ).toBe(true);
-    expect(result.stdout.at(-1)).toContain("status=tool-error errors=0 warnings=0 config=config");
-    await expectResults(result, {
-      status: "tool-error",
-      errors: 0,
-      warnings: 0,
-      config: "config",
-    });
-  });
+      const [generatorPid, childPid] = JSON.parse(await readFile(pidsPath, "utf8")) as number[];
+      generatorPids.push(generatorPid!, childPid!);
+      await waitForProcessesToExit([generatorPid!, childPid!]);
+      expect(result.exitCode).toBe(mode === "warn" ? 0 : 1);
+      expect(
+        result.stderr.some((line) => line.includes("Validation work exited with signal SIGKILL")),
+      ).toBe(true);
+      expect(result.stdout.at(-1)).toContain("status=tool-error errors=0 warnings=0 config=config");
+      await expectResults(result, {
+        status: "tool-error",
+        errors: 0,
+        warnings: 0,
+        mode,
+        config: "config",
+      });
+    },
+  );
 
   it("returns usage status 2 for a missing or invalid mode", async () => {
     const root = await createRoot();
@@ -630,15 +803,28 @@ describe("frontend-i18n validate-ci", () => {
 
   it("works with HOME unset, nonexistent, or read-only", async () => {
     const root = await createRoot();
-    await createPassProject(root);
+    await createPassProject(root, { files: ["src/**/*.js"] });
+    await writeProjectFile(
+      root,
+      "src/messages.js",
+      'formatMessage({ id: "bad", defaultMessage: "{count, plural, one {item}}" });\n',
+    );
     const readOnlyHome = join(root, "read-only-home");
     await mkdir(readOnlyHome);
     await chmod(readOnlyHome, 0o500);
 
     for (const env of [{}, { HOME: join(root, "missing-home") }, { HOME: readOnlyHome }]) {
-      const result = await runValidateCi(root, [], env);
-      expect(result.exitCode).toBe(0);
-      await expectResults(result, { status: "pass", errors: 0, warnings: 0, config: "config" });
+      const result = await runValidateCi(root, ["--mode", "error"], env);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toHaveLength(1);
+      expect(result.stderr[0]).toContain("formatjs/no-invalid-icu");
+      await expectResults(result, {
+        status: "findings",
+        errors: 1,
+        warnings: 0,
+        mode: "error",
+        config: "config",
+      });
     }
   });
 
@@ -682,28 +868,31 @@ describe("frontend-i18n validate-ci", () => {
     });
   });
 
-  it("reports an unwritable results directory as a tool error", async () => {
-    const root = await createRoot();
-    await createPassProject(root);
-    const resultsFile = join(root, "results-file");
-    await writeFile(resultsFile, "not a directory");
-    const stdout: string[] = [];
-    const stderr: string[] = [];
+  it.each(["warn", "error"] as const)(
+    "reports an unwritable results directory in %s mode",
+    async (mode) => {
+      const root = await createRoot();
+      await createPassProject(root);
+      const resultsFile = join(root, "results-file");
+      await writeFile(resultsFile, "not a directory");
+      const stdout: string[] = [];
+      const stderr: string[] = [];
 
-    const exitCode = await runCli(
-      ["validate-ci", "--root", root, "--mode", "error", "--results-dir", resultsFile],
-      {
-        cwd: packageRoot,
-        env: {},
-        stdout: (message) => stdout.push(message),
-        stderr: (message) => stderr.push(message),
-      },
-    );
+      const exitCode = await runCli(
+        ["validate-ci", "--root", root, "--mode", mode, "--results-dir", resultsFile],
+        {
+          cwd: packageRoot,
+          env: {},
+          stdout: (message) => stdout.push(message),
+          stderr: (message) => stderr.push(message),
+        },
+      );
 
-    expect(exitCode).toBe(1);
-    expect(stderr[0]).toContain("EEXIST");
-    expect(stdout[0]).toContain("status=tool-error errors=0 warnings=0 config=none");
-  });
+      expect(exitCode).toBe(mode === "warn" ? 0 : 1);
+      expect(stderr[0]).toContain("EEXIST");
+      expect(stdout[0]).toContain("status=tool-error errors=0 warnings=0 config=none");
+    },
+  );
 
   it("loads the CLI-owned lint stack for a consumer in another tree without node_modules", async () => {
     const root = await createRoot();

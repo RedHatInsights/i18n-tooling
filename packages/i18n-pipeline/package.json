@@ -27,7 +27,9 @@
   "scripts": {
     "build": "tsup src/index.ts src/cli.ts src/validate-ci.ts --format esm --dts",
     "lint": "tsc --noEmit",
+    "pretest": "npm run build --workspace @redhat-cloud-services/eslint-plugin-i18n && npm run build",
     "test": "vitest run",
+    "pretest:coverage": "npm run build --workspace @redhat-cloud-services/eslint-plugin-i18n && npm run build",
     "test:coverage": "vitest run --coverage"
   },
   "engines": {

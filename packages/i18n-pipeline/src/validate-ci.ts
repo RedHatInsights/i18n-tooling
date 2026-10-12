@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -185,22 +186,30 @@ type ResultValues = {
 };
 
 const RESULT_KEYS: Array<[string, keyof ResultValues]> = [
-  ["I18N_STATUS", "status"],
   ["I18N_ERRORS", "errors"],
   ["I18N_WARNINGS", "warnings"],
   ["I18N_MODE", "mode"],
   ["I18N_CONFIG", "config"],
   ["I18N_TOOL_VERSION", "version"],
+  ["I18N_STATUS", "status"],
 ];
+
+async function replaceFileAtomically(path: string, contents: string): Promise<void> {
+  const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, contents, { encoding: "utf8", flag: "wx" });
+    await rename(temporaryPath, path);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
+}
 
 async function writeResults(directory: string | undefined, values: ResultValues): Promise<void> {
   if (!directory) return;
   await mkdir(directory, { recursive: true });
-  await Promise.all(
-    RESULT_KEYS.map(([file, key]) =>
-      writeFile(resolve(directory, file), String(values[key]), "utf8"),
-    ),
-  );
+  for (const [file, key] of RESULT_KEYS) {
+    await replaceFileAtomically(resolve(directory, file), String(values[key]));
+  }
 }
 
 function reportForToolError(
@@ -413,6 +422,12 @@ async function lintSource(
         continue;
       }
       if (!message.ruleId) continue;
+      if (
+        message.ruleId !== "formatjs/no-invalid-icu" &&
+        message.message.startsWith("Failed to parse message string ")
+      ) {
+        continue;
+      }
       const severity = message.severity === 2 ? "error" : "warning";
       const finding = formatLintFinding(
         root,
@@ -594,12 +609,16 @@ process.once("message", async ({ root }) => {
   if (process.send) process.send({ type: "result", report });
 });
 `;
-  const child = spawn(process.execPath, ["--input-type=module", "--eval", workerSource], {
-    cwd: root,
-    env,
-    detached: true,
-    stdio: ["ignore", "pipe", "pipe", "ipc"],
-  });
+  const child = spawn(
+    process.execPath,
+    ["--disable-warning=ESLintIgnoreWarning", "--input-type=module", "--eval", workerSource],
+    {
+      cwd: root,
+      env,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
+    },
+  );
   let stdoutBuffer = "";
   let stderrBuffer = "";
   let workerReport: ValidateCiReport | undefined;
