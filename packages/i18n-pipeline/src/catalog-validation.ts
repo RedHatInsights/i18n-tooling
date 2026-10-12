@@ -58,6 +58,13 @@ export interface CatalogValidationConfig {
   checks: CatalogValidationCheck[];
   generated: GeneratedCatalogCheck[];
   catalogDirectories: CatalogDirectory[];
+  /** Optional source-code lint settings used by `validate-ci`; `validate-project` ignores them. */
+  sourceLint?: SourceLintConfig;
+}
+
+export interface SourceLintConfig {
+  files?: string[];
+  catalog?: string;
 }
 
 export interface CatalogValidationResult {
@@ -178,6 +185,32 @@ function parseCatalogDirectory(value: unknown, label: string): CatalogDirectory 
   return { path, extension };
 }
 
+function parseSourceLintConfig(value: unknown): SourceLintConfig {
+  const sourceLint = recordValue(value, 'Catalog validation config "sourceLint"');
+  const label = 'Catalog validation config "sourceLint"';
+  rejectUnknownKeys(sourceLint, ["files", "catalog"], label);
+
+  let files: string[] | undefined;
+  if (sourceLint.files !== undefined) {
+    if (!Array.isArray(sourceLint.files)) {
+      throw new TypeError(`${label}.files must be an array`);
+    }
+    files = sourceLint.files.map((value, index) => {
+      const path = requiredString(value, `${label}.files[${index}]`);
+      validateRepoPath(path, `${label}.files[${index}]`);
+      return path;
+    });
+  }
+
+  let catalog: string | undefined;
+  if (sourceLint.catalog !== undefined) {
+    catalog = requiredString(sourceLint.catalog, `${label}.catalog`);
+    validateRepoPath(catalog, `${label}.catalog`);
+  }
+
+  return { ...(files === undefined ? {} : { files }), ...(catalog ? { catalog } : {}) };
+}
+
 function optionalArray(value: unknown, label: string): unknown[] {
   if (value === undefined) return [];
   if (!Array.isArray(value)) throw new TypeError(`${label} must be an array`);
@@ -189,7 +222,7 @@ export function parseCatalogValidationConfig(value: unknown): CatalogValidationC
   const root = recordValue(value, "Catalog validation config");
   rejectUnknownKeys(
     root,
-    ["version", "tmsConfig", "checks", "generated", "catalogDirectories"],
+    ["version", "tmsConfig", "checks", "generated", "catalogDirectories", "sourceLint"],
     "Catalog validation config",
   );
   if (root.version !== 1) throw new TypeError('Catalog validation config "version" must be 1');
@@ -225,6 +258,8 @@ export function parseCatalogValidationConfig(value: unknown): CatalogValidationC
   ).map((value, index) =>
     parseCatalogDirectory(value, `Catalog validation config "catalogDirectories[${index}]"`),
   );
+  const sourceLint =
+    root.sourceLint === undefined ? undefined : parseSourceLintConfig(root.sourceLint);
 
   if (!tmsConfig && !checks.length && !generated.length) {
     throw new TypeError(
@@ -237,6 +272,7 @@ export function parseCatalogValidationConfig(value: unknown): CatalogValidationC
     checks,
     generated,
     catalogDirectories,
+    ...(sourceLint === undefined ? {} : { sourceLint }),
   };
 }
 

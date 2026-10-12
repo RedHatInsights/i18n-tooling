@@ -6,11 +6,11 @@ The reusable workflow builds the CLI from this source; consumers do not need an 
 
 ## Built-in adapters
 
-| ID                       | Source catalog                                                                      | Target catalog                            |
-| ------------------------ | ----------------------------------------------------------------------------------- | ----------------------------------------- |
-| `formatjs-json`          | FormatJS descriptors: `{ "id": { "defaultMessage": "...", "description": "..." } }` | Flat compiled messages: `{ "id": "..." }` |
-| `icu-json`               | Flat message-code-to-ICU-pattern JSON                                               | Flat message-code-to-ICU-pattern JSON     |
-| `openapi-problem-details` | OpenAPI 3 Problem Details schemas annotated with `x-i18n.message`                    | Source-only; convert to `icu-json`        |
+| ID                        | Source catalog                                                                      | Target catalog                            |
+| ------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------- |
+| `formatjs-json`           | FormatJS descriptors: `{ "id": { "defaultMessage": "...", "description": "..." } }` | Flat compiled messages: `{ "id": "..." }` |
+| `icu-json`                | Flat message-code-to-ICU-pattern JSON                                               | Flat message-code-to-ICU-pattern JSON     |
+| `openapi-problem-details` | OpenAPI 3 Problem Details schemas annotated with `x-i18n.message`                   | Source-only; convert to `icu-json`        |
 
 The FormatJS adapter retains string/object descriptions and other descriptor metadata. The JSON adapters validate ICU syntax with FormatJS's `@formatjs/icu-messageformat-parser`; the OpenAPI adapter also parses ICU arguments and checks them against the schema. Consumers should run native framework compilation and validation where applicable. ICU failure reports list each malformed message ID, its line and column within the pattern, and a readable parser diagnostic.
 
@@ -113,8 +113,31 @@ Use `frontend-i18n validate-project --config <path>` for a repository-wide valid
 - **`tmsConfig`** adds one check from the Phrase config: its `sourceCatalog` against every `targetLocales[].outputPath`, read with `targetAdapter` (default: the source adapter) and the `repositoryLocale`. The locale mapping has one source of truth. A target whose file does not exist yet is reported as pending, not failed, so the plan works before the first translation PR lands.
 - **`generated`** runs its configured executable with an argument array (no shell), substituting `{output}` with a temporary file path, and compares the result with the checked-in file. With an `adapter` (plus `role` and `locale`), both documents are parsed as catalogs. Without one, both are compared as plain JSON, which suits runtime aggregates such as a locale-keyed `data.json`. Prefer calling the consumer's own package script with an output override (FormatJS CLI options take the last value, so `-- --out-file {output}` redirects `translations:extract`) over copying its arguments; copied arguments drift from the script developers actually run. Generators must honor `{output}` without other side effects. The validator never rewrites checked-in files; `updateCommand` is only a failure hint.
 - **`catalogDirectories`** lists directories whose files (default extension `.json`) must all be declared by a check, a TMS target, or a generated entry. It catches a locale file added without a TMS mapping, or a stale file left after a locale was removed.
+- **`sourceLint`** opts `validate-ci` into source-code lint. It has optional repository-relative `files` globs (default: `src/**/*.{js,jsx,ts,tsx}`) and an optional repository-relative `catalog` path. `validate-project` accepts this section and ignores it.
 
 The reusable workflow accepts this file through `validation-config`, so consumers do not need a validation script. Non-JavaScript repositories can set `catalog-only: true`; this skips consumer dependency installation and FormatJS source lint, requires `validation-config`, and runs the shared catalog validator only. See the [schema](../../schemas/catalog-validation-config.schema.json), the [consumer example](../../examples/phrase-consumer/.github/i18n/catalog-validation.json), and the [consumer onboarding checklist](../../docs/consumer-onboarding.md).
+
+## CI validation command
+
+`frontend-i18n validate-ci` discovers a consumer's configuration and combines optional source lint with the same catalog checks as `validate-project`:
+
+```bash
+frontend-i18n validate-ci \
+  --root /workspace/consumer \
+  --mode error \
+  --results-dir /tekton/results/i18n \
+  --timeout-seconds 600
+```
+
+`--root` defaults to the current directory. Relative `--root` paths are resolved from the current directory. Relative `--results-dir` paths are also resolved from the current directory; the directory is created when missing.
+
+Discovery checks `<root>/i18n/catalog-validation.json`, then `<root>/.github/i18n/catalog-validation.json`. The first file found selects configured validation: `sourceLint`, when present, runs before the configured catalog checks. A missing config enables zero-config ICU lint when `react-intl` or an `@formatjs/*` dependency is declared in `package.json`. That mode checks `src/**/*.{js,jsx,ts,tsx}` with only the four ICU error rules. Consumers with neither a config nor a FormatJS dependency are reported as not configured.
+
+Configured `sourceLint` runs those same four ICU rules at error severity, followed by the five translatability rules from `scripts/eslint-source.config.mjs` at warning severity. If `sourceLint.catalog` is set, `i18n/no-missing-default-catalog-entry` also runs at error severity against that source catalog. The ESLint version, parser, and plugins come from this CLI package; consumer ESLint configuration and inline disable comments do not affect the result. A source glob with no matches is allowed.
+
+When `--results-dir` is set, the command writes `I18N_STATUS`, `I18N_ERRORS`, `I18N_WARNINGS`, `I18N_MODE`, `I18N_CONFIG`, and `I18N_TOOL_VERSION` files without trailing newlines. It writes fallback tool-error values before discovery and replaces them with the completed result. Status is `pass`, `findings`, `not-configured`, or `tool-error`; config is `config`, `zero-config`, or `none`.
+
+The default mode is `warn`, which exits 0 for findings and tool errors. `--mode error` exits 1 for error findings or tool errors, and exits 0 for warning-only findings. Missing or invalid `--mode` values are usage errors and exit 2. `--timeout-seconds` is a positive integer and defaults to 600; the deadline covers the validation worker and terminates its process group, including configured generators and their ordinary child processes.
 
 ## Custom adapters
 

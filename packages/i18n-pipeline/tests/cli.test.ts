@@ -433,7 +433,9 @@ objects:
         stderr: (message) => errors.push(message),
       }),
     ).toBe(0);
-    expect(output[0]).toContain("<check|validate|validate-project|convert|feo|tms|version|help>");
+    expect(output[0]).toContain(
+      "<check|validate|validate-project|validate-ci|convert|feo|tms|version|help>",
+    );
 
     expect(
       await runCli(["check", "--help"], {
@@ -444,6 +446,15 @@ objects:
     expect(output[1]).toContain("Usage: frontend-i18n check --source <path> --target <path>");
     expect(errors).toEqual([]);
 
+    expect(
+      await runCli(["validate-ci", "--help"], {
+        stdout: (message) => output.push(message),
+        stderr: (message) => errors.push(message),
+      }),
+    ).toBe(0);
+    expect(output[2]).toContain("Usage: frontend-i18n validate-ci [options]");
+    expect(output[2]).toContain("--results-dir <dir>");
+
     const unknownErrors: string[] = [];
     expect(
       await runCli(["unknown"], {
@@ -453,7 +464,7 @@ objects:
     ).toBe(1);
     expect(unknownErrors[0]).toContain('Unknown command "unknown"');
     expect(unknownErrors[0]).toContain(
-      "Usage: frontend-i18n <check|validate|validate-project|convert|feo|tms|version|help>",
+      "Usage: frontend-i18n <check|validate|validate-project|validate-ci|convert|feo|tms|version|help>",
     );
   });
 

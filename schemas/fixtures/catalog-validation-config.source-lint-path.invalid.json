@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "checks": [],
+  "generated": [
+    {
+      "path": "src/locales/data.json",
+      "command": "node",
+      "args": ["scripts/assemble-locales.mjs", "{output}"]
+    }
+  ],
+  "sourceLint": {
+    "files": ["../outside/**/*.ts"]
+  }
+}

@@ -26,6 +26,7 @@ import { PhraseClient, type PhraseClientOptions } from "./phrase-client.js";
 import { parsePhraseTmsConfig } from "./phrase-config.js";
 import { PhraseWorkflow, type PhraseReconcileResult } from "./phrase-workflow.js";
 import { extractFeoCatalog, inlineFeoLocale, type FeoCatalog } from "./feo-template.js";
+import { runValidateCiCommand, VALIDATE_CI_HELP } from "./validate-ci.js";
 
 export interface CliOptions {
   cwd?: string;
@@ -35,12 +36,13 @@ export interface CliOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-const ROOT_HELP = `Usage: frontend-i18n <check|validate|validate-project|convert|feo|tms|version|help> [options]
+const ROOT_HELP = `Usage: frontend-i18n <check|validate|validate-project|validate-ci|convert|feo|tms|version|help> [options]
 
 Commands:
   check             Compare source and target catalogs
   validate          Validate one catalog's format and ICU syntax
   validate-project  Check configured catalogs and generated-catalog sync
+  validate-ci       Discover and validate a consumer repository for CI
   convert           Convert a catalog between adapters
   tms               Submit and reconcile translation batches
   feo               Extract and inline Frontend template translations
@@ -84,6 +86,7 @@ declared catalogs.
 Options:
   --config <path>  Catalog validation JSON config
   -h, --help       Show this help`,
+  "validate-ci": VALIDATE_CI_HELP,
   convert: `Usage: frontend-i18n convert --source <path> --output <path> --source-adapter <id> --target-adapter <id> [options]
 
 Options:
@@ -681,6 +684,9 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
     }
     if (command === "validate-project") {
       return (await validateProject(args, { cwd, env, stdout, stderr })) ? 0 : 1;
+    }
+    if (command === "validate-ci") {
+      return await runValidateCiCommand(args, { cwd, env, stdout, stderr });
     }
     if (command === "convert") {
       await convertCatalog(args, { cwd, stdout });
