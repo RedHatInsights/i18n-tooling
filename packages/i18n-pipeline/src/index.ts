@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parse as parseIcuMessage } from "@formatjs/icu-messageformat-parser";
@@ -358,14 +359,24 @@ export async function createCatalogAdapterRegistry(
     throw new TypeError('package.json "i18nTooling.catalogAdapters" must be an object');
   }
 
+  const consumerRequire = createRequire(manifestPath);
   for (const [adapterId, moduleSpecifier] of Object.entries(configuredAdapters)) {
     if (typeof moduleSpecifier !== "string" || !moduleSpecifier.trim()) {
       throw new TypeError(`Module for catalog adapter "${adapterId}" must be a string`);
     }
-    const specifier =
-      moduleSpecifier.startsWith(".") || isAbsolute(moduleSpecifier)
-        ? pathToFileURL(resolve(projectRoot, moduleSpecifier)).href
-        : moduleSpecifier;
+    let specifier: string;
+    if (moduleSpecifier.startsWith(".") || isAbsolute(moduleSpecifier)) {
+      specifier = pathToFileURL(resolve(projectRoot, moduleSpecifier)).href;
+    } else {
+      try {
+        const consumerSpecifier = consumerRequire.resolve(moduleSpecifier);
+        specifier = isAbsolute(consumerSpecifier)
+          ? pathToFileURL(consumerSpecifier).href
+          : consumerSpecifier;
+      } catch {
+        specifier = moduleSpecifier;
+      }
+    }
 
     let pluginModule: unknown;
     try {
