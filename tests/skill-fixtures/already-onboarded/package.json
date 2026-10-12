@@ -1,0 +1,11 @@
+{
+  "name": "already-onboarded-fixture",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "react-intl": "^6.8.9"
+  },
+  "scripts": {
+    "translations:validate": "i18n-pipeline validate-ci --mode error"
+  }
+}

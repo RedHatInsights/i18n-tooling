@@ -3,3 +3,9 @@ dist/
 coverage/
 inventory/
 .DS_Store
+
+# The FEO fixture includes an installed schema stub for version detection.
+!tests/skill-fixtures/feo-frontend/node_modules/
+!tests/skill-fixtures/feo-frontend/node_modules/@redhat-cloud-services/
+!tests/skill-fixtures/feo-frontend/node_modules/@redhat-cloud-services/frontend-components-config-utilities/
+!tests/skill-fixtures/feo-frontend/node_modules/@redhat-cloud-services/frontend-components-config-utilities/**

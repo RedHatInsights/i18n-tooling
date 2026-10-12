@@ -1,0 +1,6 @@
+{
+  "greeting.hello": {
+    "defaultMessage": "Hello {name}.",
+    "description": "Greeting displayed at the top of the page."
+  }
+}

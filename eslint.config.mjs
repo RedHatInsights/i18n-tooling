@@ -4,7 +4,7 @@ import i18n from "./packages/eslint-plugin-i18n/dist/index.js";
 
 export default [
   {
-    ignores: ["**/dist/**", "**/node_modules/**", "**/coverage/**"],
+    ignores: ["**/dist/**", "**/node_modules/**", "**/coverage/**", "tests/skill-fixtures/**"],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

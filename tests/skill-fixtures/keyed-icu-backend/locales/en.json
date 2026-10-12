@@ -1,0 +1,4 @@
+{
+  "account.locked": "Account {accountName} is locked.",
+  "users.removed": "{count, plural, one {# user was removed} other {# users were removed}}"
+}

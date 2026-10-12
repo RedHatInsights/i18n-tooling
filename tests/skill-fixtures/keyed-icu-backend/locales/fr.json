@@ -1,0 +1,4 @@
+{
+  "account.locked": "Le compte {accountName} est verrouillé.",
+  "users.removed": "{count, plural, one {# utilisateur a été supprimé} other {# utilisateurs ont été supprimés}}"
+}

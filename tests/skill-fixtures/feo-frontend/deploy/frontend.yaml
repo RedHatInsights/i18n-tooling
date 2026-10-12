@@ -1,0 +1,33 @@
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: feo-frontend-fixture
+objects:
+  - apiVersion: cloud.redhat.com/v1alpha1
+    kind: Frontend
+    metadata:
+      name: sample-console
+    spec:
+      bundleSegments:
+        - bundleId: identity
+          segmentId: account
+          navItems:
+            - id: users
+              title: User management
+              permissions:
+                - users:read
+      searchEntries:
+        - id: users
+          title: User management
+          description: Find and manage people in your account
+          alt_title:
+            - People
+            - Accounts
+      serviceTiles:
+        - section: identity
+          group: access
+          id: user-management
+          title: User access
+          description: Manage access for your team
+      module:
+        defaultDocumentTitle: Identity Management
