@@ -31,7 +31,7 @@ describe("repository i18n contracts", () => {
     expect(workflow).toContain("      catalog-only:");
     expect(workflow).toContain("catalog-only mode requires validation-config");
     expect(workflow).toContain("if: inputs.catalog-only != true");
-    expect(workflow).toContain('frontend-i18n validate-project --config "$VALIDATION_CONFIG"');
+    expect(workflow).toContain('i18n-pipeline validate-project --config "$VALIDATION_CONFIG"');
     expect(workflow).toContain('npm run "$VALIDATION_COMMAND"');
     expect(workflow).toContain("VALIDATION_CONFIG: ${{ inputs.validation-config }}");
     expect(workflow).toContain("Build source-catalog ESLint plugin");

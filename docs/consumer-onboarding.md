@@ -34,14 +34,14 @@ Create `.github/i18n/catalog-validation.json`:
 
 **Trap: build hooks hide stale aggregates.** A `prebuild` hook that regenerates `data.json` makes builds correct but leaves the checked-in file stale, and unit tests often import the checked-in file directly. Validate the aggregate as a `generated` entry even when the build regenerates it.
 
-**Done when:** `frontend-i18n validate-project --config .github/i18n/catalog-validation.json` passes locally. Then deliberately break each piece (delete a message, edit the aggregate, add a stray `xx.json`) and confirm each break fails.
+**Done when:** `i18n-pipeline validate-project --config .github/i18n/catalog-validation.json` passes locally. Then deliberately break each piece (delete a message, edit the aggregate, add a stray `xx.json`) and confirm each break fails.
 
 ## 4. Wire the package scripts
 
-- Add `translations:validate` that runs `frontend-i18n validate-project --config .github/i18n/catalog-validation.json`.
+- Add `translations:validate` that runs `i18n-pipeline validate-project --config .github/i18n/catalog-validation.json`.
 - **Trap: wildcard script runners.** `npm-run-all translations:*` also picks up new `translations:validate` or `translations:prepare` scripts. List the steps explicitly.
 - **Trap: pre-hooks match exact names.** `prestart` does not run before `start:no-proxy`. Add a hook for every entry point that serves the app, or none.
-- The CLI is not published to npm. To run it locally, build `packages/i18n-pipeline` in an `i18n-tooling` checkout and put a `frontend-i18n` wrapper for `dist/cli.js` on `PATH`. CI builds it from the pinned workflow source.
+- The CLI is not published to npm. To run it locally, build `packages/i18n-pipeline` in an `i18n-tooling` checkout and put a `i18n-pipeline` wrapper for `dist/cli.js` on `PATH`. CI builds it from the pinned workflow source.
 
 **Done when:** `npm run translations` regenerates everything and `npm run translations:validate` passes.
 

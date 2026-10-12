@@ -436,7 +436,7 @@ async function checkGeneratedCatalog(
   entry: GeneratedCatalogCheck,
   registry: Pick<CatalogAdapterRegistry, "get">,
 ): Promise<boolean> {
-  const temporaryDirectory = await mkdtemp(resolve(tmpdir(), "frontend-i18n-"));
+  const temporaryDirectory = await mkdtemp(resolve(tmpdir(), "i18n-pipeline-"));
   const outputName = basename(entry.path);
   const outputPath = resolve(temporaryDirectory, outputName);
   try {

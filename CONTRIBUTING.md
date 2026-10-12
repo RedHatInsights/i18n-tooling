@@ -18,4 +18,4 @@ Use `npm run format` to apply formatting.
 
 ## Consumer workflow
 
-The reusable validation and Phrase TMS workflows build `frontend-i18n` from the called workflow's commit. Consumers do not need an npm dependency on this repository; workspace packages are not published to npm. Phrase workflows require consumer-owned config plus protected Actions secrets; never run `tms submit` or `tms reconcile` against live Phrase/GitHub resources without explicit approval. Use injected fetch implementations in tests, and update the TMS config schema fixtures whenever the consumer contract changes.
+The reusable validation and Phrase TMS workflows build `i18n-pipeline` from the called workflow's commit. Consumers do not need an npm dependency on this repository; workspace packages are not published to npm. Phrase workflows require consumer-owned config plus protected Actions secrets; never run `tms submit` or `tms reconcile` against live Phrase/GitHub resources without explicit approval. Use injected fetch implementations in tests, and update the TMS config schema fixtures whenever the consumer contract changes.

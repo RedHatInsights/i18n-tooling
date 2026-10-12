@@ -16,7 +16,7 @@
       "adapter": "icu-json",
       "locale": "en",
       "role": "source",
-      "command": "frontend-i18n",
+      "command": "i18n-pipeline",
       "args": [
         "convert",
         "--source",

@@ -283,7 +283,7 @@ describe("catalog project validation", () => {
     const actions = await run({ GITHUB_ACTIONS: "true" });
     expect(actions.exitCode).toBe(0);
     expect(
-      actions.output.filter((line) => line.startsWith("::warning title=frontend-i18n::")),
+      actions.output.filter((line) => line.startsWith("::warning title=i18n-pipeline::")),
     ).toHaveLength(2);
   });
 

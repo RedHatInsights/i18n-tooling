@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parse as parseIcuMessage } from "@formatjs/icu-messageformat-parser";
+import { resolve as resolveModule } from "import-meta-resolve";
 import { CatalogFormatError } from "./catalog-format-error.js";
 import { OpenApiProblemDetailsAdapter } from "./openapi-problem-details-adapter.js";
 export {
@@ -359,7 +359,7 @@ export async function createCatalogAdapterRegistry(
     throw new TypeError('package.json "i18nTooling.catalogAdapters" must be an object');
   }
 
-  const consumerRequire = createRequire(manifestPath);
+  const manifestUrl = pathToFileURL(manifestPath).href;
   for (const [adapterId, moduleSpecifier] of Object.entries(configuredAdapters)) {
     if (typeof moduleSpecifier !== "string" || !moduleSpecifier.trim()) {
       throw new TypeError(`Module for catalog adapter "${adapterId}" must be a string`);
@@ -369,10 +369,7 @@ export async function createCatalogAdapterRegistry(
       specifier = pathToFileURL(resolve(projectRoot, moduleSpecifier)).href;
     } else {
       try {
-        const consumerSpecifier = consumerRequire.resolve(moduleSpecifier);
-        specifier = isAbsolute(consumerSpecifier)
-          ? pathToFileURL(consumerSpecifier).href
-          : consumerSpecifier;
+        specifier = resolveModule(moduleSpecifier, manifestUrl);
       } catch {
         specifier = moduleSpecifier;
       }

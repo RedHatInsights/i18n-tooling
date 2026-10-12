@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import {
   chmod,
   lstat,
@@ -180,7 +181,7 @@ afterEach(async () => {
   generatorPids = [];
 });
 
-describe("frontend-i18n validate-ci", () => {
+describe("i18n-pipeline validate-ci", () => {
   it("passes a configured consumer and prefers i18n/ over the GitHub config path", async () => {
     const root = await createRoot();
     await createPassProject(root);
@@ -574,31 +575,45 @@ describe("frontend-i18n validate-ci", () => {
     await expectResults(result, { status: "pass", errors: 0, warnings: 0, config: "config" });
   });
 
-  it("resolves a bare adapter package from a consumer in another directory tree", async () => {
-    const root = await createRoot();
-    expect(root.startsWith(packageRoot)).toBe(false);
-    await writeProjectFile(
-      root,
-      "package.json",
-      JSON.stringify({
-        dependencies: { "consumer-json-adapter": "1.0.0" },
-        i18nTooling: { catalogAdapters: { "consumer-json": "consumer-json-adapter" } },
-      }),
-    );
-    await writeProjectFile(
-      root,
-      "node_modules/consumer-json-adapter/package.json",
-      JSON.stringify({
-        name: "consumer-json-adapter",
-        version: "1.0.0",
-        type: "module",
-        main: "./index.mjs",
-      }),
-    );
-    await writeProjectFile(
-      root,
-      "node_modules/consumer-json-adapter/index.mjs",
-      `export default {
+  it.each(["main", "dual", "import-only"])(
+    "resolves a %s adapter package from a consumer in another directory tree",
+    async (exportsKind) => {
+      const root = await createRoot();
+      expect(root.startsWith(packageRoot)).toBe(false);
+      await writeProjectFile(
+        root,
+        "package.json",
+        JSON.stringify({
+          dependencies: { "consumer-json-adapter": "1.0.0" },
+          i18nTooling: { catalogAdapters: { "consumer-json": "consumer-json-adapter" } },
+        }),
+      );
+      await writeProjectFile(
+        root,
+        "node_modules/consumer-json-adapter/package.json",
+        JSON.stringify({
+          name: "consumer-json-adapter",
+          version: "1.0.0",
+          type: "module",
+          ...(exportsKind === "main"
+            ? { main: "./index.mjs" }
+            : {
+                exports: {
+                  import: "./index.mjs",
+                  ...(exportsKind === "dual" ? { require: "./index.cjs" } : {}),
+                },
+              }),
+        }),
+      );
+      await writeProjectFile(
+        root,
+        "node_modules/consumer-json-adapter/index.cjs",
+        'exports.default = { id: "consumer-json", read() {}, write() {} };',
+      );
+      await writeProjectFile(
+        root,
+        "node_modules/consumer-json-adapter/index.mjs",
+        `export default {
         id: "consumer-json",
         read(document, context) {
           const messages = Object.fromEntries(Object.entries(document).map(([id, pattern]) => [
@@ -614,26 +629,27 @@ describe("frontend-i18n validate-ci", () => {
           ]));
         }
       };`,
-    );
-    await writeProjectFile(root, "locales/en.json", JSON.stringify({ greeting: "Hello {name}" }));
-    await writeProjectFile(root, "locales/fr.json", JSON.stringify({ greeting: "Hello {name}" }));
-    await writeConfig(root, {
-      version: 1,
-      checks: [
-        {
-          source: { path: "locales/en.json", adapter: "consumer-json", locale: "en" },
-          targets: [{ path: "locales/fr.json", adapter: "consumer-json", locale: "fr" }],
-        },
-      ],
-      generated: [],
-    });
+      );
+      await writeProjectFile(root, "locales/en.json", JSON.stringify({ greeting: "Hello {name}" }));
+      await writeProjectFile(root, "locales/fr.json", JSON.stringify({ greeting: "Hello {name}" }));
+      await writeConfig(root, {
+        version: 1,
+        checks: [
+          {
+            source: { path: "locales/en.json", adapter: "consumer-json", locale: "en" },
+            targets: [{ path: "locales/fr.json", adapter: "consumer-json", locale: "fr" }],
+          },
+        ],
+        generated: [],
+      });
 
-    const result = await runValidateCi(root);
+      const result = await runValidateCi(root);
 
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr).toEqual([]);
-    await expectResults(result, { status: "pass", errors: 0, warnings: 0, config: "config" });
-  });
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toEqual([]);
+      await expectResults(result, { status: "pass", errors: 0, warnings: 0, config: "config" });
+    },
+  );
 
   it("reports an unparsable source file as one warning", async () => {
     const root = await createRoot();
@@ -740,6 +756,81 @@ describe("frontend-i18n validate-ci", () => {
         I18N_TOOL_VERSION: "0.1.0",
       });
     },
+  );
+
+  it.each(["warn", "error"] as const)(
+    "exits at the deadline when a detached descendant inherits worker pipes in %s mode",
+    async (mode) => {
+      const root = await createRoot();
+      const resultsDir = join(root, "results-detached");
+      const pidsPath = join(root, "detached-pids.json");
+      const generator = [
+        'const fs = require("node:fs");',
+        'const { spawn } = require("node:child_process");',
+        'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "inherit" });',
+        `fs.writeFileSync(${JSON.stringify(pidsPath)}, JSON.stringify([process.pid, child.pid]));`,
+        "child.unref();",
+        "setInterval(() => {}, 1000);",
+      ].join("\n");
+      await writeProjectFile(root, "package.json", JSON.stringify({ name: "detached-consumer" }));
+      await writeConfig(root, {
+        version: 1,
+        checks: [],
+        generated: [
+          {
+            path: "locales/generated.json",
+            command: process.execPath,
+            args: ["-e", generator, "{output}"],
+          },
+        ],
+      });
+
+      const child = spawn(
+        process.execPath,
+        [
+          join(packageRoot, "dist/cli.js"),
+          "validate-ci",
+          "--root",
+          root,
+          "--results-dir",
+          resultsDir,
+          "--mode",
+          mode,
+          "--timeout-seconds",
+          "2",
+        ],
+        { detached: true, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      let stderr = "";
+      child.stdout.resume();
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+      let forcedTermination = false;
+      const timer = setTimeout(() => {
+        forcedTermination = true;
+        if (child.pid) process.kill(-child.pid, "SIGKILL");
+      }, 6000);
+      try {
+        const exitCode = await new Promise<number | null>((resolvePromise, rejectPromise) => {
+          child.once("close", resolvePromise);
+          child.once("error", rejectPromise);
+        });
+        expect(forcedTermination).toBe(false);
+        expect(exitCode).toBe(mode === "warn" ? 0 : 1);
+        expect(stderr).toContain("deadline exceeded after 2 seconds");
+        expect(await readResults(resultsDir)).toMatchObject({
+          I18N_STATUS: "tool-error",
+          I18N_MODE: mode,
+          I18N_CONFIG: "config",
+        });
+      } finally {
+        clearTimeout(timer);
+        const pids = JSON.parse(await readFile(pidsPath, "utf8")) as number[];
+        generatorPids.push(...pids);
+      }
+    },
+    10000,
   );
 
   it.each(["warn", "error"] as const)(
