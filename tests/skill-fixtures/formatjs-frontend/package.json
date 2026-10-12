@@ -1,0 +1,14 @@
+{
+  "name": "formatjs-frontend-fixture",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@10.8.2",
+  "scripts": {
+    "translations": "npm run translations:extract && npm run translations:compile",
+    "translations:extract": "node scripts/extract-messages.mjs",
+    "translations:compile": "node scripts/compile-messages.mjs"
+  },
+  "dependencies": {
+    "react-intl": "^6.8.9"
+  }
+}

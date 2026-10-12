@@ -1,0 +1,11 @@
+{
+  "name": "feo-frontend-fixture",
+  "private": true,
+  "packageManager": "npm@10.8.2",
+  "scripts": {
+    "build": "fec build"
+  },
+  "dependencies": {
+    "@redhat-cloud-services/frontend-components-config-utilities": "^4.13.0"
+  }
+}
