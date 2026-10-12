@@ -7,6 +7,141 @@ import { runCli } from "../src/cli.js";
 
 let projectRoot: string | undefined;
 
+const feoTemplate = `apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: validation-fixture
+objects:
+  - apiVersion: v1
+    kind: Frontend
+    metadata:
+      name: sample-console
+    spec:
+      bundleSegments:
+        - bundleId: access
+          segmentId: administration
+          navItems:
+            - id: accounts
+              title: Manage access
+              permissions:
+                - account:read
+            - id: groups
+              title: Manage access
+              permissions:
+                - group:read
+      searchEntries:
+        - id: people
+          title: User management
+          description: Manage people and their permissions
+          alt_title: [People, Accounts]
+      serviceTiles:
+        - section: security
+          group: access
+          id: user-management
+          title: User access
+          description: Manage console access for your team
+      module:
+        defaultDocumentTitle: Access Management
+`;
+
+const feoZhTranslations = {
+  "bundleSegments.access.administration.navItems.accounts.title": "SAMPLE ONLY — NOT REVIEWED 账户",
+  "bundleSegments.access.administration.navItems.groups.title": "SAMPLE ONLY — NOT REVIEWED 群组",
+  "searchEntries.people.title": "SAMPLE ONLY — NOT REVIEWED 用户管理",
+  "searchEntries.people.description": "SAMPLE ONLY — NOT REVIEWED 管理人员及其权限",
+  "searchEntries.people.alt_title":
+    "SAMPLE ONLY — NOT REVIEWED 人员|SAMPLE ONLY — NOT REVIEWED 账户",
+  "serviceTiles.security.access.user-management.title": "SAMPLE ONLY — NOT REVIEWED 用户访问",
+  "serviceTiles.security.access.user-management.description":
+    "SAMPLE ONLY — NOT REVIEWED 管理团队的控制台访问权限",
+  "module.defaultDocumentTitle": "SAMPLE ONLY — NOT REVIEWED 访问管理",
+};
+
+const feoFrTranslations = {
+  "bundleSegments.access.administration.navItems.accounts.title": "EXAMPLE NOT REVIEWED Comptes",
+  "bundleSegments.access.administration.navItems.groups.title": "EXAMPLE NOT REVIEWED Équipes",
+  "searchEntries.people.title": "EXAMPLE NOT REVIEWED Gestion des utilisateurs",
+  "searchEntries.people.description": "EXAMPLE NOT REVIEWED Gérer les personnes et leurs droits",
+  "searchEntries.people.alt_title": "EXAMPLE NOT REVIEWED Personnes|EXAMPLE NOT REVIEWED Comptes",
+  "serviceTiles.security.access.user-management.title": "EXAMPLE NOT REVIEWED Accès utilisateur",
+  "serviceTiles.security.access.user-management.description":
+    "EXAMPLE NOT REVIEWED Gérer l'accès console de votre équipe",
+  "module.defaultDocumentTitle": "EXAMPLE NOT REVIEWED Gestion des accès",
+};
+
+function feoValidationConfig(): Record<string, unknown> {
+  return {
+    version: 1,
+    checks: [],
+    feo: [
+      {
+        template: "deploy/frontend.yaml",
+        source: "deploy/locales/translation-template.json",
+        locales: {
+          "zh-CN": "deploy/locales/zh-CN.json",
+          fr: "deploy/locales/fr.json",
+        },
+      },
+    ],
+  };
+}
+
+async function runFeo(args: string[]): Promise<void> {
+  const errors: string[] = [];
+  const exitCode = await runCli(["feo", ...args], {
+    cwd: projectRoot,
+    env: {},
+    stdout: () => undefined,
+    stderr: (message) => errors.push(message),
+  });
+  if (exitCode !== 0) throw new Error(errors.join("\n"));
+}
+
+async function createFeoProject(): Promise<void> {
+  await createProject();
+  await mkdir(join(projectRoot!, "deploy/locales"), { recursive: true });
+  await writeFile(join(projectRoot!, "deploy/frontend.yaml"), feoTemplate, "utf8");
+  await writeFile(
+    join(projectRoot!, "deploy/locales/zh-CN.json"),
+    `${JSON.stringify(feoZhTranslations, null, 2)}\n`,
+    "utf8",
+  );
+  await writeFile(
+    join(projectRoot!, "deploy/locales/fr.json"),
+    `${JSON.stringify(feoFrTranslations, null, 2)}\n`,
+    "utf8",
+  );
+  await runFeo([
+    "extract",
+    "--template",
+    "deploy/frontend.yaml",
+    "--output",
+    "deploy/locales/translation-template.json",
+  ]);
+  await runFeo([
+    "inline",
+    "--template",
+    "deploy/frontend.yaml",
+    "--source",
+    "deploy/locales/translation-template.json",
+    "--target",
+    "deploy/locales/zh-CN.json",
+    "--locale",
+    "zh-CN",
+  ]);
+  await runFeo([
+    "inline",
+    "--template",
+    "deploy/frontend.yaml",
+    "--source",
+    "deploy/locales/translation-template.json",
+    "--target",
+    "deploy/locales/fr.json",
+    "--locale",
+    "fr",
+  ]);
+}
+
 async function createProject(): Promise<void> {
   projectRoot = await mkdtemp(join(tmpdir(), "i18n-validation-"));
   await mkdir(join(projectRoot, "locales"));
@@ -176,6 +311,21 @@ describe("catalog project validation", () => {
     expect(await readFile(join(projectRoot!, "locales/fr.messages"), "utf8")).toBe(
       "greeting = Bonjour {name}\n",
     );
+  });
+
+  it("reports an empty FEO section in the passing summary", async () => {
+    await createProject();
+    const config = JSON.parse(
+      await readFile(join(projectRoot!, "validation.json"), "utf8"),
+    ) as Record<string, unknown>;
+    config.feo = [];
+
+    const result = await runValidation(config);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toEqual([
+      "Catalog validation passed (1 source, 2 targets, 1 generated catalog, 0 FEO templates).",
+    ]);
   });
 
   it("serializes converted catalogs with the output adapter's text format", async () => {
@@ -519,5 +669,478 @@ describe("catalog project validation", () => {
         ],
       }),
     ).toThrowError('Catalog validation config "generated[0]".locale requires an adapter');
+  });
+
+  it("accepts a FEO-only validation plan with an empty locale map", () => {
+    const config = parseCatalogValidationConfig({
+      version: 1,
+      checks: [],
+      feo: [
+        {
+          template: "deploy/frontend.yaml",
+          source: "deploy/locales/translation-template.json",
+          locales: {},
+        },
+      ],
+    });
+
+    expect(config.feo).toEqual([
+      {
+        template: "deploy/frontend.yaml",
+        source: "deploy/locales/translation-template.json",
+        locales: {},
+      },
+    ]);
+  });
+
+  it("passes in-sync FEO files and declares them to catalogDirectories", async () => {
+    await createFeoProject();
+    const config = {
+      ...feoValidationConfig(),
+      catalogDirectories: [{ path: "deploy/locales" }],
+    };
+
+    const result = await runValidation(config);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.errors).toEqual([]);
+    expect(result.output).toEqual([
+      "Catalog validation passed (0 sources, 0 targets, 0 generated catalogs, 1 FEO template).",
+    ]);
+  });
+
+  it("reports locale findings in the order configured", async () => {
+    await createFeoProject();
+    const zhPath = join(projectRoot!, "deploy/locales/zh-CN.json");
+    const zh = JSON.parse(await readFile(zhPath, "utf8")) as Record<string, string>;
+    zh["searchEntries.people.missing"] = "未知";
+    await writeFile(zhPath, `${JSON.stringify(zh, null, 2)}\n`);
+    const frPath = join(projectRoot!, "deploy/locales/fr.json");
+    const fr = JSON.parse(await readFile(frPath, "utf8")) as Record<string, string>;
+    fr["searchEntries.people.missing"] = "Inconnue";
+    await writeFile(frPath, `${JSON.stringify(fr, null, 2)}\n`);
+
+    const result = await runValidation(feoValidationConfig());
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    const message = result.errors[0]!;
+    const zhFinding = message.indexOf('FEO locale "zh-CN"');
+    const frFinding = message.indexOf('FEO locale "fr"');
+    expect(zhFinding).toBeGreaterThanOrEqual(0);
+    expect(frFinding).toBeGreaterThan(zhFinding);
+  });
+
+  it("reports English drift once without a stale-English locale cascade", async () => {
+    await createFeoProject();
+    const path = join(projectRoot!, "deploy/frontend.yaml");
+    const template = await readFile(path, "utf8");
+    await writeFile(path, template.replace("title: User management", "title: People management"));
+
+    const result = await runValidation(feoValidationConfig());
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain(
+      'FEO source catalog "deploy/locales/translation-template.json"',
+    );
+    expect(result.errors[0]).toContain('"deploy/frontend.yaml"');
+    expect(result.errors[0]).toContain(
+      "i18n-pipeline feo extract --template deploy/frontend.yaml --output deploy/locales/translation-template.json",
+    );
+    expect(result.errors[0]).not.toContain("FEO locale");
+  });
+
+  it("reports independent locale errors alongside English drift", async () => {
+    await createFeoProject();
+    const path = join(projectRoot!, "deploy/frontend.yaml");
+    const template = await readFile(path, "utf8");
+    await writeFile(path, template.replace("title: User management", "title: People management"));
+    const localePath = join(projectRoot!, "deploy/locales/zh-CN.json");
+    const locale = JSON.parse(await readFile(localePath, "utf8")) as Record<string, string>;
+    locale["searchEntries.people.missing"] = "未知";
+    await writeFile(localePath, `${JSON.stringify(locale, null, 2)}\n`);
+
+    const result = await runValidation(feoValidationConfig());
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("not byte-identical to the extraction output");
+    expect(result.errors[0]).toContain("Unknown translation key: searchEntries.people.missing");
+    expect(result.errors[0]).toContain("i18n-pipeline feo extract");
+    expect(result.errors[0]).toContain("i18n-pipeline feo inline");
+  });
+
+  it("reports locale JSON drift for only the changed locale", async () => {
+    await createFeoProject();
+    const localePath = join(projectRoot!, "deploy/locales/zh-CN.json");
+    const locale = JSON.parse(await readFile(localePath, "utf8")) as Record<string, string>;
+    locale["searchEntries.people.title"] = "改过的示例文字";
+    await writeFile(localePath, `${JSON.stringify(locale, null, 2)}\n`);
+    const before = await Promise.all(
+      [
+        "deploy/frontend.yaml",
+        "deploy/locales/translation-template.json",
+        "deploy/locales/zh-CN.json",
+        "deploy/locales/fr.json",
+      ].map((path) => readFile(join(projectRoot!, path))),
+    );
+
+    const result = await runValidation(feoValidationConfig());
+    const after = await Promise.all(
+      [
+        "deploy/frontend.yaml",
+        "deploy/locales/translation-template.json",
+        "deploy/locales/zh-CN.json",
+        "deploy/locales/fr.json",
+      ].map((path) => readFile(join(projectRoot!, path))),
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain('FEO locale "zh-CN"');
+    expect(result.errors[0]).toContain("deploy/locales/zh-CN.json");
+    expect(result.errors[0]).toContain("i18n-pipeline feo inline");
+    expect(result.errors[0]).not.toContain('FEO locale "fr"');
+    expect(after).toEqual(before);
+  });
+
+  it("requires the source catalog to match extraction bytes exactly", async () => {
+    await createFeoProject();
+    const path = join(projectRoot!, "deploy/locales/translation-template.json");
+    const source = await readFile(path, "utf8");
+    await writeFile(path, `${source}\n`);
+
+    const result = await runValidation(feoValidationConfig());
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("not byte-identical to the extraction output");
+  });
+
+  it("reports a hand-edited spec.locales value", async () => {
+    await createFeoProject();
+    const path = join(projectRoot!, "deploy/frontend.yaml");
+    const template = await readFile(path, "utf8");
+    await writeFile(path, template.replace("用户管理", "手工修改的文字"));
+
+    const result = await runValidation(feoValidationConfig());
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain('FEO locale "zh-CN"');
+  });
+
+  it("reports an unknown key in a locale file", async () => {
+    await createFeoProject();
+    const localePath = join(projectRoot!, "deploy/locales/zh-CN.json");
+    const locale = JSON.parse(await readFile(localePath, "utf8")) as Record<string, string>;
+    locale["searchEntries.people.missing"] = "未知";
+    await writeFile(localePath, `${JSON.stringify(locale, null, 2)}\n`);
+
+    const result = await runValidation(feoValidationConfig());
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("Unknown translation key: searchEntries.people.missing");
+    expect(result.errors[0]).toContain("i18n-pipeline feo inline");
+  });
+
+  it("reports an empty translation with its key", async () => {
+    await createFeoProject();
+    const localePath = join(projectRoot!, "deploy/locales/zh-CN.json");
+    const locale = JSON.parse(await readFile(localePath, "utf8")) as Record<string, string>;
+    locale["searchEntries.people.title"] = "  ";
+    await writeFile(localePath, `${JSON.stringify(locale, null, 2)}\n`);
+
+    const result = await runValidation(feoValidationConfig());
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("Invalid translation: searchEntries.people.title");
+  });
+
+  it("reports invalid source catalog JSON with the extraction command", async () => {
+    await createFeoProject();
+    await writeFile(join(projectRoot!, "deploy/locales/translation-template.json"), "{ invalid");
+
+    const result = await runValidation(feoValidationConfig());
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("FEO source catalog");
+    expect(result.errors[0]).toContain("is not valid JSON");
+    expect(result.errors[0]).toContain("i18n-pipeline feo extract");
+  });
+
+  it("quotes paths in repair commands when a configured path contains spaces", async () => {
+    await createFeoProject();
+    const config = feoValidationConfig();
+    const entries = config.feo as Array<{ source: string }>;
+    entries[0]!.source = "deploy/locales/missing source.json";
+
+    const result = await runValidation(config);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors[0]).toContain("--output 'deploy/locales/missing source.json'");
+  });
+
+  it("reports invalid locale JSON with the inline command", async () => {
+    await createFeoProject();
+    await writeFile(join(projectRoot!, "deploy/locales/zh-CN.json"), "{ invalid");
+
+    const result = await runValidation(feoValidationConfig());
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain('FEO locale "zh-CN"');
+    expect(result.errors[0]).toContain("is not valid JSON");
+    expect(result.errors[0]).toContain("i18n-pipeline feo inline");
+  });
+
+  it("continues checking later FEO entries when one locale file is missing", async () => {
+    await createFeoProject();
+    const config = feoValidationConfig();
+    const entries = config.feo as Array<{
+      template: string;
+      source: string;
+      locales: Record<string, string>;
+    }>;
+    entries[0]!.locales["zh-CN"] = "deploy/locales/missing-zh-CN.json";
+    entries.push({
+      template: "deploy/frontend.yaml",
+      source: "deploy/locales/translation-template.json",
+      locales: { fr: "deploy/locales/missing-fr.json" },
+    });
+
+    const result = await runValidation(config);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain('FEO locale "zh-CN"');
+    expect(result.errors[0]).toContain("missing-zh-CN.json");
+    expect(result.errors[0]).toContain('FEO locale "fr"');
+    expect(result.errors[0]).toContain("missing-fr.json");
+    expect(result.errors[0]).toContain("ENOENT");
+  });
+
+  it("continues checking later FEO entries when one source catalog is missing", async () => {
+    await createFeoProject();
+    const config = feoValidationConfig();
+    const entries = config.feo as Array<{
+      template: string;
+      source: string;
+      locales: Record<string, string>;
+    }>;
+    entries[0]!.source = "deploy/locales/missing-source.json";
+    entries[0]!.locales = {};
+    entries.push({
+      template: "deploy/frontend.yaml",
+      source: "deploy/locales/translation-template.json",
+      locales: { fr: "deploy/locales/missing-fr.json" },
+    });
+
+    const result = await runValidation(config);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("missing-source.json");
+    expect(result.errors[0]).toContain('FEO locale "fr"');
+    expect(result.errors[0]).toContain("missing-fr.json");
+    expect(result.errors[0]).toContain("ENOENT");
+  });
+
+  it("reports invalid FEO YAML as a project finding", async () => {
+    await createFeoProject();
+    await writeFile(join(projectRoot!, "deploy/frontend.yaml"), "kind: [\n");
+
+    const result = await runValidation(feoValidationConfig());
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("Invalid Frontend template");
+    expect(result.errors[0]).toContain("i18n-pipeline feo extract");
+  });
+
+  it("reports a missing FEO template as a project finding", async () => {
+    await createFeoProject();
+    const config = feoValidationConfig();
+    const entries = config.feo as Array<{ template: string }>;
+    entries[0]!.template = "deploy/missing-frontend.yaml";
+
+    const result = await runValidation(config);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("deploy/missing-frontend.yaml");
+    expect(result.errors[0]).toContain("ENOENT");
+    expect(result.errors[0]).toContain("i18n-pipeline feo extract");
+  });
+
+  it("passes after changing unrelated fields and regenerating FEO files", async () => {
+    await createFeoProject();
+    const path = join(projectRoot!, "deploy/frontend.yaml");
+    const template = await readFile(path, "utf8");
+    await writeFile(
+      path,
+      template.replace("- account:read", "- account:write\n              route: /accounts"),
+    );
+    await runFeo([
+      "extract",
+      "--template",
+      "deploy/frontend.yaml",
+      "--output",
+      "deploy/locales/translation-template.json",
+    ]);
+    await runFeo([
+      "inline",
+      "--template",
+      "deploy/frontend.yaml",
+      "--source",
+      "deploy/locales/translation-template.json",
+      "--target",
+      "deploy/locales/zh-CN.json",
+      "--locale",
+      "zh-CN",
+    ]);
+    await runFeo([
+      "inline",
+      "--template",
+      "deploy/frontend.yaml",
+      "--source",
+      "deploy/locales/translation-template.json",
+      "--target",
+      "deploy/locales/fr.json",
+      "--locale",
+      "fr",
+    ]);
+
+    const result = await runValidation({
+      ...feoValidationConfig(),
+      catalogDirectories: [{ path: "deploy/locales" }],
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.errors).toEqual([]);
+    expect(await readFile(path, "utf8")).toContain("route: /accounts");
+  });
+
+  it("keeps FEO keys stable when entries are reordered and inserted", async () => {
+    await createFeoProject();
+    const path = join(projectRoot!, "deploy/frontend.yaml");
+    const template = await readFile(path, "utf8");
+    const originalItems = `            - id: accounts
+              title: Manage access
+              permissions:
+                - account:read
+            - id: groups
+              title: Manage access
+              permissions:
+                - group:read`;
+    const reorderedItems = `            - id: groups
+              title: Manage access
+              permissions:
+                - group:read
+            - id: reports
+              title: Manage access
+              permissions:
+                - report:read
+            - id: accounts
+              title: Manage access
+              permissions:
+                - account:read`;
+    expect(template).toContain(originalItems);
+    await writeFile(path, template.replace(originalItems, reorderedItems));
+    const zh = {
+      ...feoZhTranslations,
+      "bundleSegments.access.administration.navItems.reports.title":
+        "SAMPLE ONLY — NOT REVIEWED 报告",
+    };
+    const fr = {
+      ...feoFrTranslations,
+      "bundleSegments.access.administration.navItems.reports.title":
+        "EXAMPLE NOT REVIEWED Rapports",
+    };
+    await writeFile(
+      join(projectRoot!, "deploy/locales/zh-CN.json"),
+      `${JSON.stringify(zh, null, 2)}\n`,
+    );
+    await writeFile(
+      join(projectRoot!, "deploy/locales/fr.json"),
+      `${JSON.stringify(fr, null, 2)}\n`,
+    );
+    await runFeo([
+      "extract",
+      "--template",
+      "deploy/frontend.yaml",
+      "--output",
+      "deploy/locales/translation-template.json",
+    ]);
+    await runFeo([
+      "inline",
+      "--template",
+      "deploy/frontend.yaml",
+      "--source",
+      "deploy/locales/translation-template.json",
+      "--target",
+      "deploy/locales/zh-CN.json",
+      "--locale",
+      "zh-CN",
+    ]);
+    await runFeo([
+      "inline",
+      "--template",
+      "deploy/frontend.yaml",
+      "--source",
+      "deploy/locales/translation-template.json",
+      "--target",
+      "deploy/locales/fr.json",
+      "--locale",
+      "fr",
+    ]);
+
+    const source = JSON.parse(
+      await readFile(join(projectRoot!, "deploy/locales/translation-template.json"), "utf8"),
+    ) as Record<string, unknown>;
+    const result = await runValidation(feoValidationConfig());
+
+    expect(Object.keys(source)).toEqual(
+      expect.arrayContaining([
+        "bundleSegments.access.administration.navItems.accounts.title",
+        "bundleSegments.access.administration.navItems.groups.title",
+        "bundleSegments.access.administration.navItems.reports.title",
+      ]),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("rejects invalid FEO locale tags and paths outside the consumer root", () => {
+    expect(() =>
+      parseCatalogValidationConfig({
+        version: 1,
+        checks: [],
+        feo: [
+          {
+            template: "deploy/frontend.yaml",
+            source: "deploy/locales/translation-template.json",
+            locales: { zh_CN: "deploy/locales/zh-CN.json" },
+          },
+        ],
+      }),
+    ).toThrow("must be a non-English FEO locale tag");
+    expect(() =>
+      parseCatalogValidationConfig({
+        version: 1,
+        checks: [],
+        feo: [
+          {
+            template: "deploy/frontend.yaml",
+            source: "deploy/locales/translation-template.json",
+            locales: { "zh-CN": "../deploy/locales/zh-CN.json" },
+          },
+        ],
+      }),
+    ).toThrow("must be a repository-relative path without parent traversal");
   });
 });

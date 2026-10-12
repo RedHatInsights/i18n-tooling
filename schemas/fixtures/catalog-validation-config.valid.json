@@ -34,6 +34,13 @@
     }
   ],
   "catalogDirectories": [{ "path": "src/locales" }],
+  "feo": [
+    {
+      "template": "deploy/frontend.yaml",
+      "source": "deploy/locales/translation-template.json",
+      "locales": { "zh-CN": "deploy/locales/zh-CN.json" }
+    }
+  ],
   "sourceLint": {
     "files": ["src/**/*.{js,jsx,ts,tsx}"],
     "catalog": "locales/en.json"

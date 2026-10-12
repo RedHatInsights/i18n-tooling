@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { parseCatalogValidationConfig } from "../src/index.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -92,5 +93,24 @@ describe("repository i18n contracts", () => {
     expect(schema.properties).toHaveProperty("detail");
     expect(schema.required).toEqual(expect.arrayContaining(["code", "params", "detail"]));
     expect(schema.properties).not.toHaveProperty("key");
+  });
+
+  it("keeps the FEO consumer example within the catalog validation contract", async () => {
+    const example = JSON.parse(
+      await readFile(
+        join(repositoryRoot, "examples/feo-consumer/i18n/catalog-validation.json"),
+        "utf8",
+      ),
+    ) as unknown;
+    const config = parseCatalogValidationConfig(example);
+
+    expect(config.checks).toEqual([]);
+    expect(config.feo).toEqual([
+      {
+        template: "deploy/frontend.yaml",
+        source: "deploy/locales/translation-template.json",
+        locales: { "zh-CN": "deploy/locales/zh-CN.json" },
+      },
+    ]);
   });
 });

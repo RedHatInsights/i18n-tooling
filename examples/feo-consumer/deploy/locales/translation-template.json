@@ -1,0 +1,34 @@
+{
+  "bundleSegments.access.administration.navItems.accounts.title": {
+    "defaultMessage": "Manage access",
+    "description": "title of bundleSegments.access.administration.navItems.accounts"
+  },
+  "bundleSegments.access.administration.navItems.groups.title": {
+    "defaultMessage": "Manage access",
+    "description": "title of bundleSegments.access.administration.navItems.groups"
+  },
+  "module.defaultDocumentTitle": {
+    "defaultMessage": "Access Management",
+    "description": "defaultDocumentTitle of module"
+  },
+  "searchEntries.people.alt_title": {
+    "defaultMessage": "People|Accounts",
+    "description": "alt_title of searchEntries.people"
+  },
+  "searchEntries.people.description": {
+    "defaultMessage": "Manage people and their permissions",
+    "description": "description of searchEntries.people"
+  },
+  "searchEntries.people.title": {
+    "defaultMessage": "User management",
+    "description": "title of searchEntries.people"
+  },
+  "serviceTiles.security.access.user-management.description": {
+    "defaultMessage": "Manage console access for your team",
+    "description": "description of serviceTiles.security.access.user-management"
+  },
+  "serviceTiles.security.access.user-management.title": {
+    "defaultMessage": "User access",
+    "description": "title of serviceTiles.security.access.user-management"
+  }
+}
