@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "checks": [
+    {
+      "source": {
+        "path": "locales/translation-template.json",
+        "adapter": "formatjs-json",
+        "locale": "en"
+      },
+      "targets": [
+        {
+          "path": "src/locales/en.json",
+          "adapter": "formatjs-json",
+          "locale": "en"
+        }
+      ]
+    }
+  ],
+  "catalogDirectories": [{ "path": "src/locales" }],
+  "sourceLint": {
+    "files": ["src/messages.js"],
+    "catalog": "locales/translation-template.json"
+  }
+}

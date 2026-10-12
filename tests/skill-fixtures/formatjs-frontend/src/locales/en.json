@@ -1,0 +1,8 @@
+{
+  "filters.clear": "Clear filters",
+  "results.count": "{count, plural, one {# result}}",
+  "results.empty": "No results match your filters.",
+  "service.pause.billing": "Stop the bill for service.",
+  "service.status": "Active",
+  "settings.save": "Save"
+}

@@ -14,7 +14,7 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "test": "node --test scripts/phrase-resource-inventory.test.mjs && npm run test --workspaces --if-present",
+    "test": "node --test scripts/phrase-resource-inventory.test.mjs scripts/skill-assets.test.mjs && npm run test --workspaces --if-present",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
     "smoke:reusable-cli": "i18n-pipeline validate --adapter icu-json --catalog packages/i18n-pipeline/tests/fixtures/insights-rbac/i18n-en.json --role source --locale en",
     "typecheck": "npm run lint --workspaces --if-present",
@@ -23,7 +23,7 @@
     "format": "prettier --write \"**/*.{js,mjs,cjs,ts,tsx,json,yml,yaml}\"",
     "format:check": "prettier --check \"**/*.{js,mjs,cjs,ts,tsx,json,yml,yaml}\"",
     "check:schemas": "node scripts/validate-schemas.mjs",
-    "check:markdown": "markdownlint-cli2 \"README.md\" \"CONTRIBUTING.md\" \"docs/**/*.md\" \"packages/*/README.md\"",
+    "check:markdown": "markdownlint-cli2 \"README.md\" \"CONTRIBUTING.md\" \"docs/**/*.md\" \"packages/*/README.md\" \"skills/**/*.md\" \"tests/skill-fixtures/README.md\"",
     "smoke:cli": "node packages/i18n-pipeline/dist/cli.js version && ./packages/i18n-pipeline/dist/cli.js version && node packages/i18n-pipeline/dist/cli.js validate --adapter formatjs-json --catalog packages/i18n-pipeline/tests/fixtures/rbac-ui/translation-template.json --role source --locale en && ./packages/i18n-pipeline/dist/cli.js validate --adapter formatjs-json --catalog packages/i18n-pipeline/tests/fixtures/rbac-ui/translation-template.json --role source --locale en",
     "i18n:validate": "npm run build --workspace @redhat-cloud-services/i18n-pipeline && node packages/i18n-pipeline/dist/cli.js validate",
     "check": "npm run typecheck && npm run test && npm run lint:eslint && npm run format:check"
