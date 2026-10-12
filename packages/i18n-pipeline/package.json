@@ -34,7 +34,7 @@
     "test:coverage": "vitest run --coverage"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.14.0"
   },
   "dependencies": {
     "@formatjs/icu-messageformat-parser": "^3.5.20",

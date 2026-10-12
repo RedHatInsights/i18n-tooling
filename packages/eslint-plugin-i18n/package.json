@@ -28,8 +28,12 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage"
   },
+  "engines": {
+    "node": ">=22.14.0"
+  },
   "peerDependencies": {
-    "eslint": ">=8.57.0 <11"
+    "eslint": "9 || 10",
+    "eslint-plugin-formatjs": "^8.1.0"
   },
   "devDependencies": {
     "@typescript-eslint/utils": "^8.0.0",
@@ -40,5 +44,8 @@
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",
     "vitest": "^4.1.11"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

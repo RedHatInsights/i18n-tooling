@@ -2,7 +2,7 @@
 
 ## Development setup
 
-Use Node.js 22 or newer and Bun 1.3.14, as pinned in `.nvmrc` and `package.json`. Bun is the canonical dependency installer; `bun.lock` is authoritative. Bun also generates `yarn.lock` as a mirror for GitHub Dependency Review; do not edit that file directly. This repository has no npm lockfile. Do not run `npm install` or `npm ci`; use npm only to run scripts under Node.
+Use Node.js 22.14 or newer and Bun 1.3.14, as pinned in `.nvmrc` and `package.json`. Bun is the canonical dependency installer; `bun.lock` is authoritative. Bun also generates `yarn.lock` as a mirror for GitHub Dependency Review; do not edit that file directly. This repository has no npm lockfile. Do not run `npm install` or `npm ci`; use npm only to run scripts under Node.
 
 For an unchanged dependency set:
 

@@ -21,7 +21,7 @@ HCC is the first consumer; tooling should not make every future consumer pretend
 | `@redhat-cloud-services/i18n-pipeline`      | Node.js package with the normalized catalog model, FormatJS and keyed ICU JSON adapters, adapter plugin loading, adapter-owned text codecs, generated-catalog sync, and the `i18n-pipeline` CLI. |
 | `.github/workflows/`                        | Repository CI and reusable consumer validation.                                                                                                                                                  |
 
-The TypeScript packages target Node.js 22+. Bun 1.3.14 manages workspace dependencies, while package code and the CLI run under Node.js. Framework extraction and compilation remain in each consumer's native tooling.
+The TypeScript packages target Node.js 22.14+. Bun 1.3.14 manages workspace dependencies, while package code and the CLI run under Node.js. Framework extraction and compilation remain in each consumer's native tooling.
 
 ## Design rules
 
@@ -58,7 +58,7 @@ docs/                    Architecture and consumer guidance
 
 ## Local development
 
-Use Node.js 22 or newer and Bun 1.3.14. Bun is the canonical dependency installer; `bun.lock` is authoritative, while Bun generates `yarn.lock` as a mirror for GitHub Dependency Review. Do not run `npm install` or `npm ci`; use npm only to run scripts under Node:
+Use Node.js 22.14 or newer and Bun 1.3.14. Bun is the canonical dependency installer; `bun.lock` is authoritative, while Bun generates `yarn.lock` as a mirror for GitHub Dependency Review. Do not run `npm install` or `npm ci`; use npm only to run scripts under Node:
 
 ```bash
 bun install --frozen-lockfile
