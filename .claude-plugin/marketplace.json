@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "i18n-tooling",
+  "description": "Plugins for repository i18n validation, Phrase workflows, and FEO localization.",
+  "owner": {
+    "name": "Red Hat Insights"
+  },
+  "plugins": [
+    {
+      "name": "i18n-onboarding",
+      "source": ".",
+      "description": "Onboard repositories to i18n-pipeline validation, Phrase workflows, Konflux validation, and FEO localization.",
+      "version": "0.1.0"
+    }
+  ]
+}

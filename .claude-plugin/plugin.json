@@ -1,0 +1,10 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "i18n-onboarding",
+  "version": "0.1.0",
+  "description": "Onboard repositories to i18n-pipeline validation, Phrase workflows, Konflux validation, and FEO localization.",
+  "author": {
+    "name": "Red Hat Insights"
+  },
+  "license": "Apache-2.0"
+}
