@@ -5,6 +5,8 @@ import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
+  BUILT_IN_CATALOG_ADAPTER_IDS,
+  CatalogAdapterRegistry,
   CatalogFormatError,
   checkCatalogs as compareCatalogs,
   convertCatalog as convertCatalogDocument,
@@ -389,6 +391,20 @@ function phraseCredentials(
   return { platformApiToken };
 }
 
+// TMS commands run with Phrase and GitHub write credentials, so they never import() the adapter
+// modules a consumer declares in package.json.
+function builtInCatalogAdapters(adapterIds: string[]): CatalogAdapterRegistry {
+  const builtIn: readonly string[] = BUILT_IN_CATALOG_ADAPTER_IDS;
+  for (const adapterId of adapterIds) {
+    if (!builtIn.includes(adapterId)) {
+      throw new Error(
+        `TMS commands load only built-in catalog adapters (${builtIn.join(", ")}); "${adapterId}" is a custom adapter and cannot run with Phrase and GitHub credentials`,
+      );
+    }
+  }
+  return new CatalogAdapterRegistry();
+}
+
 async function runTmsCommand(
   command: "submit" | "reconcile",
   args: string[],
@@ -406,6 +422,10 @@ async function runTmsCommand(
   const parsed = parsePhraseTmsConfig(
     await readJson(resolve(options.cwd, configPath), "TMS config"),
   );
+  const catalogAdapters = builtInCatalogAdapters([
+    parsed.workflow.sourceCatalog.adapter,
+    parsed.workflow.targetAdapter ?? parsed.workflow.sourceCatalog.adapter,
+  ]);
   const credentials = phraseCredentials(options.env);
   const githubToken = options.env.GITHUB_TOKEN;
   if (!githubToken)
@@ -432,7 +452,6 @@ async function runTmsCommand(
     ...(options.env.GITHUB_API_URL ? { apiUrl: options.env.GITHUB_API_URL } : {}),
     fetch: options.fetch,
   });
-  const catalogAdapters = await createCatalogAdapterRegistry(options.cwd);
   const workflow = new PhraseWorkflow({
     phrase,
     state: github,

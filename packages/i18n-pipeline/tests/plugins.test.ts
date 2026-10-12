@@ -2,7 +2,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createCatalogAdapterRegistry } from "../src/index.js";
+import {
+  BUILT_IN_CATALOG_ADAPTER_IDS,
+  CatalogAdapterRegistry,
+  createCatalogAdapterRegistry,
+} from "../src/index.js";
 
 let projectRoot: string | undefined;
 
@@ -21,6 +25,15 @@ describe("catalog adapter plugins", () => {
 
     expect(registry.get("openapi-problem-details").id).toBe("openapi-problem-details");
     expect(registry.get("icu-json").id).toBe("icu-json");
+  });
+
+  it("lists exactly the built-in adapter IDs", () => {
+    const registry = new CatalogAdapterRegistry();
+
+    for (const id of BUILT_IN_CATALOG_ADAPTER_IDS) expect(registry.get(id).id).toBe(id);
+    expect(() => registry.get("not-built-in")).toThrow(
+      `Available: ${[...BUILT_IN_CATALOG_ADAPTER_IDS].sort().join(", ")}`,
+    );
   });
 
   it("loads configured adapter modules and checks their stable IDs", async () => {

@@ -296,6 +296,12 @@ export class IcuJsonAdapter implements CatalogAdapter {
   }
 }
 
+export const BUILT_IN_CATALOG_ADAPTER_IDS = [
+  "formatjs-json",
+  "icu-json",
+  "openapi-problem-details",
+] as const;
+
 export class CatalogAdapterRegistry {
   private readonly adapters = new Map<string, CatalogAdapter>([
     ["formatjs-json", new FormatJsJsonAdapter()],
