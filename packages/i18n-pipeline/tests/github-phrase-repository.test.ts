@@ -241,6 +241,60 @@ describe("GitHubPhraseRepository", () => {
     expect(puts).toBe(2);
   });
 
+  it("explains rejected and under-scoped tokens as retryable failures without exposing the token", async () => {
+    const expired = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async () => new Response("Bad credentials github-run-token", { status: 401 }),
+    });
+
+    const expiredError = await expired.listBatchKeys().catch((error: unknown) => error);
+    expect(expiredError).toMatchObject({
+      name: "GitHubRepositoryError",
+      status: 401,
+      permanent: false,
+      message: "GitHub API returned HTTP 401: the token is missing, expired or revoked",
+    });
+
+    const writes: string[] = [];
+    const denied = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async (input, init) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (init?.method && init.method !== "GET") writes.push(url);
+        if (url.endsWith("/git/ref/heads/i18n/phrase-batch-fr")) return response({}, 404);
+        if (url.endsWith("/git/ref/heads/phrase-pilot")) {
+          return response({ object: { sha: "base-commit" } });
+        }
+        if (url.endsWith("/git/refs")) return response({}, 201);
+        if (url.includes("/contents/locales/fr.json?ref=")) return response({}, 404);
+        if (url.endsWith("/contents/locales/fr.json")) {
+          return response({ content: { sha: "translation-blob" } }, 201);
+        }
+        if (url.includes("/pulls?")) return response([]);
+        if (url.endsWith("/pulls")) {
+          return response({ message: "Resource not accessible by integration" }, 403);
+        }
+        throw new Error(`Unexpected GitHub request: ${url}`);
+      },
+    });
+
+    const deniedError = await denied
+      .createOrUpdatePullRequest(pullRequest)
+      .catch((error: unknown) => error);
+    expect(deniedError).toMatchObject({
+      name: "GitHubRepositoryError",
+      status: 403,
+      permanent: false,
+      message:
+        "GitHub API returned HTTP 403: the token may not make this request; state and locale branches need contents: write, pull requests need pull-requests: write",
+    });
+    expect(writes.at(-1)).toMatch(/\/pulls$/);
+  });
+
   it("wraps transport failures and applies a request timeout", async () => {
     let signal: AbortSignal | null | undefined;
     const repository = new GitHubPhraseRepository({
