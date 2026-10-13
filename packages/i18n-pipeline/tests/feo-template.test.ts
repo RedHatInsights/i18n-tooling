@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
-import { extractFeoCatalog, inlineFeoLocale } from "../src/feo-template.js";
+import { extractFeoCatalog, feoTemplateLocales, inlineFeoLocale } from "../src/feo-template.js";
 
 const template = `# header
 kind: Template
@@ -275,6 +275,44 @@ describe("FEO template localization", () => {
     expect(
       inlineFeoLocale(result, source, { "searchEntries.roles.title": "Les rôles" }, "fr"),
     ).toBe(result);
+  });
+
+  it("orders catalog and new locale keys by code unit, whatever the process locale", () => {
+    const mixed = `kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n${[
+      "aardvark",
+      "a_b",
+      "Zed",
+      "a-b",
+    ]
+      .map((id) => `        - id: ${id}\n          title: ${id}\n`)
+      .join("")}`;
+    const keys = [
+      "searchEntries.Zed.title",
+      "searchEntries.a-b.title",
+      "searchEntries.a_b.title",
+      "searchEntries.aardvark.title",
+    ];
+    const source = extractFeoCatalog(mixed);
+    expect(Object.keys(source)).toEqual(keys);
+    const result = inlineFeoLocale(
+      mixed,
+      source,
+      Object.fromEntries([...keys].reverse().map((key) => [key, "x"])),
+      "fr",
+    );
+    expect(Object.keys(parse(result).objects[0].spec.locales.fr)).toEqual(keys);
+  });
+
+  it("lists the locales inlined in any Frontend object", () => {
+    expect(feoTemplateLocales(template)).toEqual([]);
+    const source = extractFeoCatalog(template);
+    const translated = inlineFeoLocale(
+      inlineFeoLocale(template, source, { "searchEntries.roles.title": "角色" }, "zh-CN"),
+      source,
+      { "searchEntries.roles.title": "Rollen" },
+      "de",
+    );
+    expect(feoTemplateLocales(translated)).toEqual(["de", "zh-CN"]);
   });
 
   it("inlines valid templates without a trailing newline", () => {

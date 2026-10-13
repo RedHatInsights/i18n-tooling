@@ -7,6 +7,7 @@ import { checkCatalogs } from "./catalog-check.js";
 import { parseCatalogDocument } from "./catalog-document.js";
 import {
   extractFeoCatalog,
+  feoTemplateLocales,
   inlineFeoLocale,
   serializeFeoCatalog,
   type FeoCatalog,
@@ -600,10 +601,6 @@ function feoLocaleProblem(
   );
 }
 
-function isStaleFeoEnglishError(error: unknown): boolean {
-  return error instanceof Error && error.message.startsWith("English source changed for ");
-}
-
 async function checkFeoTemplate(
   projectRoot: string,
   entry: FeoTemplateValidation,
@@ -625,9 +622,11 @@ async function checkFeoTemplate(
 
   let currentCatalog: FeoCatalog;
   let expectedSource: string;
+  let templateLocales: string[];
   try {
     currentCatalog = extractFeoCatalog(template);
     expectedSource = serializeFeoCatalog(currentCatalog);
+    templateLocales = feoTemplateLocales(template);
   } catch (error) {
     problems.push(
       `FEO template "${entry.template}" and source catalog "${entry.source}" could not be ` +
@@ -696,41 +695,37 @@ async function checkFeoTemplate(
       continue;
     }
 
+    // Only visible until the source catalog is re-extracted; afterwards nothing in the files
+    // shows that the translation predates the new English.
+    const staleKeys = Object.keys(target).filter(
+      (key) =>
+        Object.hasOwn(source, key) &&
+        Object.hasOwn(currentCatalog, key) &&
+        source[key]?.defaultMessage !== currentCatalog[key]!.defaultMessage,
+    );
+    if (staleKeys.length) {
+      problems.push(
+        `FEO locale "${locale}" in "${localePath}" still has translations for English that ` +
+          `changed in template "${entry.template}": ${staleKeys.join(", ")}. Remove these keys ` +
+          `from the locale file so they are translated again, then run ` +
+          `\`${feoExtractCommand(entry)}\` followed by ` +
+          `\`${feoInlineCommand(entry, locale, localePath)}\`.`,
+      );
+    }
+
+    // Inlining against the template's own English keeps source drift, reported above, from
+    // repeating as a stale-English error for every locale.
     let expectedTemplate: string;
     try {
       expectedTemplate = inlineFeoLocale(
         template,
-        source,
+        currentCatalog,
         target as Record<string, string>,
         locale,
       );
     } catch (error) {
-      if (englishDrift && isStaleFeoEnglishError(error)) {
-        try {
-          expectedTemplate = inlineFeoLocale(
-            template,
-            currentCatalog,
-            target as Record<string, string>,
-            locale,
-          );
-        } catch (diagnosticError) {
-          problems.push(
-            feoLocaleProblem(
-              entry,
-              locale,
-              localePath,
-              errorMessage(diagnosticError),
-              englishDrift,
-            ),
-          );
-          continue;
-        }
-      } else {
-        problems.push(
-          feoLocaleProblem(entry, locale, localePath, errorMessage(error), englishDrift),
-        );
-        continue;
-      }
+      problems.push(feoLocaleProblem(entry, locale, localePath, errorMessage(error), englishDrift));
+      continue;
     }
 
     if (!templateBytes.equals(Buffer.from(expectedTemplate, "utf8"))) {
@@ -743,6 +738,15 @@ async function checkFeoTemplate(
           updateCommand,
       );
     }
+  }
+
+  for (const locale of templateLocales) {
+    if (Object.hasOwn(entry.locales, locale)) continue;
+    problems.push(
+      `FEO template "${entry.template}" has spec.locales for "${locale}", but its "feo" entry ` +
+        `does not list that locale, so it is not checked. Add "${locale}" with its locale file ` +
+        `to the entry's "locales", or remove the block from the template.`,
+    );
   }
 
   return problems;

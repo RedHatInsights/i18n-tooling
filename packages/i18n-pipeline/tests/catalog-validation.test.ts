@@ -731,7 +731,7 @@ describe("catalog project validation", () => {
     expect(frFinding).toBeGreaterThan(zhFinding);
   });
 
-  it("reports English drift once without a stale-English locale cascade", async () => {
+  it("reports translations left behind by an English-only edit", async () => {
     await createFeoProject();
     const path = join(projectRoot!, "deploy/frontend.yaml");
     const template = await readFile(path, "utf8");
@@ -748,7 +748,82 @@ describe("catalog project validation", () => {
     expect(result.errors[0]).toContain(
       "i18n-pipeline feo extract --template deploy/frontend.yaml --output deploy/locales/translation-template.json",
     );
+    for (const [locale, file] of [
+      ["zh-CN", "deploy/locales/zh-CN.json"],
+      ["fr", "deploy/locales/fr.json"],
+    ]) {
+      expect(result.errors[0]).toContain(
+        `FEO locale "${locale}" in "${file}" still has translations for English that changed ` +
+          'in template "deploy/frontend.yaml": searchEntries.people.title.',
+      );
+    }
+    expect(result.errors[0]).not.toContain("searchEntries.people.description");
+    expect(result.errors[0]).not.toContain("English source changed for");
+  });
+
+  it("reports only English drift when the changed key has no translation", async () => {
+    await createFeoProject();
+    for (const [locale, translations] of [
+      ["zh-CN", feoZhTranslations],
+      ["fr", feoFrTranslations],
+    ] as const) {
+      const { "module.defaultDocumentTitle": _untranslated, ...rest } = translations;
+      await writeFile(
+        join(projectRoot!, `deploy/locales/${locale}.json`),
+        `${JSON.stringify(rest, null, 2)}\n`,
+      );
+      await runFeo([
+        "inline",
+        "--template",
+        "deploy/frontend.yaml",
+        "--source",
+        "deploy/locales/translation-template.json",
+        "--target",
+        `deploy/locales/${locale}.json`,
+        "--locale",
+        locale,
+      ]);
+    }
+    const path = join(projectRoot!, "deploy/frontend.yaml");
+    const template = await readFile(path, "utf8");
+    await writeFile(
+      path,
+      template.replace(
+        "defaultDocumentTitle: Access Management",
+        "defaultDocumentTitle: Access Administration",
+      ),
+    );
+
+    const result = await runValidation(feoValidationConfig());
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("not byte-identical to the extraction output");
     expect(result.errors[0]).not.toContain("FEO locale");
+  });
+
+  it("reports template locales that the FEO entry does not configure", async () => {
+    await createFeoProject();
+    const config = feoValidationConfig();
+    const entries = config.feo as Array<{ locales: Record<string, string> }>;
+    delete entries[0]!.locales.fr;
+
+    const partial = await runValidation(config);
+
+    expect(partial.exitCode).toBe(1);
+    expect(partial.errors).toHaveLength(1);
+    expect(partial.errors[0]).toContain(
+      'FEO template "deploy/frontend.yaml" has spec.locales for "fr", but its "feo" entry does ' +
+        "not list that locale",
+    );
+    expect(partial.errors[0]).not.toContain('spec.locales for "zh-CN"');
+
+    entries[0]!.locales = {};
+    const empty = await runValidation(config);
+
+    expect(empty.exitCode).toBe(1);
+    expect(empty.errors[0]).toContain('spec.locales for "fr"');
+    expect(empty.errors[0]).toContain('spec.locales for "zh-CN"');
   });
 
   it("reports independent locale errors alongside English drift", async () => {
