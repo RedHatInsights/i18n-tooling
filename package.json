@@ -2,7 +2,7 @@
   "name": "i18n-tooling",
   "version": "0.1.0",
   "private": true,
-  "packageManager": "bun@1.3.14",
+  "packageManager": "npm@11.15.0",
   "description": "Shared product UI i18n pipelines and frontend tooling",
   "repository": {
     "type": "git",

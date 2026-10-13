@@ -84,7 +84,7 @@ test("checks eligibility without running candidate code or granting publishing p
   assert.match(scripts, /git show origin\/main:scripts\/release-check\.mjs/);
   assert.match(scripts, /git show origin\/main:scripts\/set-version\.mjs/);
   assert.match(scripts, /await main\(\)/);
-  assert.doesNotMatch(scripts, /npm (run|install|publish)|bun install/);
+  assert.doesNotMatch(scripts, /npm (ci|run|install|publish)|bun install/);
   const ci = parse(await readFile(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8"));
   assert.deepEqual(ci.on.push.branches, ["**"]);
   assert.equal(ci.on.push.tags, undefined);

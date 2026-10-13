@@ -21,7 +21,7 @@ HCC is the first consumer; tooling should not make every future consumer pretend
 | `@redhat-cloud-services/i18n-pipeline`      | Node.js package with the normalized catalog model, FormatJS and keyed ICU JSON adapters, adapter plugin loading, adapter-owned text codecs, generated-catalog sync, and the `i18n-pipeline` CLI. |
 | `.github/workflows/`                        | Repository CI and reusable consumer validation.                                                                                                                                                  |
 
-The TypeScript packages target Node.js 22.14+. Bun 1.3.14 manages workspace dependencies, while package code and the CLI run under Node.js. Framework extraction and compilation remain in each consumer's native tooling.
+The TypeScript packages target Node.js 22.14+. Corepack selects the npm version declared in `package.json` to manage workspace dependencies, while package code and the CLI run under Node.js. Framework extraction and compilation remain in each consumer's native tooling.
 
 ## Design rules
 
@@ -58,15 +58,19 @@ docs/                    Architecture and consumer guidance
 
 ## Local development
 
-Use Node.js 22.14 or newer and Bun 1.3.14. Bun is the canonical dependency installer; `bun.lock` is authoritative, while Bun generates `yarn.lock` as a mirror for GitHub Dependency Review. Do not run `npm install` or `npm ci`; use npm only to run scripts under Node:
+Use the exact Node.js development version in `.nvmrc` and the npm version selected by Corepack from `package.json`'s `packageManager` field. Published packages support Node.js 22.14+. npm is the canonical dependency installer; `package-lock.json` is authoritative and is also used by GitHub Dependency Review. Use `npm ci` for unchanged dependencies and `npm install` when updating dependencies:
 
 ```bash
-bun install --frozen-lockfile
-bun install --yarn
+nvm install
+nvm use
+npm install --global corepack@0.34.0
+corepack enable npm
+corepack install
+npm ci
 npm run check
 ```
 
-CI tests Node 22 and 24 in separate typecheck, test, and build jobs. It also checks coverage thresholds, source-built CLI behavior, schemas, reusable workflow behavior, and GitHub Actions security.
+Standard CI jobs read `.nvmrc`, including the primary Node 22 rows in the typecheck, test, build, and CLI smoke matrices. Node 24 rows and packed-consumer checks on the minimum Node 22.14 runtime remain explicit compatibility tests. Parity jobs install development dependencies under `.nvmrc` before switching to the consumer runtime. CI also checks coverage thresholds, source-built CLI behavior, schemas, reusable workflow behavior, and GitHub Actions security.
 
 The package CLI is compiled to Node-compatible ESM:
 
@@ -92,7 +96,7 @@ jobs:
   i18n:
     uses: RedHatInsights/i18n-tooling/.github/workflows/i18n-validate.yml@<reviewed-commit-sha>
     with:
-      package-manager: bun
+      package-manager: npm
       validation-config: .github/i18n/catalog-validation.json
       catalog-adapter: formatjs-json
       catalog-path: locales/translation-template.json
@@ -100,7 +104,7 @@ jobs:
       catalog-locale: en
 ```
 
-Replace `<reviewed-commit-sha>` with a reviewed commit SHA. The reusable workflow checks out the consumer repository and `i18n-tooling` at the exact commit of the called workflow (`job.workflow_sha`). It installs consumer dependencies with the selected package manager and the tooling workspace with Bun, builds the CLI and ESLint plugin, then lints the configured source glob against `catalog-path`. The rule recognizes FormatJS `formatMessage`, `defineMessage(s)`, and `<FormattedMessage>` forms; IDs must be static and present in the catalog. With `validation-config`, the workflow runs the shared `validate-project` command directly. Its config names source/target files and adapters and can run native generators into temporary output files to verify checked-in catalogs are current. See the [catalog validation example](examples/phrase-consumer/.github/i18n/catalog-validation.json) and [config schema](schemas/catalog-validation-config.schema.json). Without that input, the workflow runs `validation-command` through `npm run`; simple consumers can also use `i18n-pipeline validate` or `i18n-pipeline check` directly with `I18N_CATALOG_*` settings. The reusable workflow does not require npm publication. Pinning the reusable workflow pins the CLI and rule source too.
+Replace `<reviewed-commit-sha>` with a reviewed commit SHA. The reusable workflow checks out the consumer repository and `i18n-tooling` at the exact commit of the called workflow (`job.workflow_sha`). Its default Node.js runtime comes from the tooling `.nvmrc`; consumers can override it with `node-version`. It installs consumer dependencies with the selected package manager (npm by default; Bun and pnpm are also supported) and the tooling workspace with npm, builds the CLI and ESLint plugin, then lints the configured source glob against `catalog-path`. The rule recognizes FormatJS `formatMessage`, `defineMessage(s)`, and `<FormattedMessage>` forms; IDs must be static and present in the catalog. With `validation-config`, the workflow runs the shared `validate-project` command directly. Its config names source/target files and adapters and can run native generators into temporary output files to verify checked-in catalogs are current. See the [catalog validation example](examples/phrase-consumer/.github/i18n/catalog-validation.json) and [config schema](schemas/catalog-validation-config.schema.json). Without that input, the workflow runs `validation-command` through the selected consumer package manager's `run` command; simple consumers can also use `i18n-pipeline validate` or `i18n-pipeline check` directly with `I18N_CATALOG_*` settings. The reusable workflow does not require npm publication. Pinning the reusable workflow pins the CLI and rule source too.
 
 A Python service can validate contract-generated catalogs without installing application dependencies or linting JavaScript:
 

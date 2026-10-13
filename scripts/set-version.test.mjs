@@ -49,7 +49,7 @@ test("updates only package versions and the exact plugin dependency; refuses eit
       await mkdir(join(path, ".."), { recursive: true });
       await writeFile(path, JSON.stringify([plugin, pipeline][i]));
     }
-    await writeFile(join(root, "bun.lock"), "unchanged");
+    await writeFile(join(root, "package-lock.json"), "unchanged");
     await assert.rejects(setVersion("0.1.1", root), /downgrade/);
     assert.deepEqual(JSON.parse(await readFile(paths[0], "utf8")), plugin);
     await assert.rejects(setVersion("invalid", root), /Invalid semver/);
@@ -61,7 +61,7 @@ test("updates only package versions and the exact plugin dependency; refuses eit
       version: "1.0.0",
       dependencies: { ...pipeline.dependencies, [plugin.name]: "1.0.0" },
     });
-    assert.equal(await readFile(join(root, "bun.lock"), "utf8"), "unchanged");
+    assert.equal(await readFile(join(root, "package-lock.json"), "utf8"), "unchanged");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

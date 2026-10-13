@@ -2,17 +2,24 @@
 
 ## Development setup
 
-Use Node.js 22.14 or newer and Bun 1.3.14, as pinned in `.nvmrc` and `package.json`. Bun is the canonical dependency installer; `bun.lock` is authoritative. Bun also generates `yarn.lock` as a mirror for GitHub Dependency Review; do not edit that file directly. This repository has no npm lockfile. Do not run `npm install` or `npm ci`; use npm only to run scripts under Node.
+Use the exact Node.js version in `.nvmrc` for development and the npm version selected by Corepack from `package.json`'s `packageManager` field. Standard CI uses the same pin; published packages support Node.js 22.14+. npm is the canonical dependency installer; `package-lock.json` is authoritative and is also used by GitHub Dependency Review. Do not edit the lockfile directly.
 
 For an unchanged dependency set:
 
 ```bash
-bun install --frozen-lockfile
+nvm install
+nvm use
+npm install --global corepack@0.34.0
+corepack enable npm
+corepack install
+npm ci
 npm run check
 npm run test:coverage
 ```
 
-When changing dependencies, run `bun install` to update `bun.lock`, then `bun install --yarn` to refresh `yarn.lock`. Run `npm run smoke:cli` and `npm run check:schemas` when changing CLI behavior or schemas. CI exercises Node 22 and 24, enforces workspace test coverage thresholds, and runs Markdown, link, spelling, dependency, and GitHub Actions security checks.
+Corepack's npm shim is opt-in: plain `corepack enable` does not enable npm. Repository CI shares `.github/actions/setup-environment`, which reads the tooling checkout's `.nvmrc` and `packageManager`, uses built-in npm download caching for ordinary jobs, and disables caching for privileged jobs. Containers read the same npm pin from the manifest; no npm version is duplicated in setup commands.
+
+When changing dependencies, run `npm install` to update `package-lock.json`, then verify a clean `npm ci` succeeds. Bun and pnpm remain supported for consumers; CI verifies packed installations with all three package managers. Run `npm run smoke:cli` and `npm run check:schemas` when changing CLI behavior or schemas. CI uses `.nvmrc` for its primary runtime and exercises Node 24 separately. Parity jobs install the full development dependency graph with `.nvmrc` before testing packed consumers on Node 22.14 and 24; development-only dependency engines do not redefine the published runtime minimum. CI enforces workspace test coverage thresholds and runs Markdown, link, spelling, dependency, and GitHub Actions security checks.
 
 Use `npm run format` to apply formatting.
 

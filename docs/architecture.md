@@ -63,7 +63,7 @@ Django gettext is enabled in `insights-rbac`, but there are no current PO catalo
 
 ## Runtime and framework tooling
 
-The shared adapter package is compiled TypeScript targeting Node.js 22.14+. Node is the runtime; Bun can be used as an optional local tool or dependency installer. The package uses Node's ESM module loading for installed adapter packages. Framework extraction and compilation remain native to each consumer—for example, FormatJS CLI in a React app.
+The shared adapter package is compiled TypeScript targeting Node.js 22.14+. Node is the runtime and npm manages repository dependencies; consumers can use npm, Bun, or pnpm. The package uses Node's ESM module loading for installed adapter packages. Framework extraction and compilation remain native to each consumer—for example, FormatJS CLI in a React app.
 
 ## TMS workflow
 
@@ -101,7 +101,7 @@ The reusable submit and reconcile workflows use protected environment secrets fo
 
 ## Reusable workflow
 
-The GitHub workflow sets up Node.js 22.14+ and supports Bun or npm for consumer dependency installation. With `validation-config`, it invokes `i18n-pipeline validate-project` directly; a JSON plan declares catalog paths, adapters, locale contexts, and generated-file sync commands. Each generator runs with an argument array (no shell) and writes to a temporary output path for comparison. Otherwise, the workflow retains `validation-command` through `npm run`. Non-JavaScript consumers set `catalog-only: true` to skip consumer dependency installation and FormatJS source lint while retaining the shared catalog checks. Simple commands can continue using adapter ID, path, role, locale, and optional JSON config through `I18N_CATALOG_*` environment variables.
+The GitHub workflow reads the tooling `.nvmrc` by default, retains `node-version` as a consumer override, and uses npm for the tooling workspace while supporting npm (default), Bun, or pnpm for consumer dependency installation. With `validation-config`, it invokes `i18n-pipeline validate-project` directly; a JSON plan declares catalog paths, adapters, locale contexts, and generated-file sync commands. Each generator runs with an argument array (no shell) and writes to a temporary output path for comparison. Otherwise, the workflow retains `validation-command` through `npm run`. Non-JavaScript consumers set `catalog-only: true` to skip consumer dependency installation and FormatJS source lint while retaining the shared catalog checks. Simple commands can continue using adapter ID, path, role, locale, and optional JSON config through `I18N_CATALOG_*` environment variables.
 
 Workflow inputs are not interpolated into shell code, and a format adapter ID never selects a dynamic GitHub `uses` reference. Custom adapter packages must be installed and pinned by the consumer environment.
 

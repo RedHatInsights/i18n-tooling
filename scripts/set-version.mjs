@@ -58,7 +58,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   try {
     if (process.argv.length !== 3) throw new Error("Usage: node scripts/set-version.mjs <version>");
     await setVersion(process.argv[2]);
-    console.log("Version updated. Run bun install, then bun install --yarn to refresh lockfiles.");
+    console.log(
+      "Version updated. Run npm install to refresh package-lock.json, then verify npm ci.",
+    );
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

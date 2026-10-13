@@ -2,20 +2,23 @@
 #
 # The Node 22 and Node 24 stages run the repository test suite. The runtime
 # stage copies a marker from each, so the image only exists if both pass.
-ARG BUN_VERSION=1.3.14
-
 # Pin multi-architecture indexes, not individual platform manifests.
 FROM registry.access.redhat.com/ubi9/nodejs-22:1-1791442403@sha256:e52f879096f28d9a6cfb308b3bf2c71c0fc35caec613060bbe41dac054002831 AS node22
-ARG BUN_VERSION
 USER 0
-RUN npm install --global "bun@${BUN_VERSION}"
 WORKDIR /opt/i18n-tooling
+ENV COREPACK_HOME=/opt/corepack
+COPY package.json ./
+RUN npm install --global corepack@0.34.0 \
+    && corepack enable npm \
+    && corepack install --global "$(node -p "require('./package.json').packageManager")"
 COPY --chown=1001:0 . .
 RUN chown 1001:0 /opt/i18n-tooling
 USER 1001
-# A clean install regenerates yarn.lock; both lockfiles must match the commit.
-RUN sha256sum bun.lock yarn.lock > /tmp/lockfiles.sha256 \
-    && bun install --frozen-lockfile \
+# The Corepack bootstrap populated the default npm cache as root.
+ENV NPM_CONFIG_CACHE=/tmp/npm-cache
+# The committed npm lockfile must stay unchanged during a clean install.
+RUN sha256sum package-lock.json > /tmp/lockfiles.sha256 \
+    && npm ci \
     && sha256sum --check /tmp/lockfiles.sha256
 RUN npm run typecheck \
     && node --test scripts/*.test.mjs \
@@ -25,14 +28,18 @@ RUN npm run typecheck \
     && touch /tmp/node22.passed
 
 FROM registry.access.redhat.com/ubi9/nodejs-24:1-1791219316@sha256:36af0bcb31021be93b0aab49e3ebcbbe07326496a550cface3294634fe7e6433 AS node24
-ARG BUN_VERSION
 USER 0
-RUN npm install --global "bun@${BUN_VERSION}"
 WORKDIR /opt/i18n-tooling
+ENV COREPACK_HOME=/opt/corepack
+COPY package.json ./
+RUN npm install --global corepack@0.34.0 \
+    && corepack enable npm \
+    && corepack install --global "$(node -p "require('./package.json').packageManager")"
 COPY --chown=1001:0 . .
 RUN chown 1001:0 /opt/i18n-tooling
 USER 1001
-RUN bun install --frozen-lockfile
+ENV NPM_CONFIG_CACHE=/tmp/npm-cache
+RUN npm ci
 RUN npm run typecheck \
     && node --test scripts/*.test.mjs \
     && npm run test:coverage \
@@ -42,8 +49,10 @@ RUN npm run typecheck \
 
 # Production dependencies only, from the same frozen lockfile.
 FROM node22 AS production
+# npm may hoist all dependencies, leaving workspace node_modules absent.
 RUN rm -rf node_modules packages/*/node_modules \
-    && bun install --frozen-lockfile --production
+    && npm ci --omit=dev \
+    && mkdir -p packages/eslint-plugin-i18n/node_modules packages/i18n-pipeline/node_modules
 
 FROM registry.access.redhat.com/ubi9/nodejs-22-minimal:1-1791441974@sha256:03b7dd64cafaaca5019c4cc1c36e05140b1650dab6cd5c4ab1fde9d88c0537ca AS runtime
 USER 0

@@ -1,11 +1,11 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
-  "enabledManagers": ["bun", "github-actions"],
+  "enabledManagers": ["npm", "github-actions"],
   "packageRules": [
     {
-      "matchManagers": ["bun"],
-      "groupName": "Bun dependencies"
+      "matchManagers": ["npm"],
+      "groupName": "npm dependencies"
     },
     {
       "matchManagers": ["github-actions"],
