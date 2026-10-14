@@ -2,11 +2,36 @@ import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { parse } from "yaml";
 import { parseCatalogValidationConfig } from "../src/index.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
 describe("repository i18n contracts", () => {
+  // Invariants on paths CI does not execute: the pnpm consumer branch and release permissions.
+  it("keeps installer and release-permission invariants that CI does not exercise", async () => {
+    const read = (path: string) => readFile(join(repositoryRoot, path), "utf8");
+    const manifest = JSON.parse(await read("package.json"));
+    expect(manifest.packageManager).toMatch(/^npm@\d+\.\d+\.\d+/);
+
+    const validate = await read(".github/workflows/i18n-validate.yml");
+    expect(validate).toContain("pnpm) pnpm install --frozen-lockfile ;;");
+    const steps = parse(validate).jobs.validate.steps;
+    expect(steps).toContainEqual(
+      expect.objectContaining({ run: "npm ci", "working-directory": "i18n-tooling-source" }),
+    );
+
+    const release = parse(await read(".github/workflows/release.yml")).jobs;
+    expect(release.check.permissions["id-token"]).toBeUndefined();
+    expect(release.check.environment).toBeUndefined();
+    expect(release.release.needs).toBe("check");
+    expect(release.release.environment).toBe("npm-release");
+
+    // Tag runs would race the release eligibility check.
+    const ci = parse(await read(".github/workflows/ci.yml"));
+    expect(ci.on.push).toEqual({ branches: ["**"] });
+  });
+
   it("forwards catalog settings through the reusable Node workflow", async () => {
     const workflow = await readFile(
       join(repositoryRoot, ".github/workflows/i18n-validate.yml"),
