@@ -5,6 +5,13 @@ import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import { checkCatalogs } from "./catalog-check.js";
 import { parseCatalogDocument } from "./catalog-document.js";
+import {
+  extractFeoCatalog,
+  feoTemplateLocales,
+  inlineFeoLocale,
+  serializeFeoCatalog,
+  type FeoCatalog,
+} from "./feo-template.js";
 import { describeArgumentMismatch, lintSourceCatalog, lintTargetCatalog } from "./icu-lint.js";
 import { parsePhraseTmsConfig } from "./phrase-config.js";
 import type {
@@ -17,6 +24,7 @@ import type {
 
 const OUTPUT_PLACEHOLDER = "{output}";
 const DEFAULT_CATALOG_EXTENSION = ".json";
+const FEO_LOCALE_PATTERN = /^[a-z]{2,3}(?:-[A-Za-z0-9]+)*$/;
 
 export interface CatalogFileReference {
   path: string;
@@ -28,6 +36,12 @@ export interface CatalogFileReference {
 export interface CatalogValidationCheck {
   source: CatalogFileReference;
   targets: CatalogFileReference[];
+}
+
+export interface FeoTemplateValidation {
+  template: string;
+  source: string;
+  locales: Record<string, string>;
 }
 
 /**
@@ -58,6 +72,8 @@ export interface CatalogValidationConfig {
   checks: CatalogValidationCheck[];
   generated: GeneratedCatalogCheck[];
   catalogDirectories: CatalogDirectory[];
+  /** Built-in FEO extraction and locale inlining checks. */
+  feo?: FeoTemplateValidation[];
   /** Optional source-code lint settings used by `validate-ci`; `validate-project` ignores them. */
   sourceLint?: SourceLintConfig;
 }
@@ -211,6 +227,31 @@ function parseSourceLintConfig(value: unknown): SourceLintConfig {
   return { ...(files === undefined ? {} : { files }), ...(catalog ? { catalog } : {}) };
 }
 
+function parseFeoTemplateValidation(value: unknown, index: number): FeoTemplateValidation {
+  const label = `Catalog validation config "feo[${index}]"`;
+  const entry = recordValue(value, label);
+  rejectUnknownKeys(entry, ["template", "source", "locales"], label);
+
+  const template = requiredString(entry.template, `${label}.template`);
+  validateRepoPath(template, `${label}.template`);
+  const source = requiredString(entry.source, `${label}.source`);
+  validateRepoPath(source, `${label}.source`);
+  const localeEntries = recordValue(entry.locales, `${label}.locales`);
+  const locales = Object.fromEntries(
+    Object.entries(localeEntries).map(([locale, value]) => {
+      const localeLabel = `${label}.locales[${JSON.stringify(locale)}]`;
+      if (!FEO_LOCALE_PATTERN.test(locale) || locale === "en") {
+        throw new TypeError(`${localeLabel} must be a non-English FEO locale tag`);
+      }
+      const path = requiredString(value, localeLabel);
+      validateRepoPath(path, localeLabel);
+      return [locale, path] as const;
+    }),
+  );
+
+  return { template, source, locales };
+}
+
 function optionalArray(value: unknown, label: string): unknown[] {
   if (value === undefined) return [];
   if (!Array.isArray(value)) throw new TypeError(`${label} must be an array`);
@@ -222,7 +263,7 @@ export function parseCatalogValidationConfig(value: unknown): CatalogValidationC
   const root = recordValue(value, "Catalog validation config");
   rejectUnknownKeys(
     root,
-    ["version", "tmsConfig", "checks", "generated", "catalogDirectories", "sourceLint"],
+    ["version", "tmsConfig", "checks", "generated", "catalogDirectories", "feo", "sourceLint"],
     "Catalog validation config",
   );
   if (root.version !== 1) throw new TypeError('Catalog validation config "version" must be 1');
@@ -258,12 +299,20 @@ export function parseCatalogValidationConfig(value: unknown): CatalogValidationC
   ).map((value, index) =>
     parseCatalogDirectory(value, `Catalog validation config "catalogDirectories[${index}]"`),
   );
+  const feo =
+    root.feo === undefined
+      ? undefined
+      : optionalArray(root.feo, 'Catalog validation config "feo"').map((value, index) =>
+          parseFeoTemplateValidation(value, index),
+        );
   const sourceLint =
     root.sourceLint === undefined ? undefined : parseSourceLintConfig(root.sourceLint);
 
-  if (!tmsConfig && !checks.length && !generated.length) {
+  if (!tmsConfig && !checks.length && !generated.length && !feo?.length) {
+    const alternatives =
+      feo === undefined ? '"checks" or "generated"' : '"checks", "generated", or "feo"';
     throw new TypeError(
-      'Catalog validation config needs "tmsConfig" or at least one "checks" or "generated" entry',
+      `Catalog validation config needs "tmsConfig" or at least one ${alternatives} entry`,
     );
   }
   return {
@@ -272,6 +321,7 @@ export function parseCatalogValidationConfig(value: unknown): CatalogValidationC
     checks,
     generated,
     catalogDirectories,
+    ...(feo === undefined ? {} : { feo }),
     ...(sourceLint === undefined ? {} : { sourceLint }),
   };
 }
@@ -306,6 +356,20 @@ function contextFor(
 async function readProjectFile(projectRoot: string, path: string, label: string): Promise<string> {
   try {
     return await readFile(resolve(projectRoot, path), "utf8");
+  } catch (error) {
+    throw new Error(`${label} "${path}" could not be read: ${errorMessage(error)}`, {
+      cause: error,
+    });
+  }
+}
+
+async function readProjectFileBytes(
+  projectRoot: string,
+  path: string,
+  label: string,
+): Promise<Buffer> {
+  try {
+    return await readFile(resolve(projectRoot, path));
   } catch (error) {
     throw new Error(`${label} "${path}" could not be read: ${errorMessage(error)}`, {
       cause: error,
@@ -493,6 +557,201 @@ async function undeclaredCatalogProblems(
   return problems;
 }
 
+function shellArgument(value: string): string {
+  if (/^[A-Za-z0-9_./-]+$/.test(value)) return value;
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function feoExtractCommand(entry: FeoTemplateValidation): string {
+  return (
+    `i18n-pipeline feo extract --template ${shellArgument(entry.template)} ` +
+    `--output ${shellArgument(entry.source)}`
+  );
+}
+
+function feoInlineCommand(entry: FeoTemplateValidation, locale: string, path: string): string {
+  return (
+    `i18n-pipeline feo inline --template ${shellArgument(entry.template)} ` +
+    `--source ${shellArgument(entry.source)} --target ${shellArgument(path)} ` +
+    `--locale ${locale}`
+  );
+}
+
+function feoSourceProblem(entry: FeoTemplateValidation, detail: string): string {
+  return (
+    `FEO source catalog "${entry.source}" for template "${entry.template}" could not be ` +
+    `checked: ${detail}. Run \`${feoExtractCommand(entry)}\` to update it.`
+  );
+}
+
+function feoLocaleProblem(
+  entry: FeoTemplateValidation,
+  locale: string,
+  path: string,
+  detail: string,
+  englishDrift: boolean,
+): string {
+  const fix = englishDrift
+    ? `Fix the locale file, then run \`${feoExtractCommand(entry)}\` followed by ` +
+      `\`${feoInlineCommand(entry, locale, path)}\` to update the source and template.`
+    : `Fix the locale file, then run \`${feoInlineCommand(entry, locale, path)}\` to update the template.`;
+  return (
+    `FEO locale "${locale}" in "${path}" could not be checked against ` +
+    `template "${entry.template}" and source catalog "${entry.source}": ${detail}. ${fix}`
+  );
+}
+
+async function checkFeoTemplate(
+  projectRoot: string,
+  entry: FeoTemplateValidation,
+): Promise<string[]> {
+  const problems: string[] = [];
+  let templateBytes: Buffer;
+  let template: string;
+  try {
+    templateBytes = await readProjectFileBytes(projectRoot, entry.template, "FEO template");
+    template = templateBytes.toString("utf8");
+  } catch (error) {
+    problems.push(
+      `FEO template "${entry.template}" for source catalog "${entry.source}" could not be ` +
+        `read: ${errorMessage(error)}. Restore or fix the template, then run ` +
+        `\`${feoExtractCommand(entry)}\` to regenerate the source catalog.`,
+    );
+    return problems;
+  }
+
+  let currentCatalog: FeoCatalog;
+  let expectedSource: string;
+  let templateLocales: string[];
+  try {
+    currentCatalog = extractFeoCatalog(template);
+    expectedSource = serializeFeoCatalog(currentCatalog);
+    templateLocales = feoTemplateLocales(template);
+  } catch (error) {
+    problems.push(
+      `FEO template "${entry.template}" and source catalog "${entry.source}" could not be ` +
+        `checked: ${errorMessage(error)}. Fix the template, then run ` +
+        `\`${feoExtractCommand(entry)}\` to regenerate the source catalog.`,
+    );
+    return problems;
+  }
+
+  let sourceContents: string;
+  let sourceBytes: Buffer;
+  let sourceValue: unknown;
+  try {
+    sourceBytes = await readProjectFileBytes(projectRoot, entry.source, "FEO source catalog");
+    sourceContents = sourceBytes.toString("utf8");
+    try {
+      sourceValue = JSON.parse(sourceContents) as unknown;
+    } catch (error) {
+      throw new Error(
+        `FEO source catalog "${entry.source}" is not valid JSON: ${errorMessage(error)}`,
+        {
+          cause: error,
+        },
+      );
+    }
+    if (!isRecord(sourceValue)) {
+      throw new TypeError(`FEO source catalog "${entry.source}" must be a JSON object`);
+    }
+  } catch (error) {
+    problems.push(feoSourceProblem(entry, errorMessage(error)));
+    return problems;
+  }
+
+  const source = sourceValue as FeoCatalog;
+  const englishDrift = !sourceBytes.equals(Buffer.from(expectedSource, "utf8"));
+  if (englishDrift) {
+    problems.push(
+      `FEO source catalog "${entry.source}" is not byte-identical to the extraction output ` +
+        `from "${entry.template}". Run \`${feoExtractCommand(entry)}\` to update it.`,
+    );
+  }
+
+  for (const [locale, localePath] of Object.entries(entry.locales)) {
+    let target: Record<string, unknown>;
+    try {
+      const targetContents = await readProjectFile(
+        projectRoot,
+        localePath,
+        `FEO locale "${locale}" catalog`,
+      );
+      let targetValue: unknown;
+      try {
+        targetValue = JSON.parse(targetContents) as unknown;
+      } catch (error) {
+        throw new Error(
+          `FEO locale "${locale}" catalog "${localePath}" is not valid JSON: ${errorMessage(error)}`,
+          { cause: error },
+        );
+      }
+      if (!isRecord(targetValue)) {
+        throw new TypeError(`FEO locale "${locale}" catalog "${localePath}" must be a JSON object`);
+      }
+      target = targetValue;
+    } catch (error) {
+      problems.push(feoLocaleProblem(entry, locale, localePath, errorMessage(error), englishDrift));
+      continue;
+    }
+
+    // Only visible until the source catalog is re-extracted; afterwards nothing in the files
+    // shows that the translation predates the new English.
+    const staleKeys = Object.keys(target).filter(
+      (key) =>
+        Object.hasOwn(source, key) &&
+        Object.hasOwn(currentCatalog, key) &&
+        source[key]?.defaultMessage !== currentCatalog[key]!.defaultMessage,
+    );
+    if (staleKeys.length) {
+      problems.push(
+        `FEO locale "${locale}" in "${localePath}" still has translations for English that ` +
+          `changed in template "${entry.template}": ${staleKeys.join(", ")}. Remove these keys ` +
+          `from the locale file so they are translated again, then run ` +
+          `\`${feoExtractCommand(entry)}\` followed by ` +
+          `\`${feoInlineCommand(entry, locale, localePath)}\`.`,
+      );
+    }
+
+    // Inlining against the template's own English keeps source drift, reported above, from
+    // repeating as a stale-English error for every locale.
+    let expectedTemplate: string;
+    try {
+      expectedTemplate = inlineFeoLocale(
+        template,
+        currentCatalog,
+        target as Record<string, string>,
+        locale,
+      );
+    } catch (error) {
+      problems.push(feoLocaleProblem(entry, locale, localePath, errorMessage(error), englishDrift));
+      continue;
+    }
+
+    if (!templateBytes.equals(Buffer.from(expectedTemplate, "utf8"))) {
+      const updateCommand = englishDrift
+        ? `Run \`${feoExtractCommand(entry)}\`, then \`${feoInlineCommand(entry, locale, localePath)}\` to update the source and template.`
+        : `Run \`${feoInlineCommand(entry, locale, localePath)}\` to update the template.`;
+      problems.push(
+        `FEO locale "${locale}" in "${localePath}" is not byte-identical to the ` +
+          `inlined output for template "${entry.template}" and source catalog "${entry.source}". ` +
+          updateCommand,
+      );
+    }
+  }
+
+  for (const locale of templateLocales) {
+    if (Object.hasOwn(entry.locales, locale)) continue;
+    problems.push(
+      `FEO template "${entry.template}" has spec.locales for "${locale}", but its "feo" entry ` +
+        `does not list that locale, so it is not checked. Add "${locale}" with its locale file ` +
+        `to the entry's "locales", or remove the block from the template.`,
+    );
+  }
+
+  return problems;
+}
+
 /** Runs every configured catalog comparison and generated-file sync check. */
 export async function validateCatalogProject(
   projectRoot: string,
@@ -524,6 +783,10 @@ export async function validateCatalogProject(
     }
   }
 
+  for (const entry of config.feo ?? []) {
+    problems.push(...(await checkFeoTemplate(projectRoot, entry)));
+  }
+
   const checks: PlannedCheck[] = [...config.checks];
   if (config.tmsConfig) {
     try {
@@ -534,6 +797,10 @@ export async function validateCatalogProject(
   }
 
   const declaredPaths = new Set(config.generated.map((entry) => entry.path));
+  for (const entry of config.feo ?? []) {
+    declaredPaths.add(entry.source);
+    for (const localePath of Object.values(entry.locales)) declaredPaths.add(localePath);
+  }
   for (const check of checks) {
     declaredPaths.add(check.source.path);
     for (const target of check.targets) declaredPaths.add(target.path);

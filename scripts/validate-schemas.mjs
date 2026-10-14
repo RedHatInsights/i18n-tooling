@@ -71,6 +71,17 @@ for (const schemaFile of schemaFiles) {
       throw new Error(`Consumer catalog validation example is invalid:\n${errors}`);
     }
     console.log("examples/phrase-consumer/.github/i18n/catalog-validation.json: valid");
+
+    const feoExamplePath = join(
+      repositoryRoot,
+      "examples/feo-consumer/i18n/catalog-validation.json",
+    );
+    const feoExample = JSON.parse(await readFile(feoExamplePath, "utf8"));
+    if (!validate(feoExample)) {
+      const errors = JSON.stringify(validate.errors ?? [], null, 2);
+      throw new Error(`FEO consumer catalog validation example is invalid:\n${errors}`);
+    }
+    console.log("examples/feo-consumer/i18n/catalog-validation.json: valid");
   }
 
   console.log(`${schemaFile}: compiled; ${fixtureFiles.length} fixtures passed`);

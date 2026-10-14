@@ -11,6 +11,11 @@ import {
 type Descriptor = { defaultMessage: string; description: string };
 export type FeoCatalog = Record<string, Descriptor>;
 
+/** Code-unit order: localeCompare follows the process locale, so output would differ by machine. */
+function byKey([a]: [string, unknown], [b]: [string, unknown]): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 function mapping(value: unknown, label: string): YAMLMap {
   if (!isMap(value)) throw new Error(`${label} must be a YAML mapping`);
   return value;
@@ -169,7 +174,7 @@ function collect(doc: Document): {
   }
   return {
     owned,
-    catalog: Object.fromEntries(Object.entries(catalog).sort(([a], [b]) => a.localeCompare(b))),
+    catalog: Object.fromEntries(Object.entries(catalog).sort(byKey)),
     specs,
     prefixes,
   };
@@ -177,6 +182,23 @@ function collect(doc: Document): {
 
 export function extractFeoCatalog(template: string): FeoCatalog {
   return collect(parse(template)).catalog;
+}
+
+export function serializeFeoCatalog(catalog: FeoCatalog): string {
+  return `${JSON.stringify(catalog, null, 2)}\n`;
+}
+
+/** Locale tags that have a spec.locales block in any Frontend object. */
+export function feoTemplateLocales(template: string): string[] {
+  const locales = new Set<string>();
+  for (const spec of frontendSpecs(parse(template)).specs) {
+    const value = spec.get("locales", true);
+    if (value === undefined) continue;
+    for (const item of mapping(value, "spec.locales").items) {
+      if (isScalar(item.key)) locales.add(String(item.key.value));
+    }
+  }
+  return [...locales].sort();
 }
 
 function parse(template: string): Document {
@@ -205,7 +227,7 @@ export function inlineFeoLocale(
     if (!Object.hasOwn(catalog, key)) throw new Error(`Unknown translation key: ${key}`);
     if (typeof value !== "string" || !value.trim()) throw new Error(`Invalid translation: ${key}`);
   }
-  const sorted = Object.fromEntries(Object.entries(target).sort(([a], [b]) => a.localeCompare(b)));
+  const sorted = Object.fromEntries(Object.entries(target).sort(byKey));
   const changes: { start: number; end: number; text: string }[] = [];
   for (const [index, spec] of specs.entries()) {
     const ownTarget = Object.fromEntries(

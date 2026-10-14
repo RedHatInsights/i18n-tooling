@@ -101,8 +101,10 @@ async function runValidateCi(
   root: string,
   args: string[] = [],
   env: NodeJS.ProcessEnv = {},
+  resultsDirOverride?: string,
 ): Promise<RunResult> {
-  const resultsDir = join(root, `results-${temporaryDirectories.length}-${Math.random()}`);
+  const resultsDir =
+    resultsDirOverride ?? join(root, `results-${temporaryDirectories.length}-${Math.random()}`);
   const stdout: string[] = [];
   const stderr: string[] = [];
   const exitCode = await runCli(
@@ -182,6 +184,62 @@ afterEach(async () => {
 });
 
 describe("i18n-pipeline validate-ci", () => {
+  it("passes the FEO consumer example in error mode without consumer dependencies", async () => {
+    const root = resolve(packageRoot, "../..", "examples/feo-consumer");
+    const resultsDir = await mkdtemp(join(tmpdir(), "i18n-validate-ci-feo-results-"));
+    temporaryDirectories.push(resultsDir);
+
+    const result = await runValidateCi(root, ["--mode", "error"], {}, resultsDir);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toEqual([]);
+    expect(result.stdout).toEqual([
+      "validate-ci mode=error status=pass errors=0 warnings=0 config=config",
+    ]);
+    expect(await stat(join(root, "node_modules")).catch(() => undefined)).toBeUndefined();
+    await expectResults(result, {
+      status: "pass",
+      errors: 0,
+      warnings: 0,
+      mode: "error",
+      config: "config",
+    });
+  });
+
+  it.each(["warn", "error"] as const)(
+    "reports invalid FEO YAML as a finding in %s mode",
+    async (mode) => {
+      const root = await createRoot();
+      await writeProjectFile(root, "package.json", JSON.stringify({ name: "feo-invalid" }));
+      await writeProjectFile(root, "deploy/frontend.yaml", "kind: [\n");
+      await writeConfig(root, {
+        version: 1,
+        checks: [],
+        feo: [
+          {
+            template: "deploy/frontend.yaml",
+            source: "deploy/locales/translation-template.json",
+            locales: {},
+          },
+        ],
+      });
+
+      const result = await runValidateCi(root, ["--mode", mode]);
+
+      expect(result.exitCode).toBe(mode === "warn" ? 0 : 1);
+      expect(result.stderr).toHaveLength(1);
+      expect(result.stderr[0]).toContain("Invalid Frontend template");
+      expect(result.stdout.at(-1)).toContain("status=findings");
+      await expectResults(result, {
+        status: "findings",
+        errors: 1,
+        warnings: 0,
+        mode,
+        config: "config",
+      });
+    },
+  );
+
   it("passes a configured consumer and prefers i18n/ over the GitHub config path", async () => {
     const root = await createRoot();
     await createPassProject(root);
