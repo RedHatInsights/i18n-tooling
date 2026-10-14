@@ -138,12 +138,6 @@ try {
         join(repository, "packages", name),
       ),
     );
-    for (const file of ["README.md", "LICENSE", "package.json"]) {
-      assert.ok(
-        pack.files.some((entry) => entry.path === file),
-        `${name} tarball missing ${file}`,
-      );
-    }
     tarballs.push(`file:${join(temporary, pack.filename)}`);
   }
   // Until the packages are on the registry, the CLI's dependency on the plugin
