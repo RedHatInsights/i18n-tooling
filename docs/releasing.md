@@ -28,7 +28,7 @@
 3. Merge the reviewed PR. Wait for `Core validation`, `Code quality` and `Security checks` to succeed on that `main` commit.
 4. Push the tag `v<version>` on that commit and approve the `npm-release` deployment.
 
-Before installing anything, the job runs `scripts/release-check.mjs` from protected `origin/main`. It refuses the release unless the tag equals `v<version>` for both packages, the CLI depends on exactly that plugin version, the commit is reachable from `origin/main`, and the newest run of each required check succeeded for that commit. It then runs `npm run check`, publishes the plugin and then the CLI, skipping versions already on the registry, and smoke-installs both with `npm audit signatures`.
+An unprivileged job first runs `scripts/release-check.mjs`. It refuses the release unless the tag equals `v<version>` for both packages, the CLI depends on exactly that plugin version, the commit is reachable from `origin/main`, and the newest run of each required check succeeded for that commit. Only then does the `npm-release` job ask for approval, run `npm run check`, publish the plugin and then the CLI (skipping versions already on the registry), and smoke-install both with `npm audit signatures`. To check eligibility without publishing, dispatch `release.yml` from the tag with `dry-run` enabled.
 
 ## Resume and verify
 

@@ -29,7 +29,7 @@ function fetchChecks(repository, sha) {
     [
       "api",
       "--paginate",
-      `repos/${repository}/commits/${sha}/check-runs?filter=latest&per_page=100`,
+      `repos/${repository}/commits/${sha}/check-runs?per_page=100`,
       "--jq",
       ".check_runs[]",
     ],
