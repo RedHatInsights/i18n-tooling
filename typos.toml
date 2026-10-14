@@ -14,4 +14,4 @@ tsup = "tsup"
 zizmor = "zizmor"
 
 [files]
-extend-exclude = ["bun.lock", "yarn.lock"]
+extend-exclude = ["package-lock.json"]

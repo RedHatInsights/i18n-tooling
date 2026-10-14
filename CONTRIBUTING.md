@@ -2,20 +2,26 @@
 
 ## Development setup
 
-Use Node.js 22 or newer and Bun 1.3.14, as pinned in `.nvmrc` and `package.json`. Bun is the canonical dependency installer; `bun.lock` is authoritative. Bun also generates `yarn.lock` as a mirror for GitHub Dependency Review; do not edit that file directly. This repository has no npm lockfile. Do not run `npm install` or `npm ci`; use npm only to run scripts under Node.
+Use the exact Node.js version in `.nvmrc` for development and the npm version selected by Corepack from `package.json`'s `packageManager` field. Standard CI uses the same pin; published packages support Node.js 22.14+. npm is the canonical dependency installer; `package-lock.json` is authoritative and is also used by GitHub Dependency Review. Do not edit the lockfile directly.
 
 For an unchanged dependency set:
 
 ```bash
-bun install --frozen-lockfile
+nvm install
+npm install --global corepack@0.34.0
+corepack enable npm
+corepack install
+npm ci
 npm run check
 npm run test:coverage
 ```
 
-When changing dependencies, run `bun install` to update `bun.lock`, then `bun install --yarn` to refresh `yarn.lock`. Run `npm run smoke:cli` and `npm run check:schemas` when changing CLI behavior or schemas. CI exercises Node 22 and 24, enforces workspace test coverage thresholds, and runs Markdown, link, spelling, dependency, and GitHub Actions security checks.
+Plain `corepack enable` does not enable npm; enable its npm shim explicitly as above.
+
+When changing dependencies, run `npm install` to update `package-lock.json`. Run `npm run smoke:cli` and `npm run check:schemas` when changing CLI behavior or schemas. CI tests Node from `.nvmrc` and Node 24, checks packed installs with npm, Bun and pnpm, and runs coverage, Markdown, link, spelling, dependency, and GitHub Actions security checks.
 
 Use `npm run format` to apply formatting.
 
 ## Consumer workflow
 
-The reusable validation and Phrase TMS workflows build `i18n-pipeline` from the called workflow's commit. Consumers do not need an npm dependency on this repository; workspace packages are not published to npm. Phrase workflows require consumer-owned config plus protected Actions secrets; never run `tms submit` or `tms reconcile` against live Phrase/GitHub resources without explicit approval. Use injected fetch implementations in tests, and update the TMS config schema fixtures whenever the consumer contract changes.
+The reusable validation and Phrase TMS workflows build `i18n-pipeline` from the called workflow's commit. Consumers do not need an npm dependency on this repository; npm consumer usage is documented for after the first release. Phrase workflows require consumer-owned config plus protected Actions secrets; never run `tms submit` or `tms reconcile` against live Phrase/GitHub resources without explicit approval. Use injected fetch implementations in tests, and update the TMS config schema fixtures whenever the consumer contract changes.

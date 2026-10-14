@@ -1,0 +1,34 @@
+name: Set up Node.js and npm
+description: Use the tooling Node and packageManager pins, with optional npm caching
+
+inputs:
+  node-version:
+    description: Explicit compatibility or consumer runtime override
+    default: ""
+  working-directory:
+    description: Tooling checkout containing .nvmrc and package.json
+    default: .
+  cache:
+    description: Cache npm downloads; disable for privileged jobs
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    # v4 does not enable dependency caching automatically.
+    - name: Set up Node.js
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      with:
+        node-version: ${{ inputs.node-version }}
+        node-version-file: ${{ inputs.node-version == '' && format('{0}/.nvmrc', inputs.working-directory) || '' }}
+        cache: ${{ inputs.cache == 'true' && 'npm' || '' }}
+        cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+    - name: Enable the npm version declared by the tooling # zizmor: ignore[adhoc-packages] -- Pinned Corepack bootstrap; npm version comes from packageManager.
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        npm install --global corepack@0.34.0
+        corepack enable npm
+        corepack install --global "$(node -p "require('./package.json').packageManager")"
+        npm --version

@@ -34,7 +34,7 @@
     "test:coverage": "vitest run --coverage"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.14.0"
   },
   "dependencies": {
     "@formatjs/icu-messageformat-parser": "^3.5.20",
@@ -51,5 +51,8 @@
     "@vitest/coverage-v8": "^4.1.11",
     "tsup": "^8.0.0",
     "vitest": "^4.1.11"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

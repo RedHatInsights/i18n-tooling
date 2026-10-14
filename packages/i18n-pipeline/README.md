@@ -1,8 +1,8 @@
 # `@redhat-cloud-services/i18n-pipeline`
 
-Node.js 22+ workspace package for repository-owned locale catalogs. It provides a normalized `Catalog` model, built-in FormatJS, keyed ICU JSON, and OpenAPI Problem Details adapters, adapter-owned text codecs, ICU pattern validation, generated-catalog sync, and the `i18n-pipeline` CLI.
+Node.js 22.14+ workspace package for repository-owned locale catalogs. It provides a normalized `Catalog` model, built-in FormatJS, keyed ICU JSON, and OpenAPI Problem Details adapters, adapter-owned text codecs, ICU pattern validation, generated-catalog sync, and the `i18n-pipeline` CLI.
 
-The reusable workflow builds the CLI from this source; consumers do not need an npm dependency on this repository. This repository does not publish workspace packages to npm. Framework extraction and compilation stay with each consumer's native tooling. Catalog-format adapters normalize repository artifacts; TMS-provider adapters are a separate future seam.
+The reusable workflow builds the CLI from this source; consumers do not need an npm dependency on this repository. npm consumer usage below applies after the first release. Framework extraction and compilation stay with each consumer's native tooling. Catalog-format adapters normalize repository artifacts; TMS-provider adapters are a separate future seam.
 
 ## Built-in adapters
 
@@ -178,3 +178,23 @@ interface CatalogAdapter {
 The configured ID must match `adapter.id`. The optional JSON config file supplies adapter-specific `context.options`. Without document codecs, the CLI defaults to JSON; implement `parseDocument` and `serializeDocument` to handle text formats such as YAML or PO.
 
 Bare package specifiers resolve from the consumer root under ESM import conditions. Provide a package `main` field or an `exports` entry with an `import` or `default` condition. Dual-export packages use their ESM entry, not their CommonJS `require` entry.
+
+## npm consumers (after the first release)
+
+Install the CLI as a development dependency (Node.js 22.14+):
+
+```bash
+npm install --save-dev @redhat-cloud-services/i18n-pipeline
+```
+
+Add a package script, configure `i18n/catalog-validation.json` as described above, and run `npm run translations:validate`:
+
+```json
+{
+  "scripts": {
+    "translations:validate": "i18n-pipeline validate-ci --mode error"
+  }
+}
+```
+
+For editor feedback, see the [ESLint plugin setup](../eslint-plugin-i18n/README.md#npm-consumers-after-the-first-release).
