@@ -8,7 +8,6 @@ For an unchanged dependency set:
 
 ```bash
 nvm install
-nvm use
 npm install --global corepack@0.34.0
 corepack enable npm
 corepack install

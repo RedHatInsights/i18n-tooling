@@ -62,7 +62,6 @@ Use the exact Node.js development version in `.nvmrc` and the npm version select
 
 ```bash
 nvm install
-nvm use
 npm install --global corepack@0.34.0
 corepack enable npm
 corepack install

@@ -25,32 +25,20 @@ describe("source config", () => {
         },
       ],
     });
-    const [missing] = await eslint.lintText(
-      'formatMessage({ id: "missing", defaultMessage: "Hello." });',
-      { filePath: "source.js" },
-    );
-    expect(
-      missing.messages.some(
-        (message) => message.ruleId === "i18n/no-missing-default-catalog-entry",
-      ),
-    ).toBe(true);
-    const [invalid] = await eslint.lintText(
-      'formatMessage({ id: "missing", defaultMessage: "{count, plural, one {item}}" });',
-      { filePath: "source.js" },
-    );
-    expect(
-      invalid.messages.some(
-        (message) => message.ruleId === "formatjs/no-invalid-icu" && message.severity === 2,
-      ),
-    ).toBe(true);
-    const [warning] = await eslint.lintText(
-      'formatMessage({ id: "missing", defaultMessage: "{count, plural, one {one item} other {{count} items}}" });',
-      { filePath: "source.js" },
-    );
-    expect(
-      warning.messages.some(
-        (message) => message.ruleId === "formatjs/prefer-pound-in-plural" && message.severity === 1,
-      ),
-    ).toBe(true);
+    for (const [defaultMessage, ruleId, severity] of [
+      ["Hello.", "i18n/no-missing-default-catalog-entry", 2],
+      ["{count, plural, one {item}}", "formatjs/no-invalid-icu", 2],
+      [
+        "{count, plural, one {one item} other {{count} items}}",
+        "formatjs/prefer-pound-in-plural",
+        1,
+      ],
+    ] as const) {
+      const [result] = await eslint.lintText(
+        `formatMessage({ id: "missing", defaultMessage: ${JSON.stringify(defaultMessage)} });`,
+        { filePath: "source.js" },
+      );
+      expect(result.messages).toContainEqual(expect.objectContaining({ ruleId, severity }));
+    }
   });
 });
