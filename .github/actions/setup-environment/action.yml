@@ -22,10 +22,7 @@ runs:
         node-version: ${{ inputs.node-version }}
         node-version-file: ${{ inputs.node-version == '' && format('{0}/.nvmrc', inputs.working-directory) || '' }}
         cache: ${{ inputs.cache == 'true' && 'npm' || '' }}
-        cache-dependency-path: |
-          ${{ inputs.working-directory }}/package-lock.json
-          package-lock.json
-          npm-shrinkwrap.json
+        cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
 
     - name: Enable the npm version declared by the tooling # zizmor: ignore[adhoc-packages] -- Pinned Corepack bootstrap; npm version comes from packageManager.
       shell: bash

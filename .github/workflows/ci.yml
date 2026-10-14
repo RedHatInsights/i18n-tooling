@@ -1,7 +1,7 @@
 name: CI
 
 on:
-  # Release tags use completed branch checks; tag reruns would race release preflight.
+  # Release tags reuse the branch checks of the tagged commit; a tag run would race the release eligibility check.
   push:
     branches: ["**"]
   pull_request:
