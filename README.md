@@ -70,7 +70,7 @@ npm ci
 npm run check
 ```
 
-Standard CI jobs read `.nvmrc`, including the primary Node 22 rows in the typecheck, test, build, and CLI smoke matrices. Node 24 rows and packed-consumer checks on the minimum Node 22.14 runtime remain explicit compatibility tests. Parity jobs install development dependencies under `.nvmrc` before switching to the consumer runtime. CI also checks coverage thresholds, source-built CLI behavior, schemas, reusable workflow behavior, and GitHub Actions security.
+CI tests Node from `.nvmrc` and Node 24 in separate typecheck, test, and build jobs. It also checks coverage thresholds, source-built CLI behavior, schemas, reusable workflow behavior, packed installs, and GitHub Actions security.
 
 The package CLI is compiled to Node-compatible ESM:
 

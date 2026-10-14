@@ -197,4 +197,4 @@ Add a package script, configure `i18n/catalog-validation.json` as described abov
 }
 ```
 
-For editor feedback, install `@redhat-cloud-services/eslint-plugin-i18n` and its required `eslint-plugin-formatjs@8.1.0` peer as development dependencies, and spread `i18n.configs.source` into your ESLint flat config. Set the catalog rule's `catalog` option to your source catalog and supply your own TypeScript/JSX parser. See the [complete editor config](../eslint-plugin-i18n/README.md#npm-consumers-after-the-first-release). Editor lint uses consumer configuration; `validate-ci` keeps its own pinned lint runtime.
+For editor feedback, see the [ESLint plugin setup](../eslint-plugin-i18n/README.md#npm-consumers-after-the-first-release).

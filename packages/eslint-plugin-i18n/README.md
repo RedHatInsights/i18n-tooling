@@ -26,20 +26,10 @@ export default [
 
 ## npm consumers (after the first release)
 
-Install as development dependencies:
+Install with its FormatJS peer, which is required even for `configs.recommended` (Node.js 22.14+, ESLint 9 or 10):
 
 ```bash
-npm install --save-dev @redhat-cloud-services/eslint-plugin-i18n eslint-plugin-formatjs@8.1.0 eslint@9 @redhat-cloud-services/i18n-pipeline
-```
-
-The FormatJS peer is required. The plugin adds no runtime dependency; the peer must be resolvable even when using `configs.recommended`. Node.js 22.14+ is the supported runtime, including the CommonJS entry point, which loads the ESM FormatJS peer through Node's require(ESM) support. ESLint 9 or 10 is required by that peer. Add a package script:
-
-```json
-{
-  "scripts": {
-    "translations:validate": "i18n-pipeline validate-ci --mode error"
-  }
-}
+npm install --save-dev @redhat-cloud-services/eslint-plugin-i18n eslint-plugin-formatjs@8.1.0 eslint@9
 ```
 
 For editor feedback, spread `configs.source` into `eslint.config.mjs`, then set your catalog path. Supply your own parser for TypeScript and JSX:
@@ -66,4 +56,4 @@ export default [
 ];
 ```
 
-Install `typescript-eslint` as a development dependency when using that parser. The preset includes the catalog rule and the same nine FormatJS rules and severities as the repository source config: four ICU correctness errors and five translatability warnings. It supplies plugins and rules, leaving parsing to the consumer. `configs.recommended` still supplies only the catalog rule. Configure the CLI using the [pipeline validation instructions](../i18n-pipeline/README.md#ci-validation-command); editor configuration does not change CLI validation.
+`configs.source` adds the catalog rule plus the nine FormatJS rules and severities that `validate-ci` uses; parsing is left to you (`typescript-eslint` above). `configs.recommended` adds only the catalog rule. For CI validation, see the [CLI instructions](../i18n-pipeline/README.md#npm-consumers-after-the-first-release).

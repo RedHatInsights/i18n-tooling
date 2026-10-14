@@ -17,9 +17,9 @@ npm run check
 npm run test:coverage
 ```
 
-Corepack's npm shim is opt-in: plain `corepack enable` does not enable npm. Repository CI shares `.github/actions/setup-environment`, which reads the tooling checkout's `.nvmrc` and `packageManager`, uses built-in npm download caching for ordinary jobs, and disables caching for privileged jobs. Containers read the same npm pin from the manifest; no npm version is duplicated in setup commands.
+Plain `corepack enable` does not enable npm; enable its npm shim explicitly as above.
 
-When changing dependencies, run `npm install` to update `package-lock.json`, then verify a clean `npm ci` succeeds. Bun and pnpm remain supported for consumers; CI verifies packed installations with all three package managers. Run `npm run smoke:cli` and `npm run check:schemas` when changing CLI behavior or schemas. CI uses `.nvmrc` for its primary runtime and exercises Node 24 separately. Parity jobs install the full development dependency graph with `.nvmrc` before testing packed consumers on Node 22.14 and 24; development-only dependency engines do not redefine the published runtime minimum. CI enforces workspace test coverage thresholds and runs Markdown, link, spelling, dependency, and GitHub Actions security checks.
+When changing dependencies, run `npm install` to update `package-lock.json`. Run `npm run smoke:cli` and `npm run check:schemas` when changing CLI behavior or schemas. CI tests Node from `.nvmrc` and Node 24, checks packed installs with npm, Bun and pnpm, and runs coverage, Markdown, link, spelling, dependency, and GitHub Actions security checks.
 
 Use `npm run format` to apply formatting.
 
