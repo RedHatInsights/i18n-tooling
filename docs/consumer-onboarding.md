@@ -78,7 +78,7 @@ After the pilot round trip, restore the triggers from the [example callers](../e
 - **Reconcile** runs on a schedule. Pick your own minute, away from the top of the hour. Scheduled workflows run from the default branch only.
 - Keep `workflow_dispatch` on both. The submit dispatch offers `retry-failed` for a batch that failed in Phrase.
 - Restrict the Phrase environment's deployment refs to the default branch, and do not add required reviewers.
-- Replace a personal Platform API token with a Phrase Service Account (`PHRASE_SERVICE_ACCOUNT_CLIENT_ID` and `PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET`). Remove the old secret; the run fails when both kinds are set.
+- Move `PHRASE_PLATFORM_API_TOKEN` from a person's account to a dedicated technical user, limited to the business unit that owns the Phrase project. A Phrase Service Account is not an option for submit: its bot user [cannot create jobs](https://support.phrase.com/hc/en-us/articles/29488404284316-Service-Accounts). See [Phrase credentials](../README.md#phrase-tms-round-trip).
 - **Trap: an environment with required reviewers.** A scheduled run then waits for approval and never starts on its own.
 - **Trap: nobody sees a failed schedule.** GitHub notifies only the person who last edited the workflow's `cron` line. Agree who watches the Actions tab, or add your own notification step to the caller.
 - **Trap: schedules stop in quiet repositories.** GitHub disables scheduled workflows in a public repository after 60 days without activity. Re-enable the workflow in the Actions tab.
