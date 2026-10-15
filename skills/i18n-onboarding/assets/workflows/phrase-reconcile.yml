@@ -1,6 +1,9 @@
 name: Phrase reconcile
 
 on:
+  # Scheduled runs use the default branch only. Pick your own minute, away from the top of the hour.
+  schedule:
+    - cron: "23 6,14 * * 1-5"
   workflow_dispatch:
 
 permissions: {}
