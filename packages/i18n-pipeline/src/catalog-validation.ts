@@ -13,7 +13,7 @@ import {
   type FeoCatalog,
 } from "./feo-template.js";
 import { describeArgumentMismatch, lintSourceCatalog, lintTargetCatalog } from "./icu-lint.js";
-import { parsePhraseTmsConfig } from "./phrase-config.js";
+import { parsePhraseTmsConfig, targetAdapterId } from "./phrase-config.js";
 import type {
   AdapterContext,
   Catalog,
@@ -444,7 +444,7 @@ async function loadTmsCheck(projectRoot: string, path: string): Promise<PlannedC
     },
     targets: workflow.targetLocales.map((target) => ({
       path: target.outputPath,
-      adapter: workflow.targetAdapter ?? sourceCatalog.adapter,
+      adapter: targetAdapterId(workflow),
       locale: target.repositoryLocale,
       ...(workflow.targetOptions ? { options: workflow.targetOptions } : {}),
       optional: true,

@@ -25,7 +25,7 @@ import {
 } from "./index.js";
 import { GitHubPhraseRepository } from "./github-phrase-repository.js";
 import { PhraseClient, type PhraseClientOptions } from "./phrase-client.js";
-import { parsePhraseTmsConfig } from "./phrase-config.js";
+import { parsePhraseTmsConfig, targetAdapterId } from "./phrase-config.js";
 import { PhraseWorkflow, type PhraseReconcileResult } from "./phrase-workflow.js";
 import {
   extractFeoCatalog,
@@ -423,7 +423,7 @@ async function runTmsCommand(
   );
   const catalogAdapters = builtInCatalogAdapters([
     parsed.workflow.sourceCatalog.adapter,
-    parsed.workflow.targetAdapter ?? parsed.workflow.sourceCatalog.adapter,
+    targetAdapterId(parsed.workflow),
   ]);
   const credentials = phraseCredentials(options.env);
   const githubToken = options.env.GITHUB_TOKEN;
