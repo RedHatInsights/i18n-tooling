@@ -130,7 +130,7 @@ Project validation can run these checks from a `feo` config section, where each 
 
 The reusable Phrase workflows submit one validated source catalog and reconcile completed target jobs into ordinary locale-specific pull requests:
 
-- `.github/workflows/phrase-submit.yml` exposes `workflow_call` for manual source submission.
+- `.github/workflows/phrase-submit.yml` exposes `workflow_call` for source submission on merge or by hand.
 - `.github/workflows/phrase-reconcile.yml` exposes `workflow_call` for scheduled or manual reconciliation.
 - `i18n-pipeline tms submit --config <path>` validates and submits the pinned source revision. The PR base defaults to the pushed or dispatched branch; pull-request and tag runs must pass `--base-ref` (reusable-workflow input `base-ref`).
 - `i18n-pipeline tms reconcile --config <path>` reads durable batch state, waits for each locale's final Phrase workflow step to reach `COMPLETED`, downloads and validates the target catalog, and opens or updates one PR per locale.
@@ -164,8 +164,8 @@ Set `sourceCatalog.importSettingsUid` or `useProjectFileImportSettings` when the
 
 Phrase credentials come from one of two secret sets. The CLI chooses by **which secret names are set**; it never inspects a value to guess its kind, so a value stored under the wrong name is sent with the wrong login flow and Phrase rejects it:
 
-- **Service Account (preferred for automation):** `PHRASE_SERVICE_ACCOUNT_CLIENT_ID` and `PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET`, used with the OAuth client-credentials grant. A Phrase organization admin creates the account under Organization Settings → Service Accounts; the secret is shown once. The account is not tied to a person, but it cannot own projects, and job creation by a service account still needs one verified test job in the target project.
-- **User token:** `PHRASE_PLATFORM_API_TOKEN`, a Platform API token from Settings → Profile → Access tokens, exchanged for a short-lived access token. It carries that user's full permissions, expires after two years, and stops working if the user is deactivated.
+- **User token (required for submit):** `PHRASE_PLATFORM_API_TOKEN`, a Platform API token from Settings → Profile → Access tokens, exchanged for a short-lived access token. It carries that user's full permissions, expires after two years, and stops working if the user is deactivated. Use a dedicated technical user rather than a person's account, with the Project Manager role limited to the business unit that owns the Phrase project (projects, templates, translation memories and term bases) and without user-management or global-settings rights. A person's token is acceptable for a pilot.
+- **Service Account:** `PHRASE_SERVICE_ACCOUNT_CLIENT_ID` and `PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET`, used with the OAuth client-credentials grant. A Phrase organization admin creates the account under Organization Settings → Service Accounts; the secret is shown once. Its bot user [cannot create jobs or projects](https://support.phrase.com/hc/en-us/articles/29488404284316-Service-Accounts), so `tms submit` cannot use it. `tms reconcile` only reads jobs and downloads targets; whether a service account may do that is not verified.
 
 Selection rules (unset reusable-workflow secrets arrive empty and count as not set):
 
@@ -177,24 +177,11 @@ Selection rules (unset reusable-workflow secrets arrive empty and count as not s
 | Only one service-account secret             | Fails before any request                                         |
 | None                                        | Fails before any request                                         |
 
-Each `tms` run logs the chosen kind, for example `Phrase auth: service account (PHRASE_SERVICE_ACCOUNT_CLIENT_ID/_SECRET)`, never the value. If Phrase rejects the credentials, the error names the kind that was tried, for example `Phrase Platform OAuth returned HTTP 401 for the service account credentials`. To switch from the user token to a service account, add both service-account secrets and delete `PHRASE_PLATFORM_API_TOKEN` in the same change.
+Each `tms` run logs the chosen kind, for example `Phrase auth: service account (PHRASE_SERVICE_ACCOUNT_CLIENT_ID/_SECRET)`, never the value. If Phrase rejects the credentials, the error names the kind that was tried, for example `Phrase Platform OAuth returned HTTP 401 for the service account credentials`. To switch credential kinds, add the new secrets and delete the old ones in the same change.
 
 Put the secrets in a protected Actions environment and pass that environment as the reusable-workflow `environment` input. A caller may instead map repository/organization secrets to the same workflow-call secret names (GitHub secret names are case-insensitive). The CLI rejects credential-like keys (for example `apiToken`, `api_key`, `clientSecret`) anywhere in the config so tokens cannot enter batch-state files; the JSON schema does not enforce this. GitHub PR and state operations use the run's `GITHUB_TOKEN`, with `contents: write` and (for reconciliation) `pull-requests: write`; no personal GitHub token is used.
 
-A consumer owns the trigger and pins the reusable workflow to a reviewed commit. Example manual caller:
-
-```yaml
-on:
-  workflow_dispatch:
-jobs:
-  submit:
-    uses: RedHatInsights/i18n-tooling/.github/workflows/phrase-submit.yml@<reviewed-commit-sha>
-    with:
-      config-path: .github/i18n/phrase-tms.json
-      environment: phrase-pilot
-    permissions:
-      contents: write
-```
+A consumer owns the triggers and pins the reusable workflows to a reviewed commit. Start from the [example callers](examples/phrase-consumer/.github/workflows/): submit runs when a merge changes the source catalog or the Phrase config, reconcile runs on a schedule, and both can be dispatched by hand.
 
 Put the Phrase secrets in the consumer's `phrase-pilot` Actions environment; the called job binds to that environment. If using repository/organization secrets instead, explicitly map them, for example `secrets: { PHRASE_SERVICE_ACCOUNT_CLIENT_ID: ${{ secrets.<id-name> }}, PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET: ${{ secrets.<secret-name> }} }`—never use `secrets: inherit`. The consumer's reconciliation caller should use the same `environment` and grant `contents: write` plus `pull-requests: write`; a schedule belongs in that consumer repository and runs from its default branch only.
 
@@ -209,6 +196,8 @@ Submission and reconciliation use separate concurrency groups, so a queued recon
 **Manual recovery for an ambiguous submission:** Do not rerun an `unknown`/stalled `creating` batch blindly. Inspect the exact Phrase project and job. If the job exists, edit only its JSON record (`<state.directory>/<batch-key>.json` on the configured state branch): preserve its key/config/source fields, add the verified `importAsyncRequestId` and complete `jobs` array (`uid`, `targetLang`, and `workflowLevel` for every job part), and set `phase` to `importing`. Rerun `tms submit` to resume import polling without creating another job. Delete only that exact state record if authoritative Phrase inspection confirms no job was created; then retry. If the remote outcome is uncertain, stop. No recovery CLI exists yet.
 
 **GitHub Actions caveat:** PRs opened with `GITHUB_TOKEN` can trigger `pull_request` workflows for `opened`, `synchronize`, or `reopened`, but GitHub holds those runs for maintainer approval. Do not assume generated PRs will have automatically running/passing consumer checks; see [GitHub's token-trigger behavior](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow). This implementation deliberately does not replace `GITHUB_TOKEN` with a PAT or auto-merge PRs.
+
+**Konflux caveat:** Konflux checks run through Pipelines-as-Code, which normally needs an `/ok-to-test` comment for a pull request whose author is not a collaborator or organization member. Locale branches live in the consumer repository rather than a fork, and Pipelines-as-Code authorizes such same-repository pull requests regardless of the author, so locale PRs from `github-actions[bot]` are expected to start Konflux checks on their own. This is not yet confirmed on a live locale PR; check it in the pilot round trip. If a locale PR shows no Konflux check, or one stays `Pending`, a repository collaborator or a user listed in the default branch's `OWNERS` file starts it by commenting `/ok-to-test`; see [Pipelines-as-Code ACL permissions](https://pipelinesascode.com/docs/guides/running-pipelines/).
 
 The reusable workflows are generic; they do not add `rbac-ui` configuration or schedule wiring. Live Phrase job creation and secret setup remain explicit acceptance steps.
 
@@ -282,7 +271,7 @@ Install a package that default-exports an object implementing `CatalogAdapter`, 
 }
 ```
 
-The plugin implements `read(document, context) -> Catalog` and `write(catalog, context) -> document`. Optional `parseDocument(content, context) -> document` and `serializeDocument(document, context) -> string` methods own non-JSON file formats; when omitted, the CLI uses JSON parsing and formatted JSON output. `context` provides locale, source/target role, and options from the optional JSON `catalog-config` path. The configured ID must match the plugin's exported `id`. Custom modules are installed by the consumer; workflow inputs never select package names or shell code. A bare package specifier must be resolvable with `require.resolve` from the consumer root, through a package `main` field or an `exports` entry with a `require` or `default` condition.
+The plugin implements `read(document, context) -> Catalog` and `write(catalog, context) -> document`. Optional `parseDocument(content, context) -> document` and `serializeDocument(document, context) -> string` methods own non-JSON file formats; when omitted, the CLI uses JSON parsing and formatted JSON output. `context` provides locale, source/target role, and options from the optional JSON `catalog-config` path. The configured ID must match the plugin's exported `id`. Custom modules are installed by the consumer; workflow inputs never select package names or shell code. The [package guide](packages/i18n-pipeline/README.md#custom-adapters) covers how bare package specifiers resolve and why the `tms` commands load only built-in adapters.
 
 See [the architecture guide](docs/architecture.md) for the normalized model and the separation between framework, catalog-format, and TMS-provider integrations.
 

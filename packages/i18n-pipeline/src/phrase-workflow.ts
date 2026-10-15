@@ -10,7 +10,7 @@ import {
   PhraseTransportError,
 } from "./phrase-client.js";
 import type { CreatePhraseJobInput, PhraseJobCreation, PhraseJobPart } from "./phrase-client.js";
-import { validatePhraseWorkflowConfig } from "./phrase-config.js";
+import { targetAdapterId, validatePhraseWorkflowConfig } from "./phrase-config.js";
 
 export type LocaleCompletionPolicy = "per-locale" | "all-locales";
 
@@ -412,8 +412,7 @@ export class PhraseWorkflow {
       throw new PhraseWorkflowError(`Source catalog is not valid ${format}: ${detail}`);
     }
     sourceAdapter.read(sourceDocument, sourceContext);
-    const targetAdapter = input.config.targetAdapter ?? input.config.sourceCatalog.adapter;
-    this.dependencies.catalogAdapters.get(targetAdapter);
+    this.dependencies.catalogAdapters.get(targetAdapterId(input.config));
 
     const sourceDigest = digest(input.sourceBytes);
     const pinnedSourceBytes = await this.dependencies.repository.readFile(
@@ -617,9 +616,7 @@ export class PhraseWorkflow {
     const sourceAdapter = this.dependencies.catalogAdapters.get(
       record.config.sourceCatalog.adapter,
     );
-    const targetAdapter = this.dependencies.catalogAdapters.get(
-      record.config.targetAdapter ?? record.config.sourceCatalog.adapter,
-    );
+    const targetAdapter = this.dependencies.catalogAdapters.get(targetAdapterId(record.config));
     let sourceCatalog: Catalog;
     try {
       const context = {

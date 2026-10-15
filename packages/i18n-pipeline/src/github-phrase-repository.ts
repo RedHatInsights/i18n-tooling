@@ -38,6 +38,15 @@ export class GitHubRepositoryError extends PhraseRepositoryError {
   }
 }
 
+// Both are fixed outside the run (workflow permissions, token rotation), then a rerun succeeds.
+const TOKEN_HINTS: ReadonlyMap<number, string> = new Map([
+  [401, ": the token is missing, expired or revoked"],
+  [
+    403,
+    ": the token may not make this request; state and locale branches need contents: write, pull requests need pull-requests: write",
+  ],
+]);
+
 function encodePath(path: string): string {
   return path.split("/").map(encodeURIComponent).join("/");
 }
@@ -393,7 +402,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     }
     if (!response.ok && !(allowNotFound && response.status === 404)) {
       throw new GitHubRepositoryError(
-        `GitHub API returned HTTP ${response.status}`,
+        `GitHub API returned HTTP ${response.status}${TOKEN_HINTS.get(response.status) ?? ""}`,
         response.status,
       );
     }

@@ -57,15 +57,46 @@ Copy the callers from [`examples/phrase-consumer`](../examples/phrase-consumer/.
 
 ## 6. Pilot Phrase from a feature branch
 
-- Pilot runs usually happen on a feature branch before the callers land on the default branch. Temporarily point each caller's branch guard (`if: github.ref == …`) and the submit `base-ref` at the pilot branch, and allow that branch in the `phrase-pilot` environment's deployment refs. Mark each change with `FIXME` and restore the default branch before merge.
+- Run the pilot from its branch; nothing has to merge to the default branch first. GitHub starts `workflow_dispatch` and `schedule` only from workflows on the default branch, but a `push` runs the caller from the pushed branch. On the pilot branch, point the submit caller's `push.branches` at the pilot branch, give the reconcile caller the same `push` trigger in place of `schedule`, and mark both changes with `FIXME`.
+- A push that changes the source catalog or the Phrase config runs submit; every push runs reconcile, so `git commit --allow-empty` and a push polls Phrase again. Locale pull requests target the pilot branch, because `base-ref` defaults to the pushed branch.
+- Allow the pilot branch in the `phrase-pilot` environment's deployment refs during the pilot. Before merging, restore the triggers from the example callers and remove the pilot branch from the deployment refs.
 - Store credentials only in the protected environment. Check the `Phrase auth:` line in the job log.
 - Configure the Phrase project to translate `defaultMessage`, keep `description` as context, and parse ICU.
+- **Trap: custom adapters stop at Phrase.** `tms submit` and `tms reconcile` run with the Phrase credentials and a GitHub token that can write, so they load only the [built-in adapters](../packages/i18n-pipeline/README.md#built-in-adapters). A Phrase config that names a custom adapter fails before any request is made. `validate-project` and `convert` still load custom adapters, so keep the file Phrase reads and writes in a built-in format and convert it in the consumer's own build.
 
 **Done when:** submit creates jobs, reconcile opens a per-locale PR, and that PR's validation job passes.
 
 ## 7. Confirm what users actually see
 
 A delivered catalog is not a live locale. rbac-ui's `src/locales/locale.ts` always returns `en`, so translated catalogs ship but never display. Treat runtime locale selection as its own product change, with its own tests.
+
+## 8. Turn on the merge and schedule triggers
+
+After the pilot round trip, restore the triggers from the [example callers](../examples/phrase-consumer/.github/workflows/) so nobody has to dispatch a run:
+
+- **Submit** runs on a push to the default branch that changes the source catalog or the Phrase config. List exactly those two paths under `paths`. A rerun for unchanged source reuses its batch instead of creating a second Phrase job. A config change that Phrase sees, such as adding a target locale, submits a new batch for every locale; see [how batches are keyed](../README.md#phrase-tms-round-trip).
+- **Reconcile** runs on a schedule. Pick your own minute, away from the top of the hour. Scheduled workflows run from the default branch only.
+- Keep `workflow_dispatch` on both. The submit dispatch offers `retry-failed` for a batch that failed in Phrase.
+- Restrict the Phrase environment's deployment refs to the default branch, and do not add required reviewers.
+- Move `PHRASE_PLATFORM_API_TOKEN` from a person's account to a dedicated technical user, limited to the business unit that owns the Phrase project. A Phrase Service Account is not an option for submit: its bot user [cannot create jobs](https://support.phrase.com/hc/en-us/articles/29488404284316-Service-Accounts). See [Phrase credentials](../README.md#phrase-tms-round-trip).
+- **Trap: an environment with required reviewers.** A scheduled run then waits for approval and never starts on its own.
+- **Trap: nobody sees a failed schedule.** GitHub notifies only the person who last edited the workflow's `cron` line. Agree who watches the Actions tab, or add your own notification step to the caller.
+- **Trap: schedules stop in quiet repositories.** GitHub disables scheduled workflows in a public repository after 60 days without activity. Re-enable the workflow in the Actions tab.
+- **Trap: locale pull request checks.** GitHub Actions holds checks on a pull request opened with `GITHUB_TOKEN` until a maintainer approves them. Konflux checks are expected to start on their own, which the pilot has to confirm; when one does not, a repository collaborator comments `/ok-to-test`. See the [GitHub Actions and Konflux caveats](../README.md#phrase-tms-round-trip), and agree who watches new locale pull requests.
+
+**Done when:** a merge that changes a message starts submit on its own, a merge that does not touch the catalog starts nothing, and the next scheduled reconcile runs without waiting for approval.
+
+## Rolling back
+
+Stop the automation first, then decide what to keep.
+
+1. Disable the two caller workflows in the Actions tab, or remove their `push` and `schedule` triggers. Nothing runs after that.
+2. Keep the state branch (`i18n-tms-state` in the example). Never delete it or its records. It is the only record of which Phrase jobs exist. Without it the next submit creates a new Phrase job for a source that was already sent, translators receive duplicate work, and reconcile no longer knows about the jobs in progress.
+3. Leave open locale pull requests open, or merge them. Closing one without merging fails that locale for its batch for good. To recover, reopen the pull request or delete its branch, then run submit with `retry-failed`.
+4. Phrase jobs keep running. The tooling never cancels them. Cancel in Phrase the ones you no longer want; a cancelled job is recorded as a failed locale on the next reconcile.
+5. To return to an earlier tooling version, pin `uses:` back to the previous reviewed commit SHA.
+
+To resume, enable the workflows again. Reconcile continues from the stored state and submit skips sources it has already sent.
 
 ## Agent prompt
 

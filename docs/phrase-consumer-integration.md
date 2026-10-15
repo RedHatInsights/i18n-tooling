@@ -13,8 +13,8 @@ The checked-in example files:
 
 - [Phrase config](../examples/phrase-consumer/.github/i18n/phrase-tms.json)
 - [Catalog validation config](../examples/phrase-consumer/.github/i18n/catalog-validation.json)
-- [Manual submit caller](../examples/phrase-consumer/.github/workflows/phrase-submit.yml)
-- [Manual reconcile caller](../examples/phrase-consumer/.github/workflows/phrase-reconcile.yml)
+- [Submit caller: on merge, or by hand](../examples/phrase-consumer/.github/workflows/phrase-submit.yml)
+- [Reconcile caller: scheduled, or by hand](../examples/phrase-consumer/.github/workflows/phrase-reconcile.yml)
 - [Locale PR validation caller](../examples/phrase-consumer/.github/workflows/locale-validation.yml)
 - [Locale aggregation script](../examples/phrase-consumer/scripts/assemble-locales.mjs)
 
@@ -33,9 +33,9 @@ The sample aggregation script models the important contract in rbac-ui's existin
 ## GitHub setup
 
 1. Copy the caller workflows and config into the consumer repository. Replace `<reviewed-commit-sha>` with the reviewed `i18n-tooling` commit SHA and update the Phrase UID, region, language mapping, and output path.
-2. Land the manual `workflow_dispatch` caller files on the consumer's default branch before dispatching. Keep scheduling disabled during the pilot.
-3. Add the Phrase credentials to the named protected environment: `PHRASE_SERVICE_ACCOUNT_CLIENT_ID` and `PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET` for a Service Account (preferred), or `PHRASE_PLATFORM_API_TOKEN` for a user's Platform token (fine for a pilot). The CLI chooses by which secret names are set, not by inspecting values; setting both kinds fails the run before any request. Check the `Phrase auth:` line in the job log to confirm which kind was used. Place them in the environment (sample: `phrase-pilot`) and restrict its allowed deployment refs. The workflows use `GITHUB_TOKEN`: submission needs `contents: write`; reconciliation also needs `pull-requests: write`. Do not add a PAT or put credentials in the config.
-4. Confirm locale PR checks run. GitHub can hold checks started by `GITHUB_TOKEN` PRs for maintainer approval.
+2. Run the first pilot round trip from a branch as in [consumer onboarding step 6](consumer-onboarding.md#6-pilot-phrase-from-a-feature-branch), then land the caller files on the consumer's default branch with the merge and schedule triggers as in [step 8](consumer-onboarding.md#8-turn-on-the-merge-and-schedule-triggers).
+3. Add the Phrase credential to the named protected environment: `PHRASE_PLATFORM_API_TOKEN`, a Platform API token of a dedicated technical user (a person's token is fine for a pilot). Phrase Service Accounts (`PHRASE_SERVICE_ACCOUNT_CLIENT_ID` and `PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET`) [cannot create jobs](https://support.phrase.com/hc/en-us/articles/29488404284316-Service-Accounts), so submit cannot use them. The CLI chooses by which secret names are set, not by inspecting values; setting both kinds fails the run before any request. Check the `Phrase auth:` line in the job log to confirm which kind was used. Place them in the environment (sample: `phrase-pilot`) and restrict its allowed deployment refs to the default branch. The workflows use `GITHUB_TOKEN`: submission needs `contents: write`; reconciliation also needs `pull-requests: write`. Do not add a PAT or put credentials in the config.
+4. Confirm locale PR checks run; see the [GitHub Actions and Konflux caveats](../README.md#phrase-tms-round-trip).
 
 For rbac-ui, the existing source path and `translations:datafile` aggregation fit this shape. The repository currently has no target locale JSON files, `src/locales/data.json` contains only `en`, and `src/locales/locale.ts` is hard-coded to `en`. A Phrase PR can add a locale catalog and the aggregate can include it, but users will not see that locale until rbac-ui wires its runtime locale selection. Keep that runtime change separate if the first pilot only tests catalog delivery.
 

@@ -32,7 +32,7 @@ on:
       PHRASE_PLATFORM_API_TOKEN:
         description: A user's Phrase Platform API token; prefer an environment secret over explicit mapping
         required: false
-      # Preferred for automation: a Phrase Platform Service Account, not tied to a person.
+      # A Phrase Platform Service Account. Its bot user cannot create jobs, so submit cannot use it.
       # Set both of these instead of PHRASE_PLATFORM_API_TOKEN, never alongside it.
       PHRASE_SERVICE_ACCOUNT_CLIENT_ID:
         description: Phrase Platform Service Account client ID

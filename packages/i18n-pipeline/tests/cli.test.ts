@@ -688,6 +688,73 @@ objects:
     expect(calls).toEqual([]);
   });
 
+  it("never imports consumer adapter modules in TMS commands", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-adapters-"));
+    await writeFile(
+      join(projectRoot, "package.json"),
+      JSON.stringify({
+        i18nTooling: { catalogAdapters: { "wrapped-json": "./wrapped-adapter.mjs" } },
+      }),
+    );
+    await writeFile(
+      join(projectRoot, "wrapped-adapter.mjs"),
+      `import { writeFileSync } from "node:fs";
+      writeFileSync(new URL("./adapter-loaded.marker", import.meta.url), "loaded");
+      export default { id: "wrapped-json", read() { return { locale: "en", messages: {} }; }, write() { return {}; } };`,
+    );
+    const config = (adapter: string) =>
+      JSON.stringify({
+        provider: "phrase",
+        project: { uid: "project-uid", region: "us" },
+        sourceCatalog: { path: "locales/en.json", adapter, locale: "en" },
+        targetLocales: [
+          { phraseLocale: "fr", repositoryLocale: "fr", outputPath: "locales/fr.json" },
+        ],
+      });
+    await writeFile(join(projectRoot, "built-in.json"), config("formatjs-json"));
+    await writeFile(join(projectRoot, "custom.json"), config("wrapped-json"));
+    const env = {
+      PHRASE_PLATFORM_API_TOKEN: "protected-phrase-token",
+      GITHUB_TOKEN: "run-token",
+      GITHUB_REPOSITORY: "example/app",
+    };
+    const calls: string[] = [];
+    const fetch: typeof globalThis.fetch = async (input) => {
+      calls.push(input instanceof Request ? input.url : String(input));
+      return new Response("{}", { status: 404 });
+    };
+
+    // A declared adapter that the TMS config does not use must still not run.
+    expect(
+      await runCli(["tms", "reconcile", "--config", "built-in.json"], {
+        cwd: projectRoot,
+        env,
+        fetch,
+        stdout: () => undefined,
+        stderr: () => undefined,
+      }),
+    ).toBe(0);
+
+    calls.length = 0;
+    const errors: string[] = [];
+    const exitCode = await runCli(["tms", "reconcile", "--config", "custom.json"], {
+      cwd: projectRoot,
+      env,
+      fetch,
+      stdout: () => undefined,
+      stderr: (message) => errors.push(message),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(errors[0]).toContain(
+      'TMS commands load only built-in catalog adapters (formatjs-json, icu-json, openapi-problem-details); "wrapped-json" is a custom adapter',
+    );
+    expect(calls).toEqual([]);
+    await expect(readFile(join(projectRoot, "adapter-loaded.marker"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   it("passes JSON adapter config to a dynamically loaded plugin", async () => {
     projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-plugin-"));
     await mkdir(join(projectRoot, "locales"));

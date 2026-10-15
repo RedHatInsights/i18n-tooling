@@ -106,6 +106,14 @@ export function validateRepoPath(path: string, label: string): void {
   }
 }
 
+/**
+ * Target catalogs use the source adapter unless the config names another. Stored batch configs
+ * keep `targetAdapter` optional, so resolve it here rather than when parsing.
+ */
+export function targetAdapterId(config: PhraseWorkflowConfig): string {
+  return config.targetAdapter ?? config.sourceCatalog.adapter;
+}
+
 /** Semantic checks shared by the CLI and direct `PhraseWorkflow` callers. */
 export function validatePhraseWorkflowConfig(config: PhraseWorkflowConfig): void {
   rejectCredentialFields(config);

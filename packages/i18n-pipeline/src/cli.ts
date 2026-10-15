@@ -5,6 +5,8 @@ import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
+  BUILT_IN_CATALOG_ADAPTER_IDS,
+  CatalogAdapterRegistry,
   CatalogFormatError,
   checkCatalogs as compareCatalogs,
   convertCatalog as convertCatalogDocument,
@@ -23,7 +25,7 @@ import {
 } from "./index.js";
 import { GitHubPhraseRepository } from "./github-phrase-repository.js";
 import { PhraseClient, type PhraseClientOptions } from "./phrase-client.js";
-import { parsePhraseTmsConfig } from "./phrase-config.js";
+import { parsePhraseTmsConfig, targetAdapterId } from "./phrase-config.js";
 import { PhraseWorkflow, type PhraseReconcileResult } from "./phrase-workflow.js";
 import {
   extractFeoCatalog,
@@ -389,6 +391,19 @@ function phraseCredentials(
   return { platformApiToken };
 }
 
+// TMS commands run with Phrase and GitHub write credentials, so they never import() the adapter
+// modules a consumer declares in package.json.
+function builtInCatalogAdapters(adapterIds: string[]): CatalogAdapterRegistry {
+  for (const adapterId of adapterIds) {
+    if (!BUILT_IN_CATALOG_ADAPTER_IDS.includes(adapterId)) {
+      throw new Error(
+        `TMS commands load only built-in catalog adapters (${BUILT_IN_CATALOG_ADAPTER_IDS.join(", ")}); "${adapterId}" is a custom adapter and cannot run with Phrase and GitHub credentials`,
+      );
+    }
+  }
+  return new CatalogAdapterRegistry();
+}
+
 async function runTmsCommand(
   command: "submit" | "reconcile",
   args: string[],
@@ -406,6 +421,10 @@ async function runTmsCommand(
   const parsed = parsePhraseTmsConfig(
     await readJson(resolve(options.cwd, configPath), "TMS config"),
   );
+  const catalogAdapters = builtInCatalogAdapters([
+    parsed.workflow.sourceCatalog.adapter,
+    targetAdapterId(parsed.workflow),
+  ]);
   const credentials = phraseCredentials(options.env);
   const githubToken = options.env.GITHUB_TOKEN;
   if (!githubToken)
@@ -432,7 +451,6 @@ async function runTmsCommand(
     ...(options.env.GITHUB_API_URL ? { apiUrl: options.env.GITHUB_API_URL } : {}),
     fetch: options.fetch,
   });
-  const catalogAdapters = await createCatalogAdapterRegistry(options.cwd);
   const workflow = new PhraseWorkflow({
     phrase,
     state: github,
