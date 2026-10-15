@@ -22,7 +22,7 @@ Add the `translations:validate` package script during the baseline track. Until 
 
 ## Inspect before asking
 
-Read the repository's agent instructions and relevant contribution or localization docs. Then inspect the repository without asking questions or changing files:
+Read the repository's agent instructions and relevant contribution or localization docs. Then inspect the repository without asking questions or changing files. Narrate the inspection: before each check, tell the developer in one line what you are checking and why (for example, "Konflux: checking whether the pinned shared pipeline supports i18n validation"), so no command runs unexplained.
 
 - Identify the repository root, package manager, default branch, current branch, and clean or dirty status. Record existing dirty paths.
 - Find FormatJS/react-intl usage, source and target catalogs and their formats, explicit or generated message IDs, and extract, compile, and aggregate scripts.
