@@ -82,7 +82,7 @@ After the pilot round trip, restore the triggers from the [example callers](../e
 - **Trap: an environment with required reviewers.** A scheduled run then waits for approval and never starts on its own.
 - **Trap: nobody sees a failed schedule.** GitHub notifies only the person who last edited the workflow's `cron` line. Agree who watches the Actions tab, or add your own notification step to the caller.
 - **Trap: schedules stop in quiet repositories.** GitHub disables scheduled workflows in a public repository after 60 days without activity. Re-enable the workflow in the Actions tab.
-- **Trap: locale pull request checks.** GitHub Actions holds checks on a pull request opened with `GITHUB_TOKEN` until a maintainer approves them. Konflux checks should start on their own; when one does not, a repository collaborator comments `/ok-to-test`. See the [GitHub Actions and Konflux caveats](../README.md#phrase-tms-round-trip), and agree who watches new locale pull requests.
+- **Trap: locale pull request checks.** GitHub Actions holds checks on a pull request opened with `GITHUB_TOKEN` until a maintainer approves them. Konflux checks are expected to start on their own, which the pilot has to confirm; when one does not, a repository collaborator comments `/ok-to-test`. See the [GitHub Actions and Konflux caveats](../README.md#phrase-tms-round-trip), and agree who watches new locale pull requests.
 
 **Done when:** a merge that changes a message starts submit on its own, a merge that does not touch the catalog starts nothing, and the next scheduled reconcile runs without waiting for approval.
 
