@@ -26,6 +26,16 @@ on:
         required: false
         type: string
         default: ""
+      expected-phrase-project:
+        description: Expected Phrase project UID for a consumer when workflows share a Phrase credential
+        required: false
+        type: string
+        default: ""
+      expected-source-filename:
+        description: Expected Phrase source filename for a consumer when workflows share a Phrase credential
+        required: false
+        type: string
+        default: ""
     secrets:
       # Secret names are case-insensitive, so this single name covers both an environment
       # secret in `inputs.environment` and an explicitly mapped repository/organization secret.
@@ -123,6 +133,8 @@ jobs:
           PHRASE_PLATFORM_API_TOKEN: ${{ secrets.PHRASE_PLATFORM_API_TOKEN }}
           PHRASE_SERVICE_ACCOUNT_CLIENT_ID: ${{ secrets.PHRASE_SERVICE_ACCOUNT_CLIENT_ID }}
           PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET: ${{ secrets.PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET }}
+          EXPECTED_PHRASE_PROJECT: ${{ inputs.expected-phrase-project }}
+          EXPECTED_SOURCE_FILENAME: ${{ inputs.expected-source-filename }}
           GITHUB_TOKEN: ${{ steps.create-app-token.outputs.token || github.token }}
           GITHUB_API_URL: ${{ github.api_url }}
         run: |
@@ -132,5 +144,8 @@ jobs:
           else
             printf 'GitHub auth: GITHUB_TOKEN (github-actions[bot])\n'
           fi
+          set -- --repository "$TARGET_REPOSITORY"
+          if [ -n "$EXPECTED_PHRASE_PROJECT" ]; then set -- "$@" --expect-project "$EXPECTED_PHRASE_PROJECT"; fi
+          if [ -n "$EXPECTED_SOURCE_FILENAME" ]; then set -- "$@" --expect-source-filename "$EXPECTED_SOURCE_FILENAME"; fi
           node "$GITHUB_WORKSPACE/i18n-tooling-source/packages/i18n-pipeline/dist/cli.js" \
-            tms reconcile --config "$CONFIG_PATH" --repository "$TARGET_REPOSITORY"
+            tms reconcile --config "$CONFIG_PATH" "$@"

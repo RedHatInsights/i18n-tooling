@@ -122,6 +122,8 @@ describe("repository i18n contracts", () => {
           "node-version",
           "base-ref",
           "repository",
+          "expected-phrase-project",
+          "expected-source-filename",
           "retry-failed",
         ],
       },
@@ -133,7 +135,15 @@ describe("repository i18n contracts", () => {
           "permission-pull-requests": "write",
         },
         requireBaseRef: "false",
-        workflowInputs: ["config-path", "environment", "node-version", "base-ref", "repository"],
+        workflowInputs: [
+          "config-path",
+          "environment",
+          "node-version",
+          "base-ref",
+          "repository",
+          "expected-phrase-project",
+          "expected-source-filename",
+        ],
       },
     ];
 
@@ -171,6 +181,16 @@ describe("repository i18n contracts", () => {
         );
       }
       expect(workflow.on.workflow_call.inputs.repository).toMatchObject({
+        type: "string",
+        required: false,
+        default: "",
+      });
+      expect(workflow.on.workflow_call.inputs["expected-phrase-project"]).toMatchObject({
+        type: "string",
+        required: false,
+        default: "",
+      });
+      expect(workflow.on.workflow_call.inputs["expected-source-filename"]).toMatchObject({
         type: "string",
         required: false,
         default: "",
@@ -221,9 +241,17 @@ describe("repository i18n contracts", () => {
       });
       expect(cliStep.env?.GITHUB_TOKEN).toBe(tokenReference);
       expect(cliStep.env?.TARGET_REPOSITORY).toBe(targetRepository);
+      expect(cliStep.env?.EXPECTED_PHRASE_PROJECT).toBe("${{ inputs.expected-phrase-project }}");
+      expect(cliStep.env?.EXPECTED_SOURCE_FILENAME).toBe("${{ inputs.expected-source-filename }}");
       expect(cliStep.run).toContain("GitHub auth: app %s[bot]");
       expect(cliStep.run).toContain("GitHub auth: GITHUB_TOKEN (github-actions[bot])");
       expect(cliStep.run).toContain('--repository "$TARGET_REPOSITORY"');
+      expect(cliStep.run).toContain(
+        'if [ -n "$EXPECTED_PHRASE_PROJECT" ]; then set -- "$@" --expect-project "$EXPECTED_PHRASE_PROJECT"; fi',
+      );
+      expect(cliStep.run).toContain(
+        'if [ -n "$EXPECTED_SOURCE_FILENAME" ]; then set -- "$@" --expect-source-filename "$EXPECTED_SOURCE_FILENAME"; fi',
+      );
       expect(cliStep.run!.indexOf("GitHub auth:")).toBeLessThan(cliStep.run!.indexOf("node "));
       expect(steps.every((step) => !step.run?.includes("${{"))).toBe(true);
 
