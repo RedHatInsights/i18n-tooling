@@ -1,19 +1,48 @@
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { isCliEntryPoint, runCli } from "../src/cli.js";
 
 let projectRoot: string | undefined;
+let outsideRoot: string | undefined;
 
 afterEach(async () => {
   if (projectRoot) {
     await rm(projectRoot, { recursive: true, force: true });
     projectRoot = undefined;
   }
+  if (outsideRoot) {
+    await rm(outsideRoot, { recursive: true, force: true });
+    outsideRoot = undefined;
+  }
 });
+
+function phraseTmsConfig(sourceCatalogPath = "locales/en.json"): string {
+  return JSON.stringify({
+    provider: "phrase",
+    project: { uid: "project-uid", region: "us" },
+    sourceCatalog: { path: sourceCatalogPath, adapter: "formatjs-json", locale: "en" },
+    targetLocales: [{ phraseLocale: "fr", repositoryLocale: "fr", outputPath: "locales/fr.json" }],
+  });
+}
+
+function credentialTrackingEnv(reads: string[]): NodeJS.ProcessEnv {
+  const credentials = new Set([
+    "PHRASE_PLATFORM_API_TOKEN",
+    "PHRASE_SERVICE_ACCOUNT_CLIENT_ID",
+    "PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET",
+    "GITHUB_TOKEN",
+  ]);
+  return new Proxy({} as NodeJS.ProcessEnv, {
+    get: (_target, property) => {
+      if (typeof property === "string" && credentials.has(property)) reads.push(property);
+      return undefined;
+    },
+  });
+}
 
 describe("i18n-pipeline CLI", () => {
   it("recognizes itself as the entry point when started through a bin symlink", async () => {
@@ -520,6 +549,225 @@ objects:
     expect(errors[0]).toContain(
       "Set PHRASE_SERVICE_ACCOUNT_CLIENT_ID and PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET, or PHRASE_PLATFORM_API_TOKEN, as protected workflow secrets",
     );
+  });
+
+  it.each(["submit", "reconcile"] as const)(
+    "rejects a symbolic-link TMS config for %s before reading credentials",
+    async (command) => {
+      projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-config-link-"));
+      outsideRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-config-outside-"));
+      const linkedConfig = join(projectRoot, "phrase-link.json");
+      await writeFile(join(outsideRoot, "phrase.json"), "not valid JSON");
+      await symlink(join(outsideRoot, "phrase.json"), linkedConfig);
+      const credentialReads: string[] = [];
+      const errors: string[] = [];
+
+      const exitCode = await runCli(["tms", command, "--config", "phrase-link.json"], {
+        cwd: projectRoot,
+        env: credentialTrackingEnv(credentialReads),
+        stdout: () => undefined,
+        stderr: (message) => errors.push(message),
+      });
+
+      expect(exitCode).toBe(1);
+      expect(errors[0]).toContain('TMS config path "phrase-link.json" must not be a symbolic link');
+      expect(credentialReads).toEqual([]);
+    },
+  );
+
+  it("rejects a non-symlink TMS config outside the working directory before reading it", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-config-outside-root-"));
+    outsideRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-config-outside-file-"));
+    await writeFile(join(outsideRoot, "phrase.json"), "not valid JSON");
+    const configPath = relative(projectRoot, join(outsideRoot, "phrase.json"));
+    const credentialReads: string[] = [];
+    const errors: string[] = [];
+
+    const exitCode = await runCli(["tms", "reconcile", "--config", configPath], {
+      cwd: projectRoot,
+      env: credentialTrackingEnv(credentialReads),
+      stdout: () => undefined,
+      stderr: (message) => errors.push(message),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(errors[0]).toContain(
+      `TMS config path "${configPath}" resolves outside the working directory`,
+    );
+    expect(credentialReads).toEqual([]);
+  });
+
+  it("rejects a symbolic-link source catalog before reading the catalog or credentials", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-catalog-link-"));
+    outsideRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-catalog-outside-"));
+    await mkdir(join(projectRoot, "locales"));
+    await writeFile(join(projectRoot, "phrase.json"), phraseTmsConfig());
+    await writeFile(join(outsideRoot, "en.json"), "not valid JSON");
+    await symlink(join(outsideRoot, "en.json"), join(projectRoot, "locales/en.json"));
+    const credentialReads: string[] = [];
+    const errors: string[] = [];
+
+    const exitCode = await runCli(["tms", "submit", "--config", "phrase.json"], {
+      cwd: projectRoot,
+      env: credentialTrackingEnv(credentialReads),
+      stdout: () => undefined,
+      stderr: (message) => errors.push(message),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(errors[0]).toContain(
+      'Source catalog path "locales/en.json" must not be a symbolic link',
+    );
+    expect(credentialReads).toEqual([]);
+  });
+
+  it("rejects a source catalog reached through a directory symlink outside the working directory", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-catalog-dir-link-"));
+    outsideRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-catalog-dir-outside-"));
+    await writeFile(join(projectRoot, "phrase.json"), phraseTmsConfig("locales/en.json"));
+    await writeFile(join(outsideRoot, "en.json"), "not valid JSON");
+    await symlink(outsideRoot, join(projectRoot, "locales"), "dir");
+    const credentialReads: string[] = [];
+    const errors: string[] = [];
+
+    const exitCode = await runCli(["tms", "submit", "--config", "phrase.json"], {
+      cwd: projectRoot,
+      env: credentialTrackingEnv(credentialReads),
+      stdout: () => undefined,
+      stderr: (message) => errors.push(message),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(errors[0]).toContain(
+      'Source catalog path "locales/en.json" resolves outside the working directory',
+    );
+    expect(credentialReads).toEqual([]);
+  });
+
+  it("rejects source catalog parent traversal before reading credentials", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-catalog-outside-root-"));
+    outsideRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-catalog-outside-file-"));
+    await writeFile(join(outsideRoot, "en.json"), "not valid JSON");
+    const sourceCatalogPath = relative(projectRoot, join(outsideRoot, "en.json"));
+    await writeFile(join(projectRoot, "phrase.json"), phraseTmsConfig(sourceCatalogPath));
+    const credentialReads: string[] = [];
+    const errors: string[] = [];
+
+    const exitCode = await runCli(["tms", "submit", "--config", "phrase.json"], {
+      cwd: projectRoot,
+      env: credentialTrackingEnv(credentialReads),
+      stdout: () => undefined,
+      stderr: (message) => errors.push(message),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(errors[0]).toContain(
+      "Source catalog path must be a repository-relative path without parent traversal",
+    );
+    expect(credentialReads).toEqual([]);
+  });
+
+  it("submits from regular config and catalog paths inside the working directory", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-regular-paths-"));
+    await mkdir(join(projectRoot, "locales"));
+    const sourceBytes = Buffer.from(JSON.stringify({ greeting: { defaultMessage: "Hello" } }));
+    await writeFile(join(projectRoot, "locales/en.json"), sourceBytes);
+    await writeFile(join(projectRoot, "phrase.json"), phraseTmsConfig());
+    let stateRevision: string | undefined;
+    let stateWriteCount = 0;
+    const output: string[] = [];
+    const errors: string[] = [];
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.includes("/contents/locales/en.json?ref=abc123")) {
+        return new Response(
+          JSON.stringify({
+            type: "file",
+            sha: "source-sha",
+            encoding: "base64",
+            content: sourceBytes.toString("base64"),
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/contents/.github/i18n-state/batches/")) {
+        if (method === "GET") {
+          if (!stateRevision) return new Response("", { status: 404 });
+          return new Response(
+            JSON.stringify({
+              type: "file",
+              sha: stateRevision,
+              encoding: "base64",
+              content: Buffer.from("{}").toString("base64"),
+            }),
+            { status: 200 },
+          );
+        }
+        stateRevision = `state-sha-${++stateWriteCount}`;
+        return new Response(JSON.stringify({ content: { sha: stateRevision } }), { status: 200 });
+      }
+      if (url.endsWith("/git/ref/heads/i18n-tms-state")) return new Response("", { status: 404 });
+      if (url.endsWith("/git/ref/heads/main")) {
+        return new Response(JSON.stringify({ object: { sha: "base-sha" } }), { status: 200 });
+      }
+      if (url.endsWith("/git/refs") && method === "POST") {
+        return new Response("{}", { status: 201 });
+      }
+      if (url === "https://us.phrase.com/idm/oauth/token") {
+        return new Response(JSON.stringify({ access_token: "phrase-access-token" }), {
+          status: 200,
+        });
+      }
+      if (url.endsWith("/api2/v1/projects/project-uid/jobs") && method === "POST") {
+        return new Response(
+          JSON.stringify({
+            asyncRequest: { id: "import-1" },
+            jobs: [{ uid: "job-fr", targetLang: "fr", workflowLevel: 1 }],
+            unsupportedFiles: [],
+            warnings: [],
+          }),
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/api2/v1/async/import-1")) {
+        return new Response(JSON.stringify({ id: "import-1", asyncResponse: {} }), {
+          status: 200,
+        });
+      }
+      if (url.endsWith("/api2/v1/projects/project-uid/jobs/job-fr")) {
+        return new Response(
+          JSON.stringify({
+            uid: "job-fr",
+            targetLang: "fr",
+            workflowLevel: 1,
+            importStatus: { status: "OK" },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(`Unexpected request: ${method} ${url}`, { status: 500 });
+    };
+
+    const exitCode = await runCli(["tms", "submit", "--config", "phrase.json"], {
+      cwd: projectRoot,
+      env: {
+        PHRASE_PLATFORM_API_TOKEN: "platform-token",
+        GITHUB_TOKEN: "run-token",
+        GITHUB_REPOSITORY: "example/app",
+        GITHUB_REF: "refs/heads/main",
+        GITHUB_SHA: "abc123",
+      },
+      fetch,
+      stdout: (message) => output.push(message),
+      stderr: (message) => errors.push(message),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(output[0]).toBe("Phrase auth: user Platform API token (PHRASE_PLATFORM_API_TOKEN)");
+    expect(output[1]).toMatch(/^Phrase batch [a-f0-9]{64} is ready \(1 job parts\)\.$/);
+    expect(errors).toEqual([]);
   });
 
   it.each([

@@ -58,7 +58,7 @@ Copy the callers from [`examples/phrase-consumer`](../examples/phrase-consumer/.
 ## 6. Pilot Phrase from a feature branch
 
 - Run the pilot from its branch; nothing has to merge to the default branch first. GitHub starts `workflow_dispatch` and `schedule` only from workflows on the default branch, but a `push` runs the caller from the pushed branch. On the pilot branch, point the submit caller's `push.branches` at the pilot branch, give the reconcile caller the same `push` trigger in place of `schedule`, and mark both changes with `FIXME`.
-- A push that changes the source catalog or the Phrase config runs submit; every push runs reconcile, so `git commit --allow-empty` and a push polls Phrase again. Locale pull requests target the pilot branch, because `base-ref` defaults to the pushed branch.
+- A push that changes the source catalog or the Phrase config runs submit; every push runs reconcile, so `git commit --allow-empty` and a push polls Phrase again. Locale pull requests target the pilot branch because same-repository runs check out the triggering commit and the PR base defaults to the pushed branch.
 - Allow the pilot branch in the `phrase-pilot` environment's deployment refs during the pilot. Before merging, restore the triggers from the example callers and remove the pilot branch from the deployment refs.
 - Store credentials only in the protected environment. Check the `Phrase auth:` line in the job log.
 - Configure the Phrase project to translate `defaultMessage`, keep `description` as context, and parse ICU.

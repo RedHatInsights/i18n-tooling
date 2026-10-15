@@ -1,0 +1,117 @@
+name: Select GitHub authentication mode and target repository
+description: Select a GitHub token mode and resolve the consumer repository and checkout ref
+
+inputs:
+  app-client-id-set:
+    description: Whether APP_CLIENT_ID is set
+    required: true
+  app-private-key-set:
+    description: Whether APP_PRIVATE_KEY is set
+    required: true
+  repository:
+    description: Optional target repository in owner/name form
+    required: false
+    default: ""
+  base-ref:
+    description: Optional target branch
+    required: false
+    default: ""
+  require-base-ref:
+    description: Require base-ref when targeting another repository
+    required: true
+
+outputs:
+  mode:
+    description: Selected authentication mode
+    value: ${{ steps.select.outputs.mode }}
+  target-repository:
+    description: Resolved target repository
+    value: ${{ steps.select.outputs.target-repository }}
+  target-owner:
+    description: Resolved target repository owner
+    value: ${{ steps.select.outputs.target-owner }}
+  target-name:
+    description: Resolved target repository name
+    value: ${{ steps.select.outputs.target-name }}
+  cross-repository:
+    description: Whether the target differs from the calling repository
+    value: ${{ steps.select.outputs.cross-repository }}
+  checkout-ref:
+    description: Commit or branch to check out in the target repository
+    value: ${{ steps.select.outputs.checkout-ref }}
+
+runs:
+  using: composite
+  steps:
+    - id: select
+      shell: bash
+      env:
+        APP_CLIENT_ID_SET: ${{ inputs.app-client-id-set }}
+        APP_PRIVATE_KEY_SET: ${{ inputs.app-private-key-set }}
+        TARGET_REPOSITORY_INPUT: ${{ inputs.repository }}
+        CALLING_REPOSITORY: ${{ github.repository }}
+        CALLING_SHA: ${{ github.sha }}
+        BASE_REF: ${{ inputs.base-ref }}
+        REQUIRE_BASE_REF: ${{ inputs.require-base-ref }}
+      run: |
+        set -eu
+        if [ "$APP_CLIENT_ID_SET" = "true" ] && [ "$APP_PRIVATE_KEY_SET" = "true" ]; then
+          mode=app
+        elif [ "$APP_CLIENT_ID_SET" = "false" ] && [ "$APP_PRIVATE_KEY_SET" = "false" ]; then
+          mode=github-token
+        else
+          echo "::error::Set both APP_CLIENT_ID and APP_PRIVATE_KEY for GitHub App authentication, or leave both unset to use GITHUB_TOKEN."
+          exit 1
+        fi
+
+        target_repository="${TARGET_REPOSITORY_INPUT:-$CALLING_REPOSITORY}"
+        if [[ "$target_repository" != */* || "$target_repository" == */*/* ]]; then
+          echo "::error::repository must use owner/name form."
+          exit 1
+        fi
+        target_owner="${target_repository%%/*}"
+        target_name="${target_repository#*/}"
+        if [[ ! "$target_owner" =~ ^[A-Za-z0-9-]+$ ]] ||
+          [[ ! "$target_name" =~ ^[A-Za-z0-9._-]+$ ]] ||
+          [ "$target_name" = "." ] ||
+          [ "$target_name" = ".." ]; then
+          echo "::error::repository must use owner/name form with valid GitHub names."
+          exit 1
+        fi
+        if [[ "$BASE_REF" == *$'\n'* || "$BASE_REF" == *$'\r'* ]]; then
+          echo "::error::base-ref must be a single-line ref."
+          exit 1
+        fi
+
+        if [ "$target_repository" = "$CALLING_REPOSITORY" ]; then
+          cross_repository=false
+        else
+          cross_repository=true
+        fi
+        if [ "$cross_repository" = "true" ] && [ "$mode" != "app" ]; then
+          echo "::error::A different target repository requires GitHub App credentials; GITHUB_TOKEN cannot write to another repository."
+          exit 1
+        fi
+        if [ "$cross_repository" = "true" ] &&
+          [ "$REQUIRE_BASE_REF" = "true" ] &&
+          [ -z "$BASE_REF" ]; then
+          echo "::error::base-ref is required when repository targets another repository."
+          exit 1
+        fi
+
+        if [ "$cross_repository" = "false" ]; then
+          checkout_ref="$CALLING_SHA"
+        elif [ -n "$BASE_REF" ]; then
+          checkout_ref="$BASE_REF"
+        else
+          checkout_ref=""
+        fi
+
+        {
+          echo "mode=$mode"
+          echo "target-repository=$target_repository"
+          echo "target-owner=$target_owner"
+          echo "target-name=$target_name"
+          echo "cross-repository=$cross_repository"
+          echo "checkout-ref=$checkout_ref"
+        } >> "$GITHUB_OUTPUT"

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { realpathSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
@@ -162,6 +162,53 @@ async function readJson(path: string, label: string): Promise<unknown> {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`${label} is not valid JSON: ${detail}`, { cause: error });
   }
+}
+
+async function resolveTmsInputPath(cwd: string, inputPath: string, label: string): Promise<string> {
+  const absolutePath = resolve(cwd, inputPath);
+  let workingDirectory: string;
+  try {
+    workingDirectory = await realpath(cwd);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `${label} path "${inputPath}" cannot resolve the working directory: ${detail}`,
+      {
+        cause: error,
+      },
+    );
+  }
+  let fileInfo;
+  try {
+    fileInfo = await lstat(absolutePath);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label} path "${inputPath}" cannot be inspected: ${detail}`, {
+      cause: error,
+    });
+  }
+  if (fileInfo.isSymbolicLink()) {
+    throw new Error(`${label} path "${inputPath}" must not be a symbolic link`);
+  }
+
+  let realPath: string;
+  try {
+    realPath = await realpath(absolutePath);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label} path "${inputPath}" cannot be resolved: ${detail}`, {
+      cause: error,
+    });
+  }
+  const pathFromWorkingDirectory = relative(workingDirectory, realPath);
+  if (
+    pathFromWorkingDirectory === ".." ||
+    pathFromWorkingDirectory.startsWith(`..${sep}`) ||
+    isAbsolute(pathFromWorkingDirectory)
+  ) {
+    throw new Error(`${label} path "${inputPath}" resolves outside the working directory`);
+  }
+  return realPath;
 }
 
 function parseCatalogFile(
@@ -418,9 +465,13 @@ async function runTmsCommand(
   });
   const configPath = values.config;
   if (!configPath) throw new Error("TMS command requires --config");
-  const parsed = parsePhraseTmsConfig(
-    await readJson(resolve(options.cwd, configPath), "TMS config"),
-  );
+  const safeConfigPath = await resolveTmsInputPath(options.cwd, configPath, "TMS config");
+  const config = await readJson(safeConfigPath, "TMS config");
+  const parsed = parsePhraseTmsConfig(config);
+  const sourceCatalogPath =
+    command === "submit"
+      ? await resolveTmsInputPath(options.cwd, parsed.workflow.sourceCatalog.path, "Source catalog")
+      : undefined;
   const catalogAdapters = builtInCatalogAdapters([
     parsed.workflow.sourceCatalog.adapter,
     targetAdapterId(parsed.workflow),
@@ -471,7 +522,7 @@ async function runTmsCommand(
       );
     }
     if (!sourceCommit) throw new Error("Pass --source-commit or set GITHUB_SHA");
-    const sourceBytes = await readFile(resolve(options.cwd, parsed.workflow.sourceCatalog.path));
+    const sourceBytes = await readFile(sourceCatalogPath!);
     const batch = await workflow.submit({
       repository: repositoryName,
       baseRef,
