@@ -181,26 +181,7 @@ Each `tms` run logs the chosen kind, for example `Phrase auth: service account (
 
 Put the secrets in a protected Actions environment and pass that environment as the reusable-workflow `environment` input. A caller may instead map repository/organization secrets to the same workflow-call secret names (GitHub secret names are case-insensitive). The CLI rejects credential-like keys (for example `apiToken`, `api_key`, `clientSecret`) anywhere in the config so tokens cannot enter batch-state files; the JSON schema does not enforce this. GitHub PR and state operations use the run's `GITHUB_TOKEN`, with `contents: write` and (for reconciliation) `pull-requests: write`; no personal GitHub token is used.
 
-A consumer owns the trigger and pins the reusable workflow to a reviewed commit. Example submit caller, run when a merge changes the source catalog or the Phrase config, or by hand:
-
-```yaml
-on:
-  push:
-    branches:
-      - main
-    paths:
-      - locales/translation-template.json
-      - .github/i18n/phrase-tms.json
-  workflow_dispatch:
-jobs:
-  submit:
-    uses: RedHatInsights/i18n-tooling/.github/workflows/phrase-submit.yml@<reviewed-commit-sha>
-    with:
-      config-path: .github/i18n/phrase-tms.json
-      environment: phrase-pilot
-    permissions:
-      contents: write
-```
+A consumer owns the triggers and pins the reusable workflows to a reviewed commit. Start from the [example callers](examples/phrase-consumer/.github/workflows/): submit runs when a merge changes the source catalog or the Phrase config, reconcile runs on a schedule, and both can be dispatched by hand.
 
 Put the Phrase secrets in the consumer's `phrase-pilot` Actions environment; the called job binds to that environment. If using repository/organization secrets instead, explicitly map them, for example `secrets: { PHRASE_SERVICE_ACCOUNT_CLIENT_ID: ${{ secrets.<id-name> }}, PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET: ${{ secrets.<secret-name> }} }`—never use `secrets: inherit`. The consumer's reconciliation caller should use the same `environment` and grant `contents: write` plus `pull-requests: write`; a schedule belongs in that consumer repository and runs from its default branch only.
 
@@ -215,6 +196,8 @@ Submission and reconciliation use separate concurrency groups, so a queued recon
 **Manual recovery for an ambiguous submission:** Do not rerun an `unknown`/stalled `creating` batch blindly. Inspect the exact Phrase project and job. If the job exists, edit only its JSON record (`<state.directory>/<batch-key>.json` on the configured state branch): preserve its key/config/source fields, add the verified `importAsyncRequestId` and complete `jobs` array (`uid`, `targetLang`, and `workflowLevel` for every job part), and set `phase` to `importing`. Rerun `tms submit` to resume import polling without creating another job. Delete only that exact state record if authoritative Phrase inspection confirms no job was created; then retry. If the remote outcome is uncertain, stop. No recovery CLI exists yet.
 
 **GitHub Actions caveat:** PRs opened with `GITHUB_TOKEN` can trigger `pull_request` workflows for `opened`, `synchronize`, or `reopened`, but GitHub holds those runs for maintainer approval. Do not assume generated PRs will have automatically running/passing consumer checks; see [GitHub's token-trigger behavior](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow). This implementation deliberately does not replace `GITHUB_TOKEN` with a PAT or auto-merge PRs.
+
+**Konflux caveat:** Konflux checks run through Pipelines-as-Code, which normally needs an `/ok-to-test` comment for a pull request whose author is not a collaborator or organization member. Locale branches live in the consumer repository rather than a fork, and Pipelines-as-Code authorizes such same-repository pull requests regardless of the author, so locale PRs from `github-actions[bot]` should start Konflux checks on their own. If a locale PR shows no Konflux check, or one stays `Pending`, a repository collaborator or a user listed in the default branch's `OWNERS` file starts it by commenting `/ok-to-test`; see [Pipelines-as-Code ACL permissions](https://pipelinesascode.com/docs/guides/running-pipelines/).
 
 The reusable workflows are generic; they do not add `rbac-ui` configuration or schedule wiring. Live Phrase job creation and secret setup remain explicit acceptance steps.
 
