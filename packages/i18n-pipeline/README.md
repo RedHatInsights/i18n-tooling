@@ -179,7 +179,7 @@ The configured ID must match `adapter.id`. The optional JSON config file supplie
 
 Bare package specifiers resolve from the consumer root under ESM import conditions. Provide a package `main` field or an `exports` entry with an `import` or `default` condition. Dual-export packages use their ESM entry, not their CommonJS `require` entry.
 
-`tms submit` and `tms reconcile` run with Phrase and GitHub write credentials, so they load only the built-in adapters (`formatjs-json`, `icu-json`, `openapi-problem-details`) and never import adapter modules declared in `package.json`. A TMS config that names a custom adapter fails before any credential is used.
+`tms submit` and `tms reconcile` run with Phrase and GitHub write credentials, so they load only the [built-in adapters](#built-in-adapters) and never import adapter modules declared in `package.json`. A TMS config that names a custom adapter fails before any credential is used.
 
 ## npm consumers (after the first release)
 
