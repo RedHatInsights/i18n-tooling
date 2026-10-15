@@ -66,7 +66,7 @@ When the message-ID question applies and the developer keeps the existing style,
 
 ### Validation baseline
 
-Apply [references/validation-baseline.md](references/validation-baseline.md) to the repository's format. Write a new config at `i18n/catalog-validation.json`, or update the config the repository already has, with the applicable `checks`, `generated`, `catalogDirectories`, `sourceLint`, and `feo` or OpenAPI adapter entries. Add `translations:validate` (or the repository's existing equivalent) to run `i18n-pipeline validate-ci --mode error`. Prove the config with `validate-ci --mode error`, then deliberately break one item for each configured check, confirm that error mode fails, and restore the exact original content before continuing.
+Apply [references/validation-baseline.md](references/validation-baseline.md) to the repository's format. Write a new config at `i18n/catalog-validation.json`, or update the config the repository already has, with the applicable `checks`, `generated`, `catalogDirectories`, `sourceLint`, and `feo` or OpenAPI adapter entries. Add `translations:validate` (or the repository's existing equivalent) to run `i18n-pipeline validate-ci --mode error`. Add the locale validation caller described in [references/validation-baseline.md](references/validation-baseline.md#run-it-on-pull-requests), so PRs show validation errors immediately; this holds in every Phrase mode, since the i18n-hub runs no PR checks. Prove the config with `validate-ci --mode error`, then deliberately break one item for each configured check, confirm that error mode fails, and restore the exact original content before continuing.
 
 ### Konflux
 

@@ -13,7 +13,7 @@
 - `i18n/catalog-validation.json` with `checks`, `generated`, `catalogDirectories`, and `sourceLint` (`tmsConfig` is added once the Phrase project details are known).
 - `i18n/phrase-tms.json` with the target locales from the wizard (for `fr`: output `src/locales/fr.json`). While the Phrase project is unknown it is a draft and the validation config does not reference it through `tmsConfig`; the checker only requires that the file exists.
 - `.github/workflows/locale-validation.yml`.
-- Hub mode: no `.github/workflows/phrase-submit.yml` or `phrase-reconcile.yml`. The report shows the drafted i18n-hub `consumers.json` entry (`name` and `repository` from the copy's repository name, `configPath` `i18n/phrase-tms.json`, `phraseFile` `translation-template.json`). Because the project is unknown and the autonomy is edit files only, the agent opens no hub PR.
+- Hub mode: no `.github/workflows/phrase-submit.yml` or `phrase-reconcile.yml`. The report shows the drafted i18n-hub `consumers.json` entry (`name` and `repository` from the copy's repository name, `configPath` `i18n/phrase-tms.json`, `phraseFile` equal to `sourceCatalog.filename`, which is `<name>.ui.en.json`). Because the project is unknown and the autonomy is edit files only, the agent opens no hub PR.
 - Standalone variant: `.github/workflows/phrase-submit.yml` and `.github/workflows/phrase-reconcile.yml`, bound to one environment. Each maps `PHRASE_PLATFORM_API_TOKEN`, `APP_CLIENT_ID`, and `APP_PRIVATE_KEY` from `secrets` in its `secrets:` block.
 - `package.json` with `translations:validate` running `i18n-pipeline validate-ci --mode error`.
 - The generated source catalog and compiled English catalog stay current with the extract and compile scripts.

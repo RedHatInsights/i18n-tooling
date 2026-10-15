@@ -24,6 +24,12 @@ Add `catalogDirectories` for every directory holding catalogs. The default exten
 
 Without a config, a declared `react-intl` or `@formatjs/*` dependency enables zero-config ICU lint over `src/**/*.{js,jsx,ts,tsx}`. It checks the four ICU error rules but does not enforce message IDs. With configured `sourceLint`, the same four ICU rules run at error severity and translatability rules run as warnings. A configured `sourceLint.catalog` also checks message IDs against that catalog.
 
+## Run it on pull requests
+
+The i18n-hub and standalone Phrase callers only submit and reconcile; neither checks pull requests. A repository sees validation errors on its PRs, including the locale PRs Phrase opens, only through its own caller. Add `.github/workflows/locale-validation.yml` from `assets/workflows/` next to this `references/` folder. It calls `RedHatInsights/i18n-tooling/.github/workflows/i18n-validate.yml` on changes to the validation config, the source and locale catalogs, message source files, package scripts, and generators. Adapt its paths, `validation-config`, and catalog inputs to the repository.
+
+Every consumer caller uses top-level `permissions: {}` and grants each job only the permissions it needs. Pin the reusable workflow to a commit on i18n-tooling's `main`. If none can be resolved, keep the `<reviewed-commit-sha>` marker and list replacing it as a follow-up; a caller with the marker is not ready to run.
+
 ## Prove the plan and use the documented traps
 
 Run `i18n-pipeline validate-ci --mode error` with the consumer root as the working root or with `--root <consumer-dir>`. Error mode exits 1 for error findings or tool errors and 0 for warning-only findings. `warn` mode exits 0 even when findings exist.

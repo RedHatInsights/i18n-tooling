@@ -46,6 +46,7 @@ const fixtures = {
       "i18n/catalog-validation.json",
       "locales/translation-template.json",
       "src/locales/en.json",
+      ".github/workflows/locale-validation.yml",
     ],
     sections: ["checks", "generated", "catalogDirectories", "sourceLint"],
     packageScript: "translations:validate",
@@ -69,6 +70,7 @@ const fixtures = {
     requiredFiles: [
       "i18n/catalog-validation.json",
       "deploy/locales/translation-template.json",
+      ".github/workflows/locale-validation.yml",
       "node_modules/@redhat-cloud-services/frontend-components-config-utilities/package.json",
       "node_modules/@redhat-cloud-services/frontend-components-config-utilities/schemas/frontend-crd.schema.json",
     ],

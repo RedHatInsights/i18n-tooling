@@ -4,7 +4,7 @@ Use this reference when the Phrase mode is **Hub**. [RedHatInsights/i18n-hub](ht
 
 ## Consumer change
 
-The consumer change contains the Phrase config, the source catalog, and the locale validation caller from [phrase.md](phrase.md). It contains no submit or reconcile callers, and its environments hold no Phrase or App secrets for this purpose.
+The consumer change contains the Phrase config and the source catalog. The locale validation caller comes from the validation baseline. It contains no submit or reconcile callers, and its environments hold no Phrase or App secrets for this purpose.
 
 ## Registry entry
 
@@ -16,14 +16,14 @@ Work out one `consumers.json` entry:
   "repository": "RedHatInsights/<repository-name>",
   "baseRef": "<default-branch>",
   "configPath": "<path-to-phrase-tms.json>",
-  "phraseFile": "<source-catalog-filename>.json"
+  "phraseFile": "<repository-name>.ui.en.json"
 }
 ```
 
 - `name` is the repository name. `repository` is `RedHatInsights/<name>`, in lowercase letters, digits, and hyphens.
 - `baseRef` is the branch the hub syncs and bases locale PRs on, normally the default branch.
 - `configPath` is the repository-relative path of `phrase-tms.json`.
-- `phraseFile` is the source catalog's filename (for example `translation-template.json`). It must be unique across all hub entries. Check the current `consumers.json` (see [phrase.md](phrase.md#choose-the-mode)). If the name is already taken, rename the consumer's source catalog to something unique to the repository, update every reference to it, and report the rename.
+- `phraseFile` equals `sourceCatalog.filename` from the Phrase config exactly, `<name>.<catalog>.en.json` (`ui` or `feo`). The hub requires it to start with `<name>.` and to be unique across entries; check the current `consumers.json` (see [phrase.md](phrase.md#choose-the-mode)). The repository's source catalog path stays unchanged.
 
 The hub reads the config from `baseRef`. An entry is ready only when the Phrase config is complete (real project UID and region) and the consumer change has merged to `baseRef`.
 

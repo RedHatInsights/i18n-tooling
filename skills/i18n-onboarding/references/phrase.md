@@ -27,6 +27,7 @@ Write `i18n/phrase-tms.json` (or keep the repository's existing location). Keep 
   "state": { "branch": "i18n-tms-state" },
   "sourceCatalog": {
     "path": "locales/translation-template.json",
+    "filename": "<repository-name>.ui.en.json",
     "adapter": "formatjs-json",
     "locale": "en",
     "useProjectFileImportSettings": true
@@ -43,23 +44,21 @@ Write `i18n/phrase-tms.json` (or keep the repository's existing location). Keep 
 }
 ```
 
+Set `sourceCatalog.filename` to `<repository-name>.<catalog>.en.json`, where `<catalog>` is `ui` for application messages and `feo` for FEO's catalog (for example `insights-rbac-ui.ui.en.json`). This is the shared HCC Phrase project's convention: the name the file gets in Phrase shows which app and catalog it belongs to. Without it, the pipeline uploads the source path's basename, which for most apps is the generic `translation-template.json`. The repository file keeps its path.
+
 Use either `sourceCatalog.importSettingsUid` or `useProjectFileImportSettings`. Use the latter only when it matches the Phrase project. Map each Phrase locale to its repository locale once, in `targetLocales`. `catalog-validation.json` can use `tmsConfig` to derive those target checks; do not list them again.
 
 Add `tmsConfig` only once the Phrase config is complete, with `project.region` set to `us` or `eu` and `project.uid` set to the real project. While either is unknown, keep the Phrase config as a draft with marked placeholders and leave `tmsConfig` out, so validation of the rest of the repository keeps passing. A target file that has not arrived yet is pending, not a validation error.
 
 The reusable reconciliation workflow writes one flat locale JSON file per target locale and opens or updates one PR per locale. It does not run the consumer's build or aggregation scripts. Never use an aggregate file as a target `outputPath`.
 
-## Locale validation caller (both modes)
+## Pull-request validation (both modes)
 
-Add `.github/workflows/locale-validation.yml` from the templates shipped with this skill in `assets/workflows/` (next to this `references/` folder). It calls `RedHatInsights/i18n-tooling/.github/workflows/i18n-validate.yml@<reviewed-commit-sha>` on changes to the translation config, source catalogs, locale catalogs, package scripts, and relevant generators. Adapt its paths and config location to the repository.
-
-## Workflow pins
-
-Every consumer caller uses top-level `permissions: {}` and grants each job only the permissions it needs. Pin each reusable workflow to a reviewed tooling commit SHA, and leave no example placeholder in a runnable caller. If no reviewed SHA is available, do not invent one: keep the `<reviewed-commit-sha>` marker and list replacing it as an adoption follow-up. A caller that still has the marker is not ready to run.
+Neither mode checks pull requests. The validation baseline's locale validation caller does that, including on the locale PRs Phrase opens. Make sure the repository has it; see [validation-baseline.md](validation-baseline.md#run-it-on-pull-requests), which also sets the pinning rule for the Phrase callers.
 
 ## PR and admin follow-up (both modes)
 
-Put a manual follow-up checklist in the consumer PR description, not only in the final report. Include every item that applies, plus the mode-specific items from the mode reference:
+Put a manual follow-up checklist in the consumer PR description and the final report; never in a repository file. Include every item that applies, plus the mode-specific items from the mode reference:
 
 - Replace the Phrase project UID and verify the project region and import settings.
 - Confirm the map from Phrase locale to repository locale, and the output paths.

@@ -9,6 +9,7 @@
 
 ## Required files and config
 
+- `.github/workflows/locale-validation.yml`, so PRs run validation.
 - `locales/translation-template.json` and `src/locales/en.json` generated from the existing scripts.
 - `i18n/catalog-validation.json` with `checks`, `generated`, `catalogDirectories`, and `sourceLint`.
 - `sourceLint.files` includes `src/App.jsx`; `sourceLint.catalog` is absent so no missing-ID rule is enabled.
