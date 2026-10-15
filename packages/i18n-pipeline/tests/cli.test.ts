@@ -29,6 +29,26 @@ function phraseTmsConfig(sourceCatalogPath = "locales/en.json"): string {
   });
 }
 
+function generatedSourceTmsConfig(): string {
+  return JSON.stringify({
+    provider: "phrase",
+    project: { uid: "project-uid", region: "eu" },
+    sourceCatalog: {
+      path: "deploy/locales/insights-rbac-ui-feo-frontend-en.json",
+      adapter: "formatjs-json",
+      locale: "en",
+    },
+    frontendTemplate: { path: "deploy/frontend.yaml", generateSourceCatalog: true },
+    targetLocales: [
+      {
+        phraseLocale: "zh_cn",
+        repositoryLocale: "zh-CN",
+        outputPath: "deploy/locales/zh-CN.json",
+      },
+    ],
+  });
+}
+
 function credentialTrackingEnv(reads: string[]): NodeJS.ProcessEnv {
   const credentials = new Set([
     "PHRASE_PLATFORM_API_TOKEN",
@@ -644,6 +664,53 @@ objects:
     expect(credentialReads).toEqual([]);
   });
 
+  it("rejects a symbolic-link generated-source Frontend template before reading credentials", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-template-link-"));
+    outsideRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-template-outside-"));
+    await mkdir(join(projectRoot, "deploy"));
+    await writeFile(join(projectRoot, "phrase.json"), generatedSourceTmsConfig());
+    await writeFile(join(outsideRoot, "frontend.yaml"), "kind: Template\n");
+    await symlink(join(outsideRoot, "frontend.yaml"), join(projectRoot, "deploy/frontend.yaml"));
+    const credentialReads: string[] = [];
+    const errors: string[] = [];
+
+    const exitCode = await runCli(["tms", "submit", "--config", "phrase.json"], {
+      cwd: projectRoot,
+      env: credentialTrackingEnv(credentialReads),
+      stdout: () => undefined,
+      stderr: (message) => errors.push(message),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(errors[0]).toContain(
+      'Frontend template path "deploy/frontend.yaml" must not be a symbolic link',
+    );
+    expect(credentialReads).toEqual([]);
+  });
+
+  it("rejects a generated-source Frontend template reached through a directory symlink outside the working directory", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-template-dir-link-"));
+    outsideRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-template-dir-outside-"));
+    await writeFile(join(projectRoot, "phrase.json"), generatedSourceTmsConfig());
+    await writeFile(join(outsideRoot, "frontend.yaml"), "kind: Template\n");
+    await symlink(outsideRoot, join(projectRoot, "deploy"), "dir");
+    const credentialReads: string[] = [];
+    const errors: string[] = [];
+
+    const exitCode = await runCli(["tms", "submit", "--config", "phrase.json"], {
+      cwd: projectRoot,
+      env: credentialTrackingEnv(credentialReads),
+      stdout: () => undefined,
+      stderr: (message) => errors.push(message),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(errors[0]).toContain(
+      'Frontend template path "deploy/frontend.yaml" resolves outside the working directory',
+    );
+    expect(credentialReads).toEqual([]);
+  });
+
   it("rejects source catalog parent traversal before reading credentials", async () => {
     projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-catalog-outside-root-"));
     outsideRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-catalog-outside-file-"));
@@ -778,26 +845,7 @@ objects:
       join(projectRoot, "deploy/frontend.yaml"),
       "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n        - id: roles\n          title: Roles\n",
     );
-    await writeFile(
-      join(projectRoot, "phrase.json"),
-      JSON.stringify({
-        provider: "phrase",
-        project: { uid: "project-uid", region: "eu" },
-        sourceCatalog: {
-          path: "deploy/locales/insights-rbac-ui-feo-frontend-en.json",
-          adapter: "formatjs-json",
-          locale: "en",
-        },
-        frontendTemplate: { path: "deploy/frontend.yaml", generateSourceCatalog: true },
-        targetLocales: [
-          {
-            phraseLocale: "zh_cn",
-            repositoryLocale: "zh-CN",
-            outputPath: "deploy/locales/zh-CN.json",
-          },
-        ],
-      }),
-    );
+    await writeFile(join(projectRoot, "phrase.json"), generatedSourceTmsConfig());
     const calls: string[] = [];
     const errors: string[] = [];
     const exitCode = await runCli(["tms", "submit", "--config", "phrase.json"], {
