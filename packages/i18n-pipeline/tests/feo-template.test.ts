@@ -277,6 +277,60 @@ describe("FEO template localization", () => {
     ).toBe(result);
   });
 
+  it("keeps a trailing locale comment in the splice and remains idempotent", () => {
+    const source = extractFeoCatalog(template);
+    const withComment = template.replace(
+      "parameters:",
+      "      locales:\n        fr:\n          searchEntries.roles.title: Rôles\n          # keep this note\nparameters:",
+    );
+    const target = { "searchEntries.roles.title": "Rôles" };
+    const first = inlineFeoLocale(withComment, source, target, "fr");
+    const repeated = inlineFeoLocale(first, source, target, "fr");
+
+    expect(first.match(/# keep this note/g)).toHaveLength(1);
+    expect(repeated).toBe(first);
+  });
+
+  it("converts an empty flow-style locales mapping to valid block YAML", () => {
+    const emptyFlow = template.replace(
+      "parameters:",
+      "      locales: {} # retain this comment\nparameters:",
+    );
+    const source = extractFeoCatalog(emptyFlow);
+    const result = inlineFeoLocale(
+      emptyFlow,
+      source,
+      { "searchEntries.roles.title": "角色" },
+      "zh-CN",
+    );
+
+    expect(parse(result).objects[0].spec.locales["zh-CN"]).toEqual({
+      "searchEntries.roles.title": "角色",
+    });
+    expect(result).toContain("locales: # retain this comment\n        zh-CN:");
+    expect(result.match(/# retain this comment/g)).toHaveLength(1);
+    expect(inlineFeoLocale(result, source, { "searchEntries.roles.title": "角色" }, "zh-CN")).toBe(
+      result,
+    );
+  });
+
+  it("preserves every comment on an empty flow-style locales mapping and remains idempotent", () => {
+    const emptyFlow = template.replace(
+      "parameters:",
+      "      locales: {} # locale map\n        # translator note\nparameters:",
+    );
+    const source = extractFeoCatalog(emptyFlow);
+    const target = { "searchEntries.roles.title": "角色" };
+    const result = inlineFeoLocale(emptyFlow, source, target, "zh-CN");
+    const repeated = inlineFeoLocale(result, source, target, "zh-CN");
+
+    expect(parse(result).objects[0].spec.locales["zh-CN"]).toEqual(target);
+    expect(result).toContain("locales: # locale map\n        # translator note\n        zh-CN:");
+    expect(result.match(/# locale map/g)).toHaveLength(1);
+    expect(result.match(/# translator note/g)).toHaveLength(1);
+    expect(repeated).toBe(result);
+  });
+
   it("orders catalog and new locale keys by code unit, whatever the process locale", () => {
     const mixed = `kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n${[
       "aardvark",

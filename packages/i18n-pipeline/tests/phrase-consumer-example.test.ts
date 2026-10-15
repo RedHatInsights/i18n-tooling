@@ -115,6 +115,9 @@ describe("Phrase consumer example", () => {
       },
     };
     const repository: PhraseWorkflowRepository = {
+      async resolveCommit() {
+        return "base-commit";
+      },
       async readFile() {
         return sourceBytes;
       },
@@ -278,6 +281,9 @@ describe("Phrase consumer example", () => {
       },
     };
     const repository: PhraseWorkflowRepository = {
+      async resolveCommit() {
+        return "base-commit";
+      },
       async readFile() {
         return textSourceBytes;
       },

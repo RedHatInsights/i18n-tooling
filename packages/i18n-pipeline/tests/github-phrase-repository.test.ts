@@ -6,9 +6,11 @@ import {
   type PhraseLocalePullRequest,
 } from "../src/phrase-workflow.js";
 
-const pullRequest: PhraseLocalePullRequest = {
+const baseCommitSha = "a".repeat(40);
+const pullRequest: PhraseLocalePullRequest & { baseCommit: string } = {
   repository: "example/app",
   baseRef: "phrase-pilot",
+  baseCommit: baseCommitSha,
   branch: "i18n/phrase-batch-fr",
   title: "i18n(fr): Phrase translation update",
   body: "Phrase batch test",
@@ -51,21 +53,178 @@ function batchRecord(key = "a".repeat(64)): PhraseBatchRecord {
 }
 
 describe("GitHubPhraseRepository", () => {
+  it("rejects a locale PR base commit that is not a full commit SHA", async () => {
+    let requests = 0;
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async () => {
+        requests += 1;
+        return response([]);
+      },
+    });
+
+    const error = await repository
+      .createOrUpdatePullRequest({ ...pullRequest, baseCommit: "base-commit" })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(TypeError);
+    expect(error).toMatchObject({
+      message: "Phrase PR base commit must be a full commit SHA",
+    });
+    expect(requests).toBe(0);
+  });
+
+  it("writes all locale PR files in one verified Git Data commit from the resolved base SHA", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const blobs: Record<string, unknown>[] = [];
+    let treeBody: Record<string, unknown> | undefined;
+    let commitBody: Record<string, unknown> | undefined;
+    let refBody: Record<string, unknown> | undefined;
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      calls.push({ url, init });
+      if (url.includes("/pulls?")) return response([]);
+      if (url.endsWith("/git/ref/heads/i18n/phrase-batch-fr")) return response({}, 404);
+      if (url.endsWith(`/git/commits/${baseCommitSha}`)) {
+        return response({ sha: baseCommitSha, tree: { sha: "base-tree" } });
+      }
+      if (url.endsWith("/git/blobs") && init?.method === "POST") {
+        blobs.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return response({ sha: `blob-${blobs.length}` }, 201);
+      }
+      if (url.endsWith("/git/trees") && init?.method === "POST") {
+        treeBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return response({ sha: "tree-new" }, 201);
+      }
+      if (url.endsWith("/git/commits") && init?.method === "POST") {
+        commitBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return response({ sha: "commit-new" }, 201);
+      }
+      if (url.endsWith("/git/refs") && init?.method === "POST") {
+        refBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return response({ ref: "refs/heads/i18n/phrase-batch-fr" }, 201);
+      }
+      if (url.endsWith("/pulls") && init?.method === "POST") {
+        return response({ html_url: "https://github.com/example/app/pull/7" }, 201);
+      }
+      throw new Error(`Unexpected GitHub request: ${url}`);
+    };
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch,
+    });
+    const frontend = new TextEncoder().encode("kind: Template\n");
+
+    await expect(
+      repository.createOrUpdatePullRequest({
+        ...pullRequest,
+        additionalFiles: [{ path: "deploy/frontend.yaml", content: frontend }],
+      }),
+    ).resolves.toBe("https://github.com/example/app/pull/7");
+
+    expect(blobs).toHaveLength(2);
+    expect(treeBody).toMatchObject({
+      base_tree: "base-tree",
+      tree: [
+        { path: "locales/fr.json", mode: "100644", type: "blob" },
+        { path: "deploy/frontend.yaml", mode: "100644", type: "blob" },
+      ],
+    });
+    expect(commitBody).toMatchObject({
+      message: expect.any(String),
+      tree: "tree-new",
+      parents: [baseCommitSha],
+    });
+    expect(Object.keys(commitBody ?? {}).sort()).toEqual(["message", "parents", "tree"]);
+    expect(refBody).toEqual({ ref: "refs/heads/i18n/phrase-batch-fr", sha: "commit-new" });
+    expect(calls.some((call) => call.url.endsWith("/git/ref/heads/phrase-pilot"))).toBe(false);
+    expect(
+      calls.filter(({ url, init }) => url.includes("/contents/") && init?.method === "PUT"),
+    ).toHaveLength(0);
+  });
+
+  it("resolves a base branch to one commit SHA", async () => {
+    const calls: string[] = [];
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "token",
+      stateBranch: "i18n-state",
+      fetch: async (input, init) => {
+        const url = input instanceof Request ? input.url : String(input);
+        calls.push(url);
+        expect(init?.method).toBe("GET");
+        return response({ object: { sha: "base-commit" } });
+      },
+    });
+
+    await expect(repository.resolveCommit("phrase-pilot")).resolves.toBe("base-commit");
+    expect(calls).toEqual(["https://api.github.com/repos/example/app/git/ref/heads/phrase-pilot"]);
+  });
+
+  it("reports a rejected non-force locale ref update as a retryable conflict", async () => {
+    let refUpdate: Record<string, unknown> | undefined;
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.includes("/pulls?")) return response([]);
+      if (
+        url.endsWith("/git/ref/heads/i18n/phrase-batch-fr") &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return response({ object: { sha: "branch-head" } });
+      }
+      if (url.includes("/contents/locales/fr.json?ref=branch-head")) {
+        return response({
+          type: "file",
+          sha: "translation-blob",
+          encoding: "base64",
+          content: Buffer.from("old").toString("base64"),
+        });
+      }
+      if (url.endsWith("/git/commits/branch-head")) {
+        return response({ tree: { sha: "branch-tree" } });
+      }
+      if (url.endsWith("/git/blobs")) return response({ sha: "blob-new" }, 201);
+      if (url.endsWith("/git/trees")) return response({ sha: "tree-new" }, 201);
+      if (url.endsWith("/git/commits") && init?.method === "POST") {
+        return response({ sha: "commit-new" }, 201);
+      }
+      if (url.endsWith("/git/refs/heads/i18n/phrase-batch-fr") && init?.method === "PATCH") {
+        refUpdate = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return response({ message: "Reference update failed" }, 422);
+      }
+      throw new Error(`Unexpected GitHub request: ${url}`);
+    };
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "token",
+      stateBranch: "i18n-state",
+      fetch,
+    });
+
+    await expect(repository.createOrUpdatePullRequest(pullRequest)).rejects.toBeInstanceOf(
+      PhraseBatchStateConflictError,
+    );
+    expect(refUpdate).toEqual({ sha: "commit-new", force: false });
+  });
+
   it("creates a deterministic locale branch and pull request with the run token", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const fetch: typeof globalThis.fetch = async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
       calls.push({ url, init });
       if (url.endsWith("/git/ref/heads/i18n/phrase-batch-fr")) return response({}, 404);
-      if (url.endsWith("/git/ref/heads/phrase-pilot")) {
-        return response({ object: { sha: "base-commit" } });
-      }
-      if (url.endsWith("/git/refs"))
+      if (url.endsWith(`/git/commits/${baseCommitSha}`))
+        return response({ tree: { sha: "base-tree" } });
+      if (url.endsWith("/git/blobs")) return response({ sha: "translation-blob" }, 201);
+      if (url.endsWith("/git/trees")) return response({ sha: "tree-new" }, 201);
+      if (url.endsWith("/git/commits") && init?.method === "POST")
+        return response({ sha: "locale-commit" }, 201);
+      if (url.endsWith("/git/refs") && init?.method === "POST")
         return response({ ref: "refs/heads/i18n/phrase-batch-fr" }, 201);
-      if (url.includes("/contents/locales/fr.json?ref=")) return response({}, 404);
-      if (url.endsWith("/contents/locales/fr.json")) {
-        return response({ content: { sha: "translation-blob" } }, 201);
-      }
       if (url.includes("/pulls?")) return response([]);
       if (url.endsWith("/pulls")) {
         return response({ html_url: "https://github.com/example/app/pull/7" }, 201);
@@ -85,17 +244,72 @@ describe("GitHubPhraseRepository", () => {
     const refCreate = calls.find((call) => call.url.endsWith("/git/refs"));
     expect(JSON.parse(String(refCreate?.init?.body))).toEqual({
       ref: "refs/heads/i18n/phrase-batch-fr",
-      sha: "base-commit",
+      sha: "locale-commit",
     });
-    const fileWrite = calls.find((call) => call.url.endsWith("/contents/locales/fr.json"));
-    expect(JSON.parse(String(fileWrite?.init?.body))).toMatchObject({
-      branch: "i18n/phrase-batch-fr",
-      message: "i18n: update locales/fr.json from Phrase",
+    const fileBlob = calls.find((call) => call.url.endsWith("/git/blobs"));
+    expect(JSON.parse(String(fileBlob?.init?.body))).toEqual({
       content: Buffer.from(pullRequest.content).toString("base64"),
+      encoding: "base64",
     });
-    expect(new Headers(fileWrite?.init?.headers).get("Authorization")).toBe(
-      "Bearer github-run-token",
+    const commit = calls.find(
+      (call) => call.url.endsWith("/git/commits") && call.init?.method === "POST",
     );
+    expect(new Headers(commit?.init?.headers).get("Authorization")).toBe("Bearer github-run-token");
+  });
+
+  it("writes both JSON and Frontend YAML before opening the locale PR", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    let treeBody: Record<string, unknown> | undefined;
+    let commitCount = 0;
+    let refUpdate: Record<string, unknown> | undefined;
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      calls.push({ url, init });
+      if (url.includes("/pulls?")) return response([]);
+      if (url.endsWith("/git/ref/heads/i18n/phrase-batch-fr")) {
+        return response({ object: { sha: "branch-head" } });
+      }
+      if (url.includes("/contents/")) return response({}, 404);
+      if (url.endsWith("/git/commits/branch-head")) {
+        return response({ tree: { sha: "branch-tree" } });
+      }
+      if (url.endsWith("/git/blobs")) return response({ sha: "blob" }, 201);
+      if (url.endsWith("/git/trees")) {
+        treeBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return response({ sha: "tree-new" }, 201);
+      }
+      if (url.endsWith("/git/commits") && init?.method === "POST") {
+        commitCount += 1;
+        return response({ sha: "commit-new" }, 201);
+      }
+      if (url.endsWith("/git/refs/heads/i18n/phrase-batch-fr") && init?.method === "PATCH") {
+        refUpdate = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return response({ ref: "refs/heads/i18n/phrase-batch-fr" });
+      }
+      if (url.endsWith("/pulls") && init?.method === "POST") {
+        expect(commitCount).toBe(1);
+        return response({ html_url: "https://github.com/example/app/pull/7" }, 201);
+      }
+      throw new Error(`Unexpected GitHub request: ${url}`);
+    };
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "token",
+      stateBranch: "i18n-state",
+      fetch,
+    });
+    await repository.createOrUpdatePullRequest({
+      ...pullRequest,
+      additionalFiles: [
+        { path: "deploy/frontend.yaml", content: new TextEncoder().encode("kind: Template\n") },
+      ],
+    });
+    const tree = treeBody?.tree as Array<{ path: string }>;
+    expect(tree.map(({ path }) => path)).toEqual(["locales/fr.json", "deploy/frontend.yaml"]);
+    expect(refUpdate).toEqual({ sha: "commit-new", force: false });
+    expect(
+      calls.filter(({ url, init }) => url.includes("/contents/") && init?.method === "PUT"),
+    ).toHaveLength(0);
   });
 
   it("uses state-file SHA as compare-and-swap revision", async () => {
@@ -266,14 +480,13 @@ describe("GitHubPhraseRepository", () => {
         const url = input instanceof Request ? input.url : String(input);
         if (init?.method && init.method !== "GET") writes.push(url);
         if (url.endsWith("/git/ref/heads/i18n/phrase-batch-fr")) return response({}, 404);
-        if (url.endsWith("/git/ref/heads/phrase-pilot")) {
-          return response({ object: { sha: "base-commit" } });
-        }
-        if (url.endsWith("/git/refs")) return response({}, 201);
-        if (url.includes("/contents/locales/fr.json?ref=")) return response({}, 404);
-        if (url.endsWith("/contents/locales/fr.json")) {
-          return response({ content: { sha: "translation-blob" } }, 201);
-        }
+        if (url.endsWith(`/git/commits/${baseCommitSha}`))
+          return response({ tree: { sha: "base-tree" } });
+        if (url.endsWith("/git/blobs")) return response({ sha: "translation-blob" }, 201);
+        if (url.endsWith("/git/trees")) return response({ sha: "tree-new" }, 201);
+        if (url.endsWith("/git/commits") && init?.method === "POST")
+          return response({ sha: "locale-commit" }, 201);
+        if (url.endsWith("/git/refs") && init?.method === "POST") return response({}, 201);
         if (url.includes("/pulls?")) return response([]);
         if (url.endsWith("/pulls")) {
           return response({ message: "Resource not accessible by integration" }, 403);

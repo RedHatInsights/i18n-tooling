@@ -70,6 +70,16 @@ function collect(doc: Document): {
   const { specs, prefixes } = frontendSpecs(doc);
   const owned: Set<string>[] = [];
   if (!specs.length) throw new Error("Template has no Frontend objects");
+  for (const spec of specs) {
+    const locales = spec.get("locales", true);
+    if (locales === undefined) continue;
+    const localeMap = mapping(locales, "spec.locales");
+    if (localeMap.flow && localeMap.items.length) {
+      throw new Error(
+        "spec.locales must use block-style YAML; non-empty flow-style mappings cannot be inlined",
+      );
+    }
+  }
   const catalog: FeoCatalog = {};
   let frontendPrefix = "";
   function unique(key: string, seen: Set<string>): void {
@@ -201,6 +211,10 @@ export function feoTemplateLocales(template: string): string[] {
   return [...locales].sort();
 }
 
+export function formatFeoCatalog(template: string): string {
+  return serializeFeoCatalog(extractFeoCatalog(template));
+}
+
 function parse(template: string): Document {
   const doc = parseDocument(template, { uniqueKeys: true, keepSourceTokens: true });
   if (doc.errors.length) throw new Error(`Invalid Frontend template: ${doc.errors[0]!.message}`);
@@ -237,6 +251,10 @@ export function inlineFeoLocale(
     );
     const locales = spec.get("locales", true);
     const existing = locales === undefined ? undefined : mapping(locales, "spec.locales");
+    const localesKey = spec.items.find(
+      (item) => isScalar(item.key) && item.key.value === "locales",
+    )?.key;
+    const localesKeyRange = isScalar(localesKey) ? localesKey.range : undefined;
     const pair = existing?.items.find(
       (item) => item.key && isScalar(item.key) && item.key.value === locale,
     );
@@ -244,13 +262,16 @@ export function inlineFeoLocale(
     const keyRange = pair && isScalar(pair.key) ? pair.key.range : undefined;
     const valueRange = pair && isMap(pair.value) ? pair.value.range : undefined;
     const indentAt = (offset: number) => offset - template.lastIndexOf("\n", offset - 1) - 1;
+    const emptyFlow = existing?.flow === true && existing.items.length === 0;
     const indent = keyRange
       ? indentAt(keyRange[0])
-      : existing?.range
-        ? indentAt(existing.range[0])
-        : spec.items[0]?.key && isScalar(spec.items[0].key) && spec.items[0].key.range
-          ? indentAt(spec.items[0].key.range[0])
-          : 6;
+      : emptyFlow && localesKeyRange
+        ? indentAt(localesKeyRange[0]) + 2
+        : existing?.range
+          ? indentAt(existing.range[0])
+          : spec.items[0]?.key && isScalar(spec.items[0].key) && spec.items[0].key.range
+            ? indentAt(spec.items[0].key.range[0])
+            : 6;
     // Keep comments on translated keys while replacing only this locale's mapping.
     const localeMap = pair && isMap(pair.value) ? pair.value : undefined;
     if (localeMap) {
@@ -294,7 +315,28 @@ export function inlineFeoLocale(
       )
       .join("");
     if (keyRange && valueRange) {
-      changes.push({ start: keyRange[0] - indent, end: valueRange[1], text: block });
+      changes.push({
+        start: keyRange[0] - indent,
+        end: valueRange[2] ?? valueRange[1],
+        text: block,
+      });
+    } else if (emptyFlow && existing?.range) {
+      let start = existing.range[0];
+      const lineStart = template.lastIndexOf("\n", start - 1) + 1;
+      while (start > lineStart && template[start - 1] === " ") start -= 1;
+      const commentLines = existing.comment?.split("\n").map((line) => line.trim());
+      const comment = commentLines?.some(Boolean)
+        ? commentLines
+            .map(
+              (line, index) => `${index === 0 ? "" : " ".repeat(indent)}#${line ? ` ${line}` : ""}`,
+            )
+            .join("\n")
+        : "";
+      changes.push({
+        start,
+        end: existing.range[2] ?? existing.range[1],
+        text: `${comment ? ` ${comment}` : ""}\n${block}`,
+      });
     } else if (existing?.range) {
       const offset = existing.range[1];
       changes.push({

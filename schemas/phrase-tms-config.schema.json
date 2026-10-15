@@ -84,6 +84,20 @@
       "type": "object",
       "additionalProperties": true
     },
+    "frontendTemplate": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*/$)(?!.*(?:^|/)\\.\\.?(/|$)).+$"
+        },
+        "generateSourceCatalog": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "targetLocales": {
       "type": "array",
       "minItems": 1,
@@ -124,5 +138,27 @@
       "additionalProperties": false
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "required": ["frontendTemplate"],
+        "properties": {
+          "frontendTemplate": { "type": "object" }
+        }
+      },
+      "then": {
+        "properties": {
+          "sourceCatalog": {
+            "type": "object",
+            "required": ["adapter", "locale"],
+            "properties": {
+              "adapter": { "const": "formatjs-json" },
+              "locale": { "const": "en" }
+            }
+          }
+        }
+      }
+    }
+  ],
   "additionalProperties": false
 }

@@ -136,10 +136,29 @@ export function validatePhraseWorkflowConfig(config: PhraseWorkflowConfig): void
   }
   const phraseLocales = new Set<string>();
   const repositoryLocales = new Set<string>();
+  if (config.frontendTemplate) {
+    validateRepoPath(config.frontendTemplate.path, "Frontend template path");
+    if (config.sourceCatalog.adapter !== "formatjs-json" || config.sourceCatalog.locale !== "en") {
+      throw new TypeError("Frontend template requires formatjs-json and en");
+    }
+    if (
+      config.frontendTemplate.path === config.sourceCatalog.path ||
+      config.targetLocales.some((locale) => locale.outputPath === config.frontendTemplate?.path)
+    ) {
+      throw new TypeError("Frontend template must have its own path");
+    }
+  }
   const outputPaths = new Set<string>();
   for (const locale of config.targetLocales) {
     if (!locale.phraseLocale.trim() || !locale.repositoryLocale.trim()) {
       throw new TypeError("Each target locale needs Phrase language and repository locale");
+    }
+    if (
+      config.frontendTemplate &&
+      (!/^[a-z]{2,3}(?:-[A-Za-z0-9]+)*$/.test(locale.repositoryLocale) ||
+        locale.repositoryLocale === "en")
+    ) {
+      throw new TypeError(`Invalid target repository locale: ${locale.repositoryLocale}`);
     }
     validateRepoPath(locale.outputPath, "Target output path");
     if (locale.outputPath === config.sourceCatalog.path) {
@@ -183,6 +202,7 @@ export function parsePhraseTmsConfig(value: unknown): PhraseTmsConfig {
       "sourceCatalog",
       "targetAdapter",
       "targetOptions",
+      "frontendTemplate",
       "targetLocales",
       "completionPolicy",
     ],
@@ -260,6 +280,20 @@ export function parsePhraseTmsConfig(value: unknown): PhraseTmsConfig {
     );
   }
 
+  const frontendTemplate = optionalRecord(root.frontendTemplate, 'TMS config "frontendTemplate"');
+  if (frontendTemplate) {
+    rejectUnknownKeys(
+      frontendTemplate,
+      ["path", "generateSourceCatalog"],
+      'TMS config "frontendTemplate"',
+    );
+    if (
+      frontendTemplate.generateSourceCatalog !== undefined &&
+      typeof frontendTemplate.generateSourceCatalog !== "boolean"
+    ) {
+      throw new TypeError('TMS config "frontendTemplate.generateSourceCatalog" must be a boolean');
+    }
+  }
   const targetOptions = optionalRecord(root.targetOptions, 'TMS config "targetOptions"');
   const targetAdapter = optionalString(root.targetAdapter, 'TMS config "targetAdapter"');
   const workflow: PhraseWorkflowConfig = {
@@ -278,6 +312,16 @@ export function parsePhraseTmsConfig(value: unknown): PhraseTmsConfig {
     },
     ...(targetAdapter ? { targetAdapter } : {}),
     ...(targetOptions ? { targetOptions } : {}),
+    ...(frontendTemplate
+      ? {
+          frontendTemplate: {
+            path: requiredString(frontendTemplate.path, 'TMS config "frontendTemplate.path"'),
+            ...(frontendTemplate.generateSourceCatalog === true
+              ? { generateSourceCatalog: true }
+              : {}),
+          },
+        }
+      : {}),
     targetLocales,
     completionPolicy: { default: policyDefault, ...(byLocale ? { byLocale } : {}) },
   };

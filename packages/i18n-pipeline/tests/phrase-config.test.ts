@@ -41,6 +41,77 @@ describe("Phrase TMS config parser", () => {
     });
   });
 
+  it("accepts a separate Frontend template path for the locale PR", () => {
+    expect(
+      parsePhraseTmsConfig({ ...minimalConfig, frontendTemplate: { path: "deploy/frontend.yaml" } })
+        .workflow.frontendTemplate,
+    ).toEqual({ path: "deploy/frontend.yaml" });
+    for (const path of ["../frontend.yaml", "locales/en.json", "locales/fr.json"]) {
+      expect(() =>
+        parsePhraseTmsConfig({ ...minimalConfig, frontendTemplate: { path } }),
+      ).toThrow();
+    }
+  });
+
+  it("requires a FormatJS English source catalog for every Frontend template", () => {
+    const frontendConfig = {
+      ...minimalConfig,
+      frontendTemplate: { path: "deploy/frontend.yaml" },
+    };
+    expect(() =>
+      parsePhraseTmsConfig({
+        ...frontendConfig,
+        sourceCatalog: { ...minimalConfig.sourceCatalog, adapter: "icu-json" },
+      }),
+    ).toThrow(/formatjs-json and en/);
+    expect(() =>
+      parsePhraseTmsConfig({
+        ...frontendConfig,
+        sourceCatalog: { ...minimalConfig.sourceCatalog, locale: "fr" },
+      }),
+    ).toThrow(/formatjs-json and en/);
+  });
+
+  it.each(["en", "zh_cn"])(
+    "rejects unsupported FEO repository locale %s during parsing",
+    (locale) => {
+      expect(() =>
+        parsePhraseTmsConfig({
+          ...minimalConfig,
+          frontendTemplate: { path: "deploy/frontend.yaml" },
+          targetLocales: [
+            { phraseLocale: "fr", repositoryLocale: locale, outputPath: "locales/fr.json" },
+          ],
+        }),
+      ).toThrow(/Invalid target repository locale/);
+    },
+  );
+
+  it("opts into generating a FormatJS source catalog from Frontend YAML", () => {
+    const config = {
+      ...minimalConfig,
+      sourceCatalog: {
+        path: "deploy/locales/insights-rbac-ui-feo-frontend-en.json",
+        adapter: "formatjs-json",
+        locale: "en",
+      },
+      frontendTemplate: { path: "deploy/frontend.yaml", generateSourceCatalog: true },
+    };
+    expect(parsePhraseTmsConfig(config).workflow.frontendTemplate).toEqual(config.frontendTemplate);
+    expect(() =>
+      parsePhraseTmsConfig({
+        ...config,
+        frontendTemplate: { ...config.frontendTemplate, generateSourceCatalog: "yes" },
+      }),
+    ).toThrow(/must be a boolean/);
+    expect(() =>
+      parsePhraseTmsConfig({
+        ...config,
+        sourceCatalog: { ...config.sourceCatalog, adapter: "icu-json" },
+      }),
+    ).toThrow(/formatjs-json/);
+  });
+
   it.each(["./locales/en.json", "locales//en.json", "locales/en.json/", "locales/../en.json"])(
     "rejects the non-canonical source path %s",
     (path) => {
