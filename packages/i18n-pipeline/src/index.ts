@@ -296,18 +296,20 @@ export class IcuJsonAdapter implements CatalogAdapter {
   }
 }
 
-export const BUILT_IN_CATALOG_ADAPTER_IDS = [
-  "formatjs-json",
-  "icu-json",
-  "openapi-problem-details",
-] as const;
+const builtInCatalogAdapters: readonly CatalogAdapter[] = [
+  new FormatJsJsonAdapter(),
+  new IcuJsonAdapter(),
+  new OpenApiProblemDetailsAdapter(),
+];
+
+export const BUILT_IN_CATALOG_ADAPTER_IDS: readonly string[] = builtInCatalogAdapters.map(
+  (adapter) => adapter.id,
+);
 
 export class CatalogAdapterRegistry {
-  private readonly adapters = new Map<string, CatalogAdapter>([
-    ["formatjs-json", new FormatJsJsonAdapter()],
-    ["icu-json", new IcuJsonAdapter()],
-    ["openapi-problem-details", new OpenApiProblemDetailsAdapter()],
-  ]);
+  private readonly adapters = new Map<string, CatalogAdapter>(
+    builtInCatalogAdapters.map((adapter) => [adapter.id, adapter]),
+  );
 
   register(adapter: CatalogAdapter): void {
     if (!adapter.id || /\s/.test(adapter.id)) {

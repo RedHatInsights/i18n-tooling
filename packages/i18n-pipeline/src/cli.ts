@@ -394,11 +394,10 @@ function phraseCredentials(
 // TMS commands run with Phrase and GitHub write credentials, so they never import() the adapter
 // modules a consumer declares in package.json.
 function builtInCatalogAdapters(adapterIds: string[]): CatalogAdapterRegistry {
-  const builtIn: readonly string[] = BUILT_IN_CATALOG_ADAPTER_IDS;
   for (const adapterId of adapterIds) {
-    if (!builtIn.includes(adapterId)) {
+    if (!BUILT_IN_CATALOG_ADAPTER_IDS.includes(adapterId)) {
       throw new Error(
-        `TMS commands load only built-in catalog adapters (${builtIn.join(", ")}); "${adapterId}" is a custom adapter and cannot run with Phrase and GitHub credentials`,
+        `TMS commands load only built-in catalog adapters (${BUILT_IN_CATALOG_ADAPTER_IDS.join(", ")}); "${adapterId}" is a custom adapter and cannot run with Phrase and GitHub credentials`,
       );
     }
   }
