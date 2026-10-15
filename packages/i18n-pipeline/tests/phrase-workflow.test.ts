@@ -75,6 +75,12 @@ class MemoryStateStore implements PhraseBatchStateStore {
 
 class FakePhrase {
   readonly events: string[];
+  readonly callOrder: string[] = [];
+  readonly getJobCalls: Array<{ projectUid: string; jobUid: string }> = [];
+  readonly asyncRequestIds: string[] = [];
+  readonly inaccessibleJobUids = new Set<string>();
+  readonly targetDownloadJobUids: string[] = [];
+  readonly targetFileDownloadJobUids: string[] = [];
   createJobCalls = 0;
   targetDownloadCalls = 0;
   createError?: Error & { mayHaveExecuted?: boolean };
@@ -89,10 +95,12 @@ class FakePhrase {
   warnings: unknown[] = [];
   onDownloadTargetFile?: () => void;
   readonly jobStatuses = new Map<string, string>();
+  readonly jobFilenamesByUid = new Map<string, string | undefined>();
   jobParts: Array<{
     uid: string;
     targetLang: string;
     workflowLevel: number;
+    filename?: string;
     lastWorkflowLevel?: number;
   }> = [{ uid: "job-fr", targetLang: "fr", workflowLevel: 1 }];
   targetBytes = new TextEncoder().encode('{"greeting":"Bonjour {name}"}');
@@ -117,6 +125,8 @@ class FakePhrase {
   }
 
   async waitForAsyncRequest(id: string) {
+    this.callOrder.push(`wait:${id}`);
+    this.asyncRequestIds.push(id);
     this.events.push(`phrase:wait:${id}`);
     if (this.waitError) {
       const error = this.waitError;
@@ -125,12 +135,24 @@ class FakePhrase {
     }
   }
 
-  async getJob(_projectUid: string, uid: string) {
+  async getJob(projectUid: string, uid: string) {
+    this.callOrder.push(`get:${projectUid}:${uid}`);
+    this.getJobCalls.push({ projectUid, jobUid: uid });
+    if (this.inaccessibleJobUids.has(uid)) {
+      throw new PhraseApiError("Phrase API returned HTTP 404", 404);
+    }
     if (this.getJobError) throw this.getJobError;
-    const job = this.jobParts.find((part) => part.uid === uid);
-    if (!job) throw new Error(`Unexpected job ${uid}`);
+    const job = this.jobParts.find((part) => part.uid === uid) ?? {
+      uid,
+      targetLang: "fr",
+      workflowLevel: 1,
+    };
+    const filename = this.jobFilenamesByUid.has(uid)
+      ? this.jobFilenamesByUid.get(uid)
+      : (job.filename ?? "translation-template.json");
     return {
       ...job,
+      ...(filename === undefined ? {} : { filename }),
       lastWorkflowLevel: job.lastWorkflowLevel ?? job.workflowLevel,
       status: this.jobStatuses.get(uid) ?? this.jobStatus,
       importStatus: { status: this.importStatus },
@@ -139,12 +161,14 @@ class FakePhrase {
 
   async startTargetDownload(_projectUid: string, jobUid: string) {
     this.targetDownloadCalls += 1;
+    this.targetDownloadJobUids.push(jobUid);
     this.events.push(`phrase:export:${jobUid}`);
     if (this.exportError) throw this.exportError;
     return `export-${jobUid}`;
   }
 
   async downloadTargetFile(_projectUid: string, jobUid: string, _asyncRequestId: string) {
+    this.targetFileDownloadJobUids.push(jobUid);
     this.events.push("phrase:download");
     this.onDownloadTargetFile?.();
     return this.targetBytesByJob.get(jobUid) ?? this.targetBytes;
@@ -205,6 +229,7 @@ describe("PhraseWorkflow submission", () => {
     expect(result.warningCount).toBe(1);
     expect(JSON.stringify(result)).not.toContain("warning details remain");
     expect(events.slice(0, 2)).toEqual(["state:creating", "phrase:create"]);
+    expect(phrase.callOrder.slice(0, 2)).toEqual(["wait:import-1", "get:project-uid:job-fr"]);
     expect(phrase.createJobCalls).toBe(1);
 
     const repeated = await workflow.submit({
@@ -217,6 +242,160 @@ describe("PhraseWorkflow submission", () => {
 
     expect(repeated.key).toBe(result.key);
     expect(phrase.createJobCalls).toBe(1);
+  });
+
+  it("verifies created jobs against pins before persisting their metadata", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.jobFilenamesByUid.set("job-fr", "other-consumer.json");
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository: new FakeRepository(),
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+
+    await expect(
+      workflow.submit({
+        repository: "example/app",
+        baseRef: "phrase-pilot",
+        sourceCommit: "abc123",
+        sourceBytes,
+        config,
+        expectedProjectUid: "project-uid",
+        expectedSourceFilename: "translation-template.json",
+      }),
+    ).rejects.toThrow('expected "translation-template.json", actual "other-consumer.json"');
+
+    const [stored] = await state.listBatches();
+    expect(stored?.record.phase).toBe("creating");
+    expect(stored?.record.jobs).toEqual([]);
+    expect(stored?.record.importAsyncRequestId).toBeUndefined();
+    expect(state.writes).toBe(1);
+    expect(phrase.callOrder).toEqual(["get:project-uid:job-fr"]);
+    expect(phrase.asyncRequestIds).toEqual([]);
+  });
+
+  it("refuses a pinned submit resume with another project's job UIDs without writing state", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository: new FakeRepository(),
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const input = {
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    };
+    const submitted = await workflow.submit(input);
+    const stored = state.records.get(submitted.key)!;
+    stored.record.phase = "importing";
+    stored.record.importAsyncRequestId = "other-consumer-import";
+    stored.record.jobs[0]!.uid = "other-consumer-job";
+    phrase.inaccessibleJobUids.add("other-consumer-job");
+    const forgedRecord = structuredClone(stored.record);
+    const forgedRevision = stored.revision;
+    const writesBeforeResume = state.writes;
+    phrase.callOrder.length = 0;
+    phrase.getJobCalls.length = 0;
+    phrase.asyncRequestIds.length = 0;
+
+    await expect(
+      workflow.submit({
+        ...input,
+        expectedProjectUid: "project-uid",
+        expectedSourceFilename: "translation-template.json",
+      }),
+    ).rejects.toThrow("Stored Phrase jobs could not be verified in the pinned project");
+
+    expect(phrase.getJobCalls).toEqual([
+      { projectUid: "project-uid", jobUid: "other-consumer-job" },
+    ]);
+    expect(phrase.asyncRequestIds).toEqual([]);
+    expect(phrase.callOrder).toEqual(["get:project-uid:other-consumer-job"]);
+    expect(state.writes).toBe(writesBeforeResume);
+    expect(state.records.get(submitted.key)?.record).toEqual(forgedRecord);
+    expect(state.records.get(submitted.key)?.revision).toBe(forgedRevision);
+  });
+
+  it("does not poll an untrusted async request ID when pinned jobs are genuine", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository: new FakeRepository(),
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const input = {
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    };
+    const submitted = await workflow.submit(input);
+    const stored = state.records.get(submitted.key)!;
+    stored.record.phase = "importing";
+    stored.record.importAsyncRequestId = "other-consumer-import";
+    phrase.callOrder.length = 0;
+    phrase.asyncRequestIds.length = 0;
+
+    const resumed = await workflow.submit({
+      ...input,
+      expectedProjectUid: "project-uid",
+      expectedSourceFilename: "translation-template.json",
+    });
+
+    expect(resumed.phase).toBe("ready");
+    expect(phrase.callOrder).toEqual(["get:project-uid:job-fr", "get:project-uid:job-fr"]);
+    expect(phrase.asyncRequestIds).toEqual([]);
+    expect(phrase.targetDownloadCalls).toBe(0);
+  });
+
+  it("refuses a pinned importing batch without job UIDs before polling its async request", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository: new FakeRepository(),
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const input = {
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    };
+    const submitted = await workflow.submit(input);
+    const stored = state.records.get(submitted.key)!;
+    stored.record.phase = "importing";
+    stored.record.importAsyncRequestId = "other-consumer-import";
+    stored.record.jobs = [];
+    const forgedRecord = structuredClone(stored.record);
+    const writesBeforeResume = state.writes;
+    phrase.callOrder.length = 0;
+    phrase.asyncRequestIds.length = 0;
+
+    await expect(
+      workflow.submit({
+        ...input,
+        expectedProjectUid: "project-uid",
+        expectedSourceFilename: "translation-template.json",
+      }),
+    ).rejects.toThrow("without verifiable job UIDs");
+
+    expect(phrase.callOrder).toEqual([]);
+    expect(phrase.asyncRequestIds).toEqual([]);
+    expect(state.writes).toBe(writesBeforeResume);
+    expect(state.records.get(submitted.key)?.record).toEqual(forgedRecord);
   });
 
   it.each([
@@ -1215,6 +1394,184 @@ describe("PhraseWorkflow submission", () => {
       { batchKey: corrupt.key, phase: "retrying", reason: authMessage },
     ]);
   });
+
+  it.each([
+    ["project", "completed"],
+    ["project", "failed"],
+    ["project", "superseded"],
+    ["source filename", "completed"],
+    ["source filename", "failed"],
+    ["source filename", "superseded"],
+  ] as const)(
+    "skips a terminal batch with a %s mismatch in phase %s, while rejecting a pending batch",
+    async (pin, terminalPhase) => {
+      const state = new MemoryStateStore();
+      const phrase = new FakePhrase();
+      const repository = new FakeRepository();
+      const workflow = new PhraseWorkflow({
+        phrase,
+        state,
+        repository,
+        catalogAdapters: new CatalogAdapterRegistry(),
+      });
+      const input = {
+        repository: "example/app",
+        baseRef: "phrase-pilot",
+        sourceCommit: "abc123",
+        sourceBytes,
+        config,
+      };
+      const terminal = await workflow.submit(input);
+      const pending = await workflow.submit({ ...input, baseRef: "release" });
+      const terminalStored = state.records.get(terminal.key)!;
+      const pendingStored = state.records.get(pending.key)!;
+      terminalStored.record.phase = terminalPhase;
+
+      for (const stored of [terminalStored, pendingStored]) {
+        if (pin === "project") stored.record.config.projectUid = "foreign-project";
+        else stored.record.config.sourceCatalog.filename = "foreign.json";
+      }
+
+      const phraseEvents = [...phrase.events];
+      const phraseJobCalls = [...phrase.getJobCalls];
+      const repositoryReadFileCalls = repository.readFileCalls;
+      const repositoryPullRequests = [...repository.pullRequests];
+      const options = {
+        expectedProjectUid: "project-uid",
+        expectedSourceFilename: "translation-template.json",
+      };
+
+      const results = await workflow.reconcile(options);
+
+      expect(results).toEqual([
+        {
+          batchKey: pending.key,
+          phase: "failed",
+          reason:
+            pin === "project"
+              ? 'Batch config mismatch: project UID expected "project-uid", actual "foreign-project"'
+              : 'Batch config mismatch: source filename expected "translation-template.json", actual "foreign.json"',
+        },
+      ]);
+      expect(phrase.events).toEqual(phraseEvents);
+      expect(phrase.getJobCalls).toEqual(phraseJobCalls);
+      expect(repository.readFileCalls).toBe(repositoryReadFileCalls);
+      expect(repository.pullRequests).toEqual(repositoryPullRequests);
+    },
+  );
+
+  it.each(["project", "source filename"] as const)(
+    "rejects a forged batch %s without processing it or blocking other batches",
+    async (pin) => {
+      const state = new MemoryStateStore();
+      const phrase = new FakePhrase();
+      const repository = new FakeRepository();
+      const workflow = new PhraseWorkflow({
+        phrase,
+        state,
+        repository,
+        catalogAdapters: new CatalogAdapterRegistry(),
+      });
+      const input = {
+        repository: "example/app",
+        baseRef: "phrase-pilot",
+        sourceCommit: "abc123",
+        sourceBytes,
+        config,
+      };
+      const forged = await workflow.submit(input);
+      const healthy = await workflow.submit({ ...input, baseRef: "release" });
+      const stored = state.records.get(forged.key)!;
+      const forgedJobUid = `job-forged-${pin.replace(" ", "-")}`;
+      stored.record.jobs[0]!.uid = forgedJobUid;
+      if (pin === "project") stored.record.config.projectUid = "foreign-project";
+      else stored.record.config.sourceCatalog.filename = "foreign.json";
+      const originalRecord = structuredClone(stored.record);
+      const originalRevision = stored.revision;
+      phrase.jobStatus = "COMPLETED";
+      phrase.getJobCalls.length = 0;
+
+      const results = await workflow.reconcile({
+        expectedProjectUid: "project-uid",
+        expectedSourceFilename: "translation-template.json",
+      });
+
+      const rejected = results.find((result) => result.batchKey === forged.key);
+      expect(rejected).toMatchObject({ batchKey: forged.key, phase: "failed" });
+      expect(rejected?.reason).toContain(
+        pin === "project"
+          ? 'project UID expected "project-uid", actual "foreign-project"'
+          : 'source filename expected "translation-template.json", actual "foreign.json"',
+      );
+      expect(results).toContainEqual(
+        expect.objectContaining({ batchKey: healthy.key, phase: "pr-created" }),
+      );
+      expect(phrase.getJobCalls.map((call) => call.jobUid)).toEqual(["job-fr"]);
+      expect(state.records.get(forged.key)?.record).toEqual(originalRecord);
+      expect(state.records.get(forged.key)?.revision).toBe(originalRevision);
+      expect(repository.pullRequests).toHaveLength(1);
+      expect(repository.pullRequests[0]?.baseRef).toBe("release");
+    },
+  );
+
+  it.each([
+    ["other-catalog.json", '"other-catalog.json"'],
+    [undefined, "(missing)"],
+  ] as const)(
+    "rejects a Phrase job filename mismatch (%s) before downloading or writing that batch",
+    async (filename, actual) => {
+      const state = new MemoryStateStore();
+      const phrase = new FakePhrase();
+      const repository = new FakeRepository();
+      const workflow = new PhraseWorkflow({
+        phrase,
+        state,
+        repository,
+        catalogAdapters: new CatalogAdapterRegistry(),
+      });
+      const input = {
+        repository: "example/app",
+        baseRef: "phrase-pilot",
+        sourceCommit: "abc123",
+        sourceBytes,
+        config,
+      };
+      const mismatched = await workflow.submit(input);
+      const healthy = await workflow.submit({ ...input, baseRef: "release" });
+      const stored = state.records.get(mismatched.key)!;
+      const mismatchedJobUid = "job-fr-wrong-filename";
+      stored.record.jobs[0]!.uid = mismatchedJobUid;
+      phrase.jobFilenamesByUid.set(mismatchedJobUid, filename);
+      const originalRecord = structuredClone(stored.record);
+      const originalRevision = stored.revision;
+      phrase.jobStatus = "COMPLETED";
+      phrase.getJobCalls.length = 0;
+
+      const results = await workflow.reconcile({
+        expectedProjectUid: "project-uid",
+        expectedSourceFilename: "translation-template.json",
+      });
+
+      expect(results).toContainEqual(
+        expect.objectContaining({
+          batchKey: mismatched.key,
+          phase: "failed",
+          reason: expect.stringContaining(`expected "translation-template.json", actual ${actual}`),
+        }),
+      );
+      expect(results).toContainEqual(
+        expect.objectContaining({ batchKey: healthy.key, phase: "pr-created" }),
+      );
+      expect(phrase.targetDownloadJobUids).not.toContain(mismatchedJobUid);
+      expect(phrase.targetFileDownloadJobUids).not.toContain(mismatchedJobUid);
+      expect(phrase.targetDownloadJobUids).toEqual(["job-fr"]);
+      expect(phrase.targetFileDownloadJobUids).toEqual(["job-fr"]);
+      expect(state.records.get(mismatched.key)?.record).toEqual(originalRecord);
+      expect(state.records.get(mismatched.key)?.revision).toBe(originalRevision);
+      expect(repository.pullRequests).toHaveLength(1);
+      expect(repository.pullRequests[0]?.baseRef).toBe("release");
+    },
+  );
 
   it("does not commit state on every run while Phrase jobs are unchanged", async () => {
     const state = new MemoryStateStore();

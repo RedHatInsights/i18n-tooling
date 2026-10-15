@@ -82,7 +82,7 @@ describe("PhraseClient", () => {
     });
   });
 
-  it("accepts Phrase's nullable import error field when reading a job", async () => {
+  it("maps the Phrase job filename and nullable import error field", async () => {
     const fetch: typeof globalThis.fetch = async (input) => {
       const url = input instanceof Request ? input.url : String(input);
       if (url.endsWith("/idm/oauth/token")) {
@@ -93,6 +93,7 @@ describe("PhraseClient", () => {
           uid: "job-zh",
           targetLang: "zh",
           workflowLevel: 1,
+          filename: "translation-template.json",
           lastWorkflowLevel: 1,
           status: "NEW",
           imported: true,
@@ -104,6 +105,7 @@ describe("PhraseClient", () => {
 
     await expect(client.getJob("project-uid", "job-zh")).resolves.toMatchObject({
       uid: "job-zh",
+      filename: "translation-template.json",
       importStatus: { status: "OK", errorMessage: null },
     });
   });

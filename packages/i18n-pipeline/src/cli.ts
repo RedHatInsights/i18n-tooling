@@ -116,21 +116,25 @@ Environment:
   "tms submit": `Usage: i18n-pipeline tms submit --config <path> [options]
 
 Options:
-  --repository <owner/name>   GitHub repository (default: GITHUB_REPOSITORY)
-  --base-ref <branch>         PR base branch (default: branch from GITHUB_REF)
-  --source-commit <sha>       Source revision (default: GITHUB_SHA)
-  --config <path>             TMS JSON config path
-  --retry-failed              Retry failed locales or a failed batch for this source
-  -h, --help                  Show this help
+  --repository <owner/name>        GitHub repository (default: GITHUB_REPOSITORY)
+  --base-ref <branch>              PR base branch (default: branch from GITHUB_REF)
+  --source-commit <sha>            Source revision (default: GITHUB_SHA)
+  --config <path>                  TMS JSON config path
+  --retry-failed                   Retry failed locales or a failed batch for this source
+  --expect-project <uid>           Require this Phrase project UID
+  --expect-source-filename <name>  Require this Phrase source filename
+  -h, --help                       Show this help
 
 The base branch defaults to the pushed or dispatched branch (GITHUB_REF=refs/heads/*).
 Pull-request and tag refs require an explicit --base-ref.`,
-  "tms reconcile": `Usage: i18n-pipeline tms reconcile --config <path>
+  "tms reconcile": `Usage: i18n-pipeline tms reconcile --config <path> [options]
 
 Options:
-  --repository <owner/name>   GitHub repository (default: GITHUB_REPOSITORY)
-  --config <path>             TMS JSON config path
-  -h, --help                  Show this help`,
+  --repository <owner/name>        GitHub repository (default: GITHUB_REPOSITORY)
+  --config <path>                  TMS JSON config path
+  --expect-project <uid>           Require this Phrase project UID
+  --expect-source-filename <name>  Require this Phrase source filename
+  -h, --help                       Show this help`,
   version: `Usage: i18n-pipeline version
 
 Prints the i18n-pipeline package version.`,
@@ -463,12 +467,39 @@ async function runTmsCommand(
     "base-ref": { type: "string" },
     "source-commit": { type: "string" },
     "retry-failed": { type: "boolean" },
+    "expect-project": { type: "string" },
+    "expect-source-filename": { type: "string" },
   });
   const configPath = values.config;
   if (!configPath) throw new Error("TMS command requires --config");
   const safeConfigPath = await resolveTmsInputPath(options.cwd, configPath, "TMS config");
   const config = await readJson(safeConfigPath, "TMS config");
   const parsed = parsePhraseTmsConfig(config);
+  if (
+    values["expect-project"] !== undefined &&
+    parsed.workflow.projectUid !== values["expect-project"]
+  ) {
+    throw new Error(
+      `Phrase project UID mismatch: expected ${JSON.stringify(values["expect-project"])}, actual ${JSON.stringify(parsed.workflow.projectUid)}`,
+    );
+  }
+  if (
+    values["expect-source-filename"] !== undefined &&
+    parsed.workflow.sourceCatalog.filename !== values["expect-source-filename"]
+  ) {
+    throw new Error(
+      `Phrase source filename mismatch: expected ${JSON.stringify(values["expect-source-filename"])}, actual ${JSON.stringify(parsed.workflow.sourceCatalog.filename)}`,
+    );
+  }
+  const hasPhrasePins =
+    values["expect-project"] !== undefined || values["expect-source-filename"] !== undefined;
+  const phrasePins = hasPhrasePins
+    ? {
+        expectedProjectUid: values["expect-project"] ?? parsed.workflow.projectUid,
+        expectedSourceFilename:
+          values["expect-source-filename"] ?? parsed.workflow.sourceCatalog.filename,
+      }
+    : {};
   // A generated-source FEO config reads the Frontend template instead of a checked-in catalog.
   const generatedFrom = parsed.workflow.frontendTemplate?.generateSourceCatalog
     ? parsed.workflow.frontendTemplate
@@ -543,6 +574,7 @@ async function runTmsCommand(
       sourceBytes,
       config: parsed.workflow,
       retryFailed: values["retry-failed"] === true,
+      ...phrasePins,
     });
     const warningSummary = batch.warningCount ? `, ${batch.warningCount} import warning(s)` : "";
     options.stdout(
@@ -551,7 +583,7 @@ async function runTmsCommand(
     return 0;
   }
 
-  const results = await workflow.reconcile();
+  const results = await workflow.reconcile(phrasePins);
   if (!results.length) {
     options.stdout("No ready Phrase batches found.");
     return 0;
