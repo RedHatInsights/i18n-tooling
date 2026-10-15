@@ -345,6 +345,15 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function hasCauseCode(error: unknown, code: string): boolean {
+  return (
+    error instanceof Error &&
+    error.cause instanceof Error &&
+    "code" in error.cause &&
+    error.cause.code === code
+  );
+}
+
 function contextFor(
   locale: string,
   role: CatalogRole,
@@ -604,6 +613,7 @@ function feoLocaleProblem(
 async function checkFeoTemplate(
   projectRoot: string,
   entry: FeoTemplateValidation,
+  warnings: string[],
 ): Promise<string[]> {
   const problems: string[] = [];
   let templateBytes: Buffer;
@@ -691,6 +701,13 @@ async function checkFeoTemplate(
       }
       target = targetValue;
     } catch (error) {
+      if (hasCauseCode(error, "ENOENT") && !templateLocales.includes(locale)) {
+        warnings.push(
+          `FEO locale "${locale}" is not delivered yet: catalog "${localePath}" is missing and ` +
+            `template "${entry.template}" has no spec.locales block for it; skipping.`,
+        );
+        continue;
+      }
       problems.push(feoLocaleProblem(entry, locale, localePath, errorMessage(error), englishDrift));
       continue;
     }
@@ -784,7 +801,7 @@ export async function validateCatalogProject(
   }
 
   for (const entry of config.feo ?? []) {
-    problems.push(...(await checkFeoTemplate(projectRoot, entry)));
+    problems.push(...(await checkFeoTemplate(projectRoot, entry, warnings)));
   }
 
   const checks: PlannedCheck[] = [...config.checks];

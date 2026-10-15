@@ -206,6 +206,84 @@ describe("i18n-pipeline validate-ci", () => {
     });
   });
 
+  it("passes listed FEO locales that have not been delivered in error mode", async () => {
+    const root = await createRoot();
+    await writeProjectFile(
+      root,
+      "package.json",
+      JSON.stringify({ name: "feo-undelivered", version: "1.0.0" }),
+    );
+    await writeProjectFile(
+      root,
+      "deploy/frontend.yaml",
+      `apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: undelivered-fixture
+objects:
+  - apiVersion: v1
+    kind: Frontend
+    metadata:
+      name: console
+    spec:
+      module:
+        defaultDocumentTitle: Console
+`,
+    );
+    await mkdir(join(root, "deploy/locales"), { recursive: true });
+    const extractErrors: string[] = [];
+    const extractExitCode = await runCli(
+      [
+        "feo",
+        "extract",
+        "--template",
+        "deploy/frontend.yaml",
+        "--output",
+        "deploy/locales/translation-template.json",
+      ],
+      {
+        cwd: root,
+        env: {},
+        stdout: () => undefined,
+        stderr: (message) => extractErrors.push(message),
+      },
+    );
+    expect(extractExitCode).toBe(0);
+    expect(extractErrors).toEqual([]);
+    await writeConfig(root, {
+      version: 1,
+      checks: [],
+      feo: [
+        {
+          template: "deploy/frontend.yaml",
+          source: "deploy/locales/translation-template.json",
+          locales: {
+            "zh-CN": "deploy/locales/zh-CN.json",
+            fr: "deploy/locales/fr.json",
+            ja: "deploy/locales/ja.json",
+            de: "deploy/locales/de.json",
+          },
+        },
+      ],
+    });
+
+    const result = await runValidateCi(root, ["--mode", "error"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toEqual([]);
+    expect(result.stdout.filter((line) => line.includes("is not delivered yet"))).toHaveLength(4);
+    expect(result.stdout.at(-1)).toBe(
+      "validate-ci mode=error status=findings errors=0 warnings=4 config=config",
+    );
+    await expectResults(result, {
+      status: "findings",
+      errors: 0,
+      warnings: 4,
+      mode: "error",
+      config: "config",
+    });
+  });
+
   it.each(["warn", "error"] as const)(
     "reports invalid FEO YAML as a finding in %s mode",
     async (mode) => {
