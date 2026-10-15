@@ -77,7 +77,7 @@ jobs:
           cache: "false"
 
       - name: Install i18n tooling dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
         working-directory: i18n-tooling-source
 
       - name: Build i18n-pipeline CLI
