@@ -324,11 +324,18 @@ export function inlineFeoLocale(
       let start = existing.range[0];
       const lineStart = template.lastIndexOf("\n", start - 1) + 1;
       while (start > lineStart && template[start - 1] === " ") start -= 1;
-      const comment = existing.comment?.trim();
+      const commentLines = existing.comment?.split("\n").map((line) => line.trim());
+      const comment = commentLines?.some(Boolean)
+        ? commentLines
+            .map(
+              (line, index) => `${index === 0 ? "" : " ".repeat(indent)}#${line ? ` ${line}` : ""}`,
+            )
+            .join("\n")
+        : "";
       changes.push({
         start,
         end: existing.range[2] ?? existing.range[1],
-        text: `${comment ? ` # ${comment}` : ""}\n${block}`,
+        text: `${comment ? ` ${comment}` : ""}\n${block}`,
       });
     } else if (existing?.range) {
       const offset = existing.range[1];
