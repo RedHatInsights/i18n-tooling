@@ -150,6 +150,8 @@ class FakePhrase {
 
 class FakeRepository implements PhraseWorkflowRepository {
   readonly pullRequests: PhraseLocalePullRequest[] = [];
+  readonly resolvedRefs: string[] = [];
+  baseCommit = "resolved-base-commit";
   baseSourceBytes = sourceBytes;
   pinnedSourceBytes = sourceBytes;
   pullRequestError?: Error;
@@ -160,6 +162,11 @@ class FakeRepository implements PhraseWorkflowRepository {
     this.readFileCalls += 1;
     if (this.onReadFile) return this.onReadFile(path, ref, this.readFileCalls);
     return ref === "abc123" ? this.pinnedSourceBytes : this.baseSourceBytes;
+  }
+
+  async resolveCommit(ref: string) {
+    this.resolvedRefs.push(ref);
+    return this.baseCommit;
   }
 
   async createOrUpdatePullRequest(input: PhraseLocalePullRequest) {
@@ -878,10 +885,108 @@ describe("PhraseWorkflow submission", () => {
       new TextDecoder().decode(repository.pullRequests[0]?.additionalFiles?.[0]?.content),
     ).toContain("zh-CN:\n          searchEntries.roles.title: 角色");
     expect(reads).toContainEqual({ path: "deploy/frontend.yaml", ref: "abc123" });
-    expect(reads).toContainEqual({ path: "deploy/frontend.yaml", ref: "phrase-pilot" });
+    expect(reads).toContainEqual({
+      path: "deploy/frontend.yaml",
+      ref: repository.baseCommit,
+    });
     expect(reads.every(({ path }) => path !== zhConfig.sourceCatalog.path)).toBe(true);
     await workflow.submit({ ...input, sourceCommit: "def456" });
     expect(phrase.createJobCalls).toBe(1);
+  });
+
+  it("pins stale checks, Frontend reads, and the locale commit to one resolved base SHA", async () => {
+    const template =
+      "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n        - id: roles\n          title: Roles\n";
+    const movedTemplate = template.replace(
+      "          title: Roles\n",
+      "          title: Roles\n      permissions:\n        - view:roles\n",
+    );
+    const source = new TextEncoder().encode(
+      '{\n  "searchEntries.roles.title": {\n    "defaultMessage": "Roles",\n    "description": "title of searchEntries.roles"\n  }\n}\n',
+    );
+    const zhConfig: PhraseWorkflowConfig = {
+      ...config,
+      sourceCatalog: {
+        ...config.sourceCatalog,
+        path: "deploy/locales/insights-rbac-ui-feo-frontend-en.json",
+        filename: "insights-rbac-ui-feo-frontend-en.json",
+      },
+      frontendTemplate: { path: "deploy/frontend.yaml", generateSourceCatalog: true },
+      targetLocales: [
+        {
+          phraseLocale: "zh_cn",
+          repositoryLocale: "zh-CN",
+          outputPath: "deploy/locales/zh-CN.json",
+        },
+      ],
+    };
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.expectedFilename = "insights-rbac-ui-feo-frontend-en.json";
+    phrase.expectedTargetLangs = ["zh_cn"];
+    phrase.jobParts = [{ uid: "job-zh_cn", targetLang: "zh_cn", workflowLevel: 1 }];
+    phrase.targetBytes = new TextEncoder().encode('{"searchEntries.roles.title":"角色"}');
+    const repository = new FakeRepository();
+    const reads: { path: string; ref: string }[] = [];
+    repository.onReadFile = (path, ref) => {
+      reads.push({ path, ref });
+      if (path !== "deploy/frontend.yaml") return null;
+      return new TextEncoder().encode(
+        ref === "abc123" || ref === repository.baseCommit ? template : movedTemplate,
+      );
+    };
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes: source,
+      config: zhConfig,
+    });
+    phrase.jobStatus = "COMPLETED";
+
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    expect(repository.resolvedRefs).toEqual(["phrase-pilot"]);
+    expect(reads).toContainEqual({ path: "deploy/frontend.yaml", ref: repository.baseCommit });
+    expect(reads).not.toContainEqual({ path: "deploy/frontend.yaml", ref: "phrase-pilot" });
+    expect(
+      new TextDecoder().decode(repository.pullRequests[0]?.additionalFiles?.[0]?.content),
+    ).not.toContain("permissions:");
+    expect(repository.pullRequests[0]).toHaveProperty("baseCommit", repository.baseCommit);
+  });
+
+  it("rejects non-empty flow-style FEO locales at submit before creating a Phrase job", async () => {
+    const flowTemplate =
+      "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n        - id: roles\n          title: Roles\n      locales: { fr: { searchEntries.roles.title: Rôles } }\n";
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    repository.onReadFile = (path) =>
+      path === "deploy/frontend.yaml" ? new TextEncoder().encode(flowTemplate) : sourceBytes;
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+
+    await expect(
+      workflow.submit({
+        repository: "example/app",
+        baseRef: "phrase-pilot",
+        sourceCommit: "abc123",
+        sourceBytes,
+        config: { ...config, frontendTemplate: { path: "deploy/frontend.yaml" } },
+      }),
+    ).rejects.toThrow(/spec\.locales.*block|flow-style.*locales/i);
+    expect(phrase.createJobCalls).toBe(0);
+    expect(await state.listBatches()).toHaveLength(0);
   });
 
   it("supersedes generated Frontend source when English YAML changes before zh-CN reconciliation", async () => {

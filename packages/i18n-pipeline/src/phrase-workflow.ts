@@ -11,7 +11,12 @@ import {
 } from "./phrase-client.js";
 import type { CreatePhraseJobInput, PhraseJobCreation, PhraseJobPart } from "./phrase-client.js";
 import { targetAdapterId, validatePhraseWorkflowConfig } from "./phrase-config.js";
-import { formatFeoCatalog, inlineFeoLocale, type FeoCatalog } from "./feo-template.js";
+import {
+  extractFeoCatalog,
+  formatFeoCatalog,
+  inlineFeoLocale,
+  type FeoCatalog,
+} from "./feo-template.js";
 
 export type LocaleCompletionPolicy = "per-locale" | "all-locales";
 
@@ -89,6 +94,7 @@ export interface PhraseBatchStateStore {
 export interface PhraseLocalePullRequest {
   repository: string;
   baseRef: string;
+  baseCommit: string;
   branch: string;
   title: string;
   body: string;
@@ -98,6 +104,7 @@ export interface PhraseLocalePullRequest {
 }
 
 export interface PhraseWorkflowRepository {
+  resolveCommit(ref: string): Promise<string>;
   readFile(path: string, ref: string): Promise<Uint8Array | null>;
   createOrUpdatePullRequest(input: PhraseLocalePullRequest): Promise<string>;
 }
@@ -440,6 +447,18 @@ export class PhraseWorkflow {
         "Source bytes do not match the source file at the requested commit",
       );
     }
+    if (input.config.frontendTemplate && !input.config.frontendTemplate.generateSourceCatalog) {
+      const path = input.config.frontendTemplate.path;
+      const templateBytes = await this.dependencies.repository.readFile(path, input.sourceCommit);
+      if (!templateBytes) throw new PhraseWorkflowError(`Missing Frontend template: ${path}`);
+      try {
+        extractFeoCatalog(new TextDecoder().decode(templateBytes));
+      } catch (error) {
+        throw new PhraseWorkflowError(
+          `Frontend template cannot be inlined: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
 
     const identity = batchIdentity(input, sourceDigest);
     let previousFailedBatch: PhraseBatchRecord | undefined;
@@ -603,9 +622,10 @@ export class PhraseWorkflow {
       }
     }
 
+    const baseCommit = await this.dependencies.repository.resolveCommit(record.baseRef);
     const [pinnedSourceBytes, currentSourceBytes] = await Promise.all([
       this.readSourceCatalog(record.config, record.sourceCommit),
-      this.readSourceCatalog(record.config, record.baseRef),
+      this.readSourceCatalog(record.config, baseCommit),
     ]);
     if (!pinnedSourceBytes || digest(pinnedSourceBytes) !== record.sourceDigest) {
       await this.closeBatch(
@@ -760,7 +780,7 @@ export class PhraseWorkflow {
           sourceCatalog,
           targetAdapter,
         );
-        const latestSourceBytes = await this.readSourceCatalog(record.config, record.baseRef);
+        const latestSourceBytes = await this.readSourceCatalog(record.config, baseCommit);
         if (!latestSourceBytes || digest(latestSourceBytes) !== record.sourceDigest) {
           await this.closeBatch(
             record,
@@ -774,7 +794,7 @@ export class PhraseWorkflow {
         const additionalFiles: { path: string; content: Uint8Array }[] = [];
         if (record.config.frontendTemplate) {
           const path = record.config.frontendTemplate.path;
-          const templateBytes = await this.dependencies.repository.readFile(path, record.baseRef);
+          const templateBytes = await this.dependencies.repository.readFile(path, baseCommit);
           if (!templateBytes)
             throw new PhraseCatalogValidationError(`Missing Frontend template: ${path}`);
           try {
@@ -803,6 +823,7 @@ export class PhraseWorkflow {
           ...(additionalFiles.length ? { additionalFiles } : {}),
           repository: record.repository,
           baseRef: record.baseRef,
+          baseCommit,
           branch: `i18n/phrase-${record.key.slice(0, 16)}-${localeSlug}`,
           title: `i18n(${target.repositoryLocale}): Phrase translation update`,
           body:

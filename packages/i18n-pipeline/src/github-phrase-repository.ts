@@ -134,6 +134,13 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     return file?.bytes ?? null;
   }
 
+  async resolveCommit(ref: string): Promise<string> {
+    assertGitRef(ref);
+    const sha = await this.getReference(ref);
+    if (!sha) throw new GitHubRepositoryError(`GitHub base branch does not exist: ${ref}`, 404);
+    return sha;
+  }
+
   async readBatch(key: string): Promise<StoredPhraseBatch | undefined> {
     const file = await this.getFile(this.batchPath(key), this.options.stateBranch);
     if (!file) return undefined;
@@ -230,6 +237,11 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     if (input.repository !== `${this.owner}/${this.name}`) {
       throw new TypeError("Phrase PR repository does not match the GitHub token repository");
     }
+    assertGitRef(input.baseRef);
+    assertGitRef(input.branch);
+    if (!/^[0-9a-f]{40}$/.test(input.baseCommit)) {
+      throw new TypeError("Phrase PR base commit must be a full commit SHA");
+    }
     const existing = await this.findPullRequests(input.branch, input.baseRef);
     const merged = existing.find((pullRequest) => pullRequest.merged_at && pullRequest.html_url);
     if (merged?.html_url) return merged.html_url;
@@ -241,21 +253,28 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       );
     }
 
-    await this.ensureBranch(input.branch, input.baseRef);
-    for (const file of [
-      { path: input.path, content: input.content },
-      ...(input.additionalFiles ?? []),
-    ]) {
-      const current = await this.getFile(file.path, input.branch);
-      if (!current || !Buffer.from(current.bytes).equals(Buffer.from(file.content))) {
-        await this.putFile(
-          file.path,
-          file.content,
-          input.branch,
-          `i18n: update ${file.path} from Phrase`,
-          current?.sha,
-        );
+    const files = [{ path: input.path, content: input.content }, ...(input.additionalFiles ?? [])];
+    const branchHead = await this.getReference(input.branch);
+    const changedFiles: { path: string; content: Uint8Array }[] = [];
+    if (branchHead) {
+      for (const file of files) {
+        const current = await this.getFile(file.path, branchHead);
+        if (!current || !Buffer.from(current.bytes).equals(Buffer.from(file.content))) {
+          changedFiles.push(file);
+        }
       }
+    } else {
+      changedFiles.push(...files);
+    }
+    if (changedFiles.length) {
+      // On retry, branchHead can include intervening base edits; the inlined YAML is rebuilt from
+      // baseCommit, so the identical template hunks merge cleanly with that parent.
+      await this.writeLocaleCommit(
+        input.branch,
+        branchHead ?? input.baseCommit,
+        changedFiles,
+        branchHead === null,
+      );
     }
     const open = existing.find(
       (pullRequest) => pullRequest.state === "open" && pullRequest.html_url,
@@ -337,6 +356,101 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       );
     }
     return { sha: value.content.sha };
+  }
+
+  private async writeLocaleCommit(
+    branch: string,
+    parent: string,
+    files: { path: string; content: Uint8Array }[],
+    createRef: boolean,
+  ): Promise<void> {
+    const baseTree = await this.getCommitTree(parent);
+    const entries: { path: string; mode: "100644"; type: "blob"; sha: string }[] = [];
+    for (const file of files) {
+      assertRepositoryPath(file.path);
+      const response = await this.request(`${this.repositoryPath}/git/blobs`, {
+        method: "POST",
+        body: JSON.stringify({
+          content: Buffer.from(file.content).toString("base64"),
+          encoding: "base64",
+        }),
+      });
+      const value: unknown = await response.json();
+      if (!isRecord(value) || !nonEmptyString(value.sha)) {
+        throw new GitHubRepositoryError(
+          "GitHub returned an invalid git blob response",
+          response.status,
+        );
+      }
+      entries.push({ path: file.path, mode: "100644", type: "blob", sha: value.sha });
+    }
+
+    const treeResponse = await this.request(`${this.repositoryPath}/git/trees`, {
+      method: "POST",
+      body: JSON.stringify({ base_tree: baseTree, tree: entries }),
+    });
+    const treeValue: unknown = await treeResponse.json();
+    if (!isRecord(treeValue) || !nonEmptyString(treeValue.sha)) {
+      throw new GitHubRepositoryError(
+        "GitHub returned an invalid git tree response",
+        treeResponse.status,
+      );
+    }
+
+    const commitResponse = await this.request(`${this.repositoryPath}/git/commits`, {
+      method: "POST",
+      body: JSON.stringify({
+        message: `i18n: update Phrase translations for ${branch}`,
+        tree: treeValue.sha,
+        parents: [parent],
+      }),
+    });
+    const commitValue: unknown = await commitResponse.json();
+    if (!isRecord(commitValue) || !nonEmptyString(commitValue.sha)) {
+      throw new GitHubRepositoryError(
+        "GitHub returned an invalid git commit response",
+        commitResponse.status,
+      );
+    }
+
+    const refPath = createRef
+      ? `${this.repositoryPath}/git/refs`
+      : `${this.repositoryPath}/git/refs/heads/${encodeRefPath(branch)}`;
+    const refInit: RequestInit = createRef
+      ? {
+          method: "POST",
+          body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: commitValue.sha }),
+        }
+      : {
+          method: "PATCH",
+          body: JSON.stringify({ sha: commitValue.sha, force: false }),
+        };
+    try {
+      await this.request(refPath, refInit);
+    } catch (error) {
+      if (
+        error instanceof GitHubRepositoryError &&
+        (error.status === 409 || error.status === 422)
+      ) {
+        throw new PhraseBatchStateConflictError("Phrase locale branch changed concurrently");
+      }
+      throw error;
+    }
+  }
+
+  private async getCommitTree(commit: string): Promise<string> {
+    const response = await this.request(
+      `${this.repositoryPath}/git/commits/${encodeURIComponent(commit)}`,
+      { method: "GET" },
+    );
+    const value: unknown = await response.json();
+    if (!isRecord(value) || !isRecord(value.tree) || !nonEmptyString(value.tree.sha)) {
+      throw new GitHubRepositoryError(
+        "GitHub returned an invalid git commit tree",
+        response.status,
+      );
+    }
+    return value.tree.sha;
   }
 
   private async ensureBranch(branch: string, baseRef: string): Promise<void> {
