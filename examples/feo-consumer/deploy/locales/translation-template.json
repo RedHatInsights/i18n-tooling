@@ -11,9 +11,13 @@
     "defaultMessage": "Access Management",
     "description": "defaultDocumentTitle of module"
   },
-  "searchEntries.people.alt_title": {
-    "defaultMessage": "People|Accounts",
-    "description": "alt_title of searchEntries.people"
+  "searchEntries.people.alt_title.accounts": {
+    "defaultMessage": "Accounts",
+    "description": "search alias (keyword/synonym) of searchEntries.people; short search term, not a sentence"
+  },
+  "searchEntries.people.alt_title.people": {
+    "defaultMessage": "People",
+    "description": "search alias (keyword/synonym) of searchEntries.people; short search term, not a sentence"
   },
   "searchEntries.people.description": {
     "defaultMessage": "Manage people and their permissions",

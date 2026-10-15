@@ -35,6 +35,13 @@ function identifier(node: YAMLMap, name: string, label: string): string {
   return value;
 }
 
+function aliasSlug(alias: string): string {
+  return alias
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
 function frontendSpecs(doc: Document): { specs: YAMLMap[]; prefixes: string[] } {
   const root = mapping(doc.contents, "Template");
   if (text(root.get("kind", true), "Template.kind") !== "Template")
@@ -90,22 +97,42 @@ function collect(doc: Document): {
     const qualifiedKey = `${frontendPrefix}${key}`;
     const value = node.get(field, true);
     if (value === undefined || (isScalar(value) && value.value === "")) return;
-    let message: string;
     if (field === "alt_title") {
-      if (
-        !isSeq(value) ||
-        value.items.some(
-          (item) => !isScalar(item) || typeof item.value !== "string" || item.value.includes("|"),
-        )
-      ) {
-        throw new Error(`${key}: alt_title must contain strings without |`);
+      if (!isSeq(value)) throw new Error(`${key}: alt_title must contain strings`);
+      const aliases = value.items.map((item) => {
+        if (!isScalar(item) || typeof item.value !== "string")
+          throw new Error(`${key}: alt_title must contain strings`);
+        return item.value;
+      });
+      const entry = `${frontendPrefix}${context}`;
+      const slugs = new Map<string, string>();
+      for (const alias of aliases) {
+        const slug = aliasSlug(alias);
+        if (!slug) {
+          throw new Error(
+            `${entry}: alt_title alias ${JSON.stringify(alias)} has an empty slug (must contain an ASCII letter or digit)`,
+          );
+        }
+        const previous = slugs.get(slug);
+        if (previous !== undefined) {
+          throw new Error(
+            `${entry}: alt_title aliases ${JSON.stringify(previous)} and ${JSON.stringify(alias)} have the same slug ${JSON.stringify(slug)}`,
+          );
+        }
+        slugs.set(slug, alias);
+        const aliasKey = `${qualifiedKey}.${slug}`;
+        if (Object.hasOwn(catalog, aliasKey))
+          throw new Error(`Duplicate FEO message key: ${aliasKey}`);
+        catalog[aliasKey] = {
+          defaultMessage: alias,
+          description: `search alias (keyword/synonym) of ${entry}; short search term, not a sentence`,
+        };
       }
-      message = value.items.map((item) => (item as { value: string }).value).join("|");
-    } else {
-      if (!isScalar(value) || typeof value.value !== "string")
-        throw new Error(`${key} must be a string`);
-      message = value.value;
+      return;
     }
+    if (!isScalar(value) || typeof value.value !== "string")
+      throw new Error(`${key} must be a string`);
+    const message = value.value;
     if (!message.trim()) return;
     if (Object.hasOwn(catalog, qualifiedKey))
       throw new Error(`Duplicate FEO message key: ${qualifiedKey}`);
@@ -238,7 +265,10 @@ export function inlineFeoLocale(
     }
   }
   for (const [key, value] of Object.entries(target)) {
-    if (!Object.hasOwn(catalog, key)) throw new Error(`Unknown translation key: ${key}`);
+    if (!Object.hasOwn(catalog, key)) {
+      const hint = key.endsWith(".alt_title") ? "; alt_title is now one message per alias" : "";
+      throw new Error(`Unknown translation key: ${key}${hint}`);
+    }
     if (typeof value !== "string" || !value.trim()) throw new Error(`Invalid translation: ${key}`);
   }
   const sorted = Object.fromEntries(Object.entries(target).sort(byKey));
