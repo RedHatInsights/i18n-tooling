@@ -73,7 +73,7 @@ Map both `APP_*` names for App mode. Never use `secrets: inherit`.
 - Configure the Phrase project to translate `defaultMessage`, keep `description` as context, and parse ICU.
 - **Trap: custom adapters stop at Phrase.** `tms submit` and `tms reconcile` run with the Phrase credentials and a GitHub token that can write, so they load only the [built-in adapters](../packages/i18n-pipeline/README.md#built-in-adapters). A Phrase config that names a custom adapter fails before any request is made. `validate-project` and `convert` still load custom adapters, so keep the file Phrase reads and writes in a built-in format and convert it in the consumer's own build.
 
-**Done when:** submit creates jobs, reconcile opens a per-locale PR, and that PR's validation job passes.
+**Done when:** submit creates jobs, reconcile opens a per-locale PR, and that PR's validation job passes. If a translator corrects a translation in Phrase while its PR is open, the next reconcile updates the same PR.
 
 ## 7. Confirm what users actually see
 
@@ -101,7 +101,7 @@ Stop the automation first, then decide what to keep.
 
 1. Disable the two caller workflows in the Actions tab, or remove their `push` and `schedule` triggers. Nothing runs after that.
 2. Keep the state branch (`i18n-tms-state` in the example). Never delete it or its records. It is the only record of which Phrase jobs exist. Without it the next submit creates a new Phrase job for a source that was already sent, translators receive duplicate work, and reconcile no longer knows about the jobs in progress.
-3. Leave open locale pull requests open, or merge them. Closing one without merging fails that locale for its batch for good. To recover, reopen the pull request or delete its branch, then run submit with `retry-failed`.
+3. Leave open locale pull requests open, or merge them. Reconcile keeps updating open PRs from Phrase. Closing one without merging does not fail the locale. A closed PR is checked for reopening while its batch remains active; reopening resumes re-export. Once a reconcile observes every PR in the batch merged or closed, the batch completes, and reopening afterward does not resume automation.
 4. Phrase jobs keep running. The tooling never cancels them. Cancel in Phrase the ones you no longer want; a cancelled job is recorded as a failed locale on the next reconcile.
 5. To return to an earlier tooling version, pin `uses:` back to the previous reviewed commit SHA.
 

@@ -121,9 +121,25 @@ describe("Phrase consumer example", () => {
       async readFile() {
         return sourceBytes;
       },
+      async getPullRequestState() {
+        return { state: "open", headSha: "tooling-commit" };
+      },
       async createOrUpdatePullRequest(input) {
         pullRequests.push(input);
         return "https://github.com/example/consumer/pull/1";
+      },
+      async createOrUpdatePullRequestWithCommit(input) {
+        pullRequests.push(input);
+        return {
+          pullRequestUrl: "https://github.com/example/consumer/pull/1",
+          toolingCommitSha: "tooling-commit",
+        };
+      },
+      async updateOpenPullRequest() {
+        return { changed: false, toolingCommitSha: "tooling-commit", bodyUpdated: false };
+      },
+      async updatePullRequestBody() {
+        return true;
       },
     };
     const workflow = new PhraseWorkflow({
@@ -287,9 +303,25 @@ describe("Phrase consumer example", () => {
       async readFile() {
         return textSourceBytes;
       },
+      async getPullRequestState() {
+        return { state: "open", headSha: "tooling-commit" };
+      },
       async createOrUpdatePullRequest(input) {
         pullRequests.push(input);
         return "https://github.com/example/consumer/pull/2";
+      },
+      async createOrUpdatePullRequestWithCommit(input) {
+        pullRequests.push(input);
+        return {
+          pullRequestUrl: "https://github.com/example/consumer/pull/2",
+          toolingCommitSha: "tooling-commit",
+        };
+      },
+      async updateOpenPullRequest() {
+        return { changed: false, toolingCommitSha: "tooling-commit", bodyUpdated: false };
+      },
+      async updatePullRequestBody() {
+        return true;
       },
     };
     const adapters = new CatalogAdapterRegistry();

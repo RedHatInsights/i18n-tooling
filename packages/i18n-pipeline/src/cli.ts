@@ -580,7 +580,16 @@ async function runTmsCommand(
     options.stdout(
       `Phrase batch ${batch.key} is ${batch.phase} (${batch.jobs.length} job parts${warningSummary}).`,
     );
-    return 0;
+    const failedLocales = Object.entries(batch.locales).filter(
+      ([, locale]) => locale.phase === "failed",
+    );
+    for (const [phraseLocale, locale] of failedLocales) {
+      options.stdout(
+        `${batch.key.slice(0, 12)} ${phraseLocale}: failed` +
+          (locale.failureReason ? ` — ${locale.failureReason}` : ""),
+      );
+    }
+    return failedLocales.length ? 1 : 0;
   }
 
   const results = await workflow.reconcile(phrasePins);

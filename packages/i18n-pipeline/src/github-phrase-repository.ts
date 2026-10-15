@@ -2,7 +2,11 @@ import { PhraseBatchStateConflictError, PhraseRepositoryError } from "./phrase-w
 import type {
   PhraseBatchRecord,
   PhraseBatchStateStore,
+  PhraseLocalePullRequestCreated,
+  PhraseLocalePullRequestUpdate,
+  PhraseLocalePullRequestUpdateResult,
   PhraseLocalePullRequest,
+  PhrasePullRequestState,
   PhraseWorkflowRepository,
   StoredPhraseBatch,
 } from "./phrase-workflow.js";
@@ -29,7 +33,17 @@ interface GitHubPullRequestResponse {
   html_url?: string;
   state?: string;
   merged_at?: string | null;
+  number?: number;
+  head?: { sha?: string; ref?: string };
 }
+
+interface GitHubCompareResponse {
+  ahead_by?: number;
+  commits?: { sha?: string }[];
+  files?: { filename?: string; previous_filename?: string }[];
+}
+
+type LocaleCommitWriteResult = { sha: string } | { finalized: "merged" | "closed" };
 
 export class GitHubRepositoryError extends PhraseRepositoryError {
   constructor(message: string, status: number, permanent = false) {
@@ -234,6 +248,29 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
   }
 
   async createOrUpdatePullRequest(input: PhraseLocalePullRequest): Promise<string> {
+    return (await this.createOrUpdatePullRequestWithCommit(input)).pullRequestUrl;
+  }
+
+  async getPullRequestState(pullRequestUrl: string): Promise<PhrasePullRequestState> {
+    const number = this.pullRequestNumber(pullRequestUrl);
+    const response = await this.request(`${this.repositoryPath}/pulls/${number}`, {
+      method: "GET",
+    });
+    const value: unknown = await response.json();
+    if (!isRecord(value) || typeof value.state !== "string") {
+      throw new GitHubRepositoryError("GitHub returned an invalid pull request response", 500);
+    }
+    if (value.merged_at) return { state: "merged" };
+    if (value.state === "closed") return { state: "closed" };
+    if (value.state !== "open" || !isRecord(value.head) || !nonEmptyString(value.head.sha)) {
+      throw new GitHubRepositoryError("GitHub returned an invalid open pull request head", 500);
+    }
+    return { state: "open", headSha: value.head.sha };
+  }
+
+  async createOrUpdatePullRequestWithCommit(
+    input: PhraseLocalePullRequest,
+  ): Promise<PhraseLocalePullRequestCreated> {
     if (input.repository !== `${this.owner}/${this.name}`) {
       throw new TypeError("Phrase PR repository does not match the GitHub token repository");
     }
@@ -244,7 +281,24 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     }
     const existing = await this.findPullRequests(input.branch, input.baseRef);
     const merged = existing.find((pullRequest) => pullRequest.merged_at && pullRequest.html_url);
-    if (merged?.html_url) return merged.html_url;
+    if (merged?.html_url)
+      return {
+        pullRequestUrl: merged.html_url,
+        ...(nonEmptyString(merged.head?.sha) ? { toolingCommitSha: merged.head.sha } : {}),
+        pullRequestFinalized: true,
+        pullRequestMerged: true,
+      };
+    const closed = existing.find(
+      (pullRequest) =>
+        pullRequest.state === "closed" && !pullRequest.merged_at && pullRequest.html_url,
+    );
+    if (closed?.html_url) {
+      return {
+        pullRequestUrl: closed.html_url,
+        ...(nonEmptyString(closed.head?.sha) ? { toolingCommitSha: closed.head.sha } : {}),
+        pullRequestFinalized: true,
+      };
+    }
     if (existing.some((pullRequest) => pullRequest.state === "closed")) {
       throw new GitHubRepositoryError(
         `A previous Phrase pull request for ${input.branch} was closed without merging; reopen it or delete the branch`,
@@ -255,31 +309,67 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
 
     const files = [{ path: input.path, content: input.content }, ...(input.additionalFiles ?? [])];
     const branchHead = await this.getReference(input.branch);
-    const changedFiles: { path: string; content: Uint8Array }[] = [];
-    if (branchHead) {
-      for (const file of files) {
-        const current = await this.getFile(file.path, branchHead);
-        if (!current || !Buffer.from(current.bytes).equals(Buffer.from(file.content))) {
-          changedFiles.push(file);
-        }
-      }
-    } else {
-      changedFiles.push(...files);
-    }
-    if (changedFiles.length) {
-      // On retry, branchHead can include intervening base edits; the inlined YAML is rebuilt from
-      // baseCommit, so the identical template hunks merge cleanly with that parent.
-      await this.writeLocaleCommit(
-        input.branch,
-        branchHead ?? input.baseCommit,
-        changedFiles,
-        branchHead === null,
-      );
-    }
     const open = existing.find(
       (pullRequest) => pullRequest.state === "open" && pullRequest.html_url,
     );
-    if (open?.html_url) return open.html_url;
+    if (open && !branchHead) {
+      throw new GitHubRepositoryError("Open Phrase pull request has no locale branch head", 409);
+    }
+    if (
+      branchHead &&
+      !(await this.isToolingOwned(
+        input.baseRef,
+        input.branch,
+        branchHead,
+        files,
+        input.expectedToolingCommitShas,
+        input.expectedToolingCommitSha,
+        input.expectedPendingToolingCommitSha,
+      ))
+    ) {
+      throw new GitHubRepositoryError(
+        `Phrase locale branch ${input.branch} is not tooling-owned; refusing to overwrite reviewer changes`,
+        409,
+      );
+    }
+    const changedFiles = await this.changedFiles(files, branchHead);
+    let toolingCommitSha = branchHead ?? input.baseCommit;
+    if (changedFiles.length) {
+      const commitResult = await this.writeLocaleCommit(
+        input.branch,
+        toolingCommitSha,
+        changedFiles,
+        branchHead === null,
+        input.recordToolingCommitSha,
+        input.recheckOwnedCommitEligibility,
+        open?.html_url
+          ? () => this.pullRequestIsOpenAtHead(open.html_url!, toolingCommitSha)
+          : undefined,
+      );
+      if ("finalized" in commitResult) {
+        return {
+          pullRequestUrl: open!.html_url!,
+          toolingCommitSha,
+          pullRequestFinalized: true,
+          ...(commitResult.finalized === "merged" ? { pullRequestMerged: true } : {}),
+        };
+      }
+      toolingCommitSha = commitResult.sha;
+    }
+    if (open?.html_url) {
+      try {
+        if (!(await this.updatePullRequestBody(open.html_url, input.body, input.title))) {
+          return {
+            pullRequestUrl: open.html_url,
+            toolingCommitSha,
+            pullRequestFinalized: true,
+          };
+        }
+        return { pullRequestUrl: open.html_url, toolingCommitSha };
+      } catch (bodyError) {
+        return { pullRequestUrl: open.html_url, toolingCommitSha, bodyError };
+      }
+    }
 
     try {
       const response = await this.request(`${this.repositoryPath}/pulls`, {
@@ -298,17 +388,262 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
           response.status,
         );
       }
-      return value.html_url;
+      return { pullRequestUrl: value.html_url, toolingCommitSha };
     } catch (error) {
       if (error instanceof GitHubRepositoryError && error.status === 422) {
         const raced = await this.findPullRequests(input.branch, input.baseRef);
         const open = raced.find(
           (pullRequest) => pullRequest.state === "open" && pullRequest.html_url,
         );
-        if (open?.html_url) return open.html_url;
+        if (open?.html_url) {
+          let bodyError: unknown;
+          let pullRequestFinalized = false;
+          try {
+            pullRequestFinalized = !(await this.updatePullRequestBody(
+              open.html_url,
+              input.body,
+              input.title,
+            ));
+          } catch (updateError) {
+            bodyError = updateError;
+          }
+          return {
+            pullRequestUrl: open.html_url,
+            toolingCommitSha,
+            ...(pullRequestFinalized ? { pullRequestFinalized: true } : {}),
+            ...(bodyError ? { bodyError } : {}),
+          };
+        }
       }
       throw error;
     }
+  }
+
+  async updateOpenPullRequest(
+    input: PhraseLocalePullRequestUpdate,
+  ): Promise<PhraseLocalePullRequestUpdateResult> {
+    if (input.repository !== `${this.owner}/${this.name}`) {
+      throw new TypeError("Phrase PR repository does not match the GitHub token repository");
+    }
+    assertGitRef(input.baseRef);
+    assertGitRef(input.branch);
+    this.pullRequestNumber(input.pullRequestUrl);
+    if (!nonEmptyString(input.headSha)) {
+      throw new GitHubRepositoryError("GitHub returned an invalid open pull request head", 500);
+    }
+    const pullRequestState = await this.getPullRequestState(input.pullRequestUrl);
+    if (pullRequestState.state !== "open") {
+      return {
+        changed: false,
+        toolingCommitSha: input.expectedToolingCommitSha ?? input.headSha,
+        bodyUpdated: false,
+        pullRequestFinalized: true,
+        ...(pullRequestState.state === "merged" ? { pullRequestMerged: true } : {}),
+      };
+    }
+    if (pullRequestState.headSha !== input.headSha) {
+      throw new GitHubRepositoryError(
+        `Phrase locale branch ${input.branch} moved during re-export; retrying from its current head`,
+        409,
+      );
+    }
+    const headSha = pullRequestState.headSha;
+    const files = [{ path: input.path, content: input.content }, ...(input.additionalFiles ?? [])];
+    if (
+      !(await this.isToolingOwned(
+        input.baseRef,
+        input.branch,
+        headSha,
+        files,
+        input.expectedToolingCommitShas,
+        input.expectedToolingCommitSha,
+        input.expectedPendingToolingCommitSha,
+      ))
+    ) {
+      throw new GitHubRepositoryError(
+        `Phrase locale branch ${input.branch} is not tooling-owned; refusing to overwrite reviewer changes`,
+        409,
+      );
+    }
+
+    const changedFiles = await this.changedFiles(files, headSha);
+    if (!changedFiles.length) {
+      return {
+        changed: false,
+        toolingCommitSha: headSha,
+        bodyUpdated: false,
+      };
+    }
+
+    const commitResult = await this.writeLocaleCommit(
+      input.branch,
+      headSha,
+      changedFiles,
+      false,
+      input.recordToolingCommitSha,
+      input.recheckOwnedCommitEligibility,
+      () => this.pullRequestIsOpenAtHead(input.pullRequestUrl, headSha),
+    );
+    if ("finalized" in commitResult) {
+      return {
+        changed: false,
+        toolingCommitSha: headSha,
+        bodyUpdated: false,
+        pullRequestFinalized: true,
+        ...(commitResult.finalized === "merged" ? { pullRequestMerged: true } : {}),
+      };
+    }
+    const toolingCommitSha = commitResult.sha;
+    try {
+      const bodyUpdated = await this.updatePullRequestBody(
+        input.pullRequestUrl,
+        input.body,
+        input.title,
+      );
+      return {
+        changed: true,
+        toolingCommitSha,
+        bodyUpdated,
+        ...(!bodyUpdated ? { pullRequestFinalized: true } : {}),
+      };
+    } catch (bodyError) {
+      return { changed: true, toolingCommitSha, bodyUpdated: false, bodyError };
+    }
+  }
+
+  async updatePullRequestBody(
+    pullRequestUrl: string,
+    body: string,
+    title?: string,
+  ): Promise<boolean> {
+    const number = this.pullRequestNumber(pullRequestUrl);
+    const state = await this.getPullRequestState(pullRequestUrl);
+    if (state.state !== "open") return false;
+    await this.request(`${this.repositoryPath}/pulls/${number}`, {
+      method: "PATCH",
+      body: JSON.stringify({ ...(title === undefined ? {} : { title }), body }),
+    });
+    return true;
+  }
+
+  private async pullRequestIsOpenAtHead(
+    pullRequestUrl: string,
+    expectedHeadSha: string,
+  ): Promise<PhrasePullRequestState> {
+    const state = await this.getPullRequestState(pullRequestUrl);
+    if (state.state !== "open") return state;
+    if (state.headSha !== expectedHeadSha) {
+      throw new GitHubRepositoryError(
+        "Phrase locale branch moved while applying the update; refusing to overwrite reviewer changes",
+        409,
+      );
+    }
+    return state;
+  }
+
+  private pullRequestNumber(pullRequestUrl: string): number {
+    let url: URL;
+    try {
+      url = new URL(pullRequestUrl);
+    } catch {
+      throw new TypeError("Phrase pull request URL is invalid");
+    }
+    const segments = url.pathname.split("/").filter(Boolean);
+    const [owner, repository, resource, number] = segments;
+    if (
+      owner?.toLowerCase() !== this.owner.toLowerCase() ||
+      repository?.toLowerCase() !== this.name.toLowerCase() ||
+      resource !== "pull" ||
+      !number ||
+      !/^\d+$/.test(number)
+    ) {
+      throw new TypeError("Phrase pull request URL does not match the GitHub repository");
+    }
+    return Number(number);
+  }
+
+  private async changedFiles(
+    files: { path: string; content: Uint8Array }[],
+    branchHead: string | null,
+  ): Promise<{ path: string; content: Uint8Array }[]> {
+    if (!branchHead) return files;
+    const changed: { path: string; content: Uint8Array }[] = [];
+    for (const file of files) {
+      const current = await this.getFile(file.path, branchHead);
+      if (!current || !Buffer.from(current.bytes).equals(Buffer.from(file.content))) {
+        changed.push(file);
+      }
+    }
+    return changed;
+  }
+
+  private async isToolingOwned(
+    baseRef: string,
+    branch: string,
+    headSha: string,
+    files: { path: string; content: Uint8Array }[],
+    expectedToolingCommitShas?: string[],
+    expectedToolingCommitSha?: string,
+    expectedPendingToolingCommitSha?: string,
+  ): Promise<boolean> {
+    const ownedShas = new Set(
+      [
+        ...(Array.isArray(expectedToolingCommitShas) ? expectedToolingCommitShas : []),
+        expectedToolingCommitSha,
+        expectedPendingToolingCommitSha,
+      ].filter(nonEmptyString),
+    );
+    if (ownedShas.size) {
+      return ownedShas.has(headSha);
+    }
+
+    return this.isSingleToolingCommit(
+      baseRef,
+      branch,
+      headSha,
+      new Set(files.map(({ path }) => path)),
+    );
+  }
+
+  private async isSingleToolingCommit(
+    baseRef: string,
+    branch: string,
+    headSha: string,
+    expectedPaths: Set<string>,
+  ): Promise<boolean> {
+    const compare = await this.compareCommits(baseRef, branch);
+    const changedFiles = compare.files;
+    return (
+      compare.ahead_by === 1 &&
+      compare.commits?.length === 1 &&
+      compare.commits[0]?.sha === headSha &&
+      changedFiles !== undefined &&
+      changedFiles.length > 0 &&
+      changedFiles.every((file) => this.isExpectedFileChange(file, expectedPaths))
+    );
+  }
+
+  private async compareCommits(base: string, head: string): Promise<GitHubCompareResponse> {
+    const compareRef = encodeURIComponent(`${base}...${head}`);
+    const response = await this.request(`${this.repositoryPath}/compare/${compareRef}`, {
+      method: "GET",
+    });
+    const value: unknown = await response.json();
+    if (!isRecord(value) || !Array.isArray(value.commits) || !Array.isArray(value.files)) {
+      throw new GitHubRepositoryError("GitHub returned an invalid commit comparison", 500);
+    }
+    return value as GitHubCompareResponse;
+  }
+
+  private isExpectedFileChange(
+    file: { filename?: string; previous_filename?: string },
+    expectedPaths: Set<string>,
+  ): boolean {
+    return (
+      nonEmptyString(file.filename) &&
+      expectedPaths.has(file.filename) &&
+      (!file.previous_filename || expectedPaths.has(file.previous_filename))
+    );
   }
 
   private batchPath(key: string): string {
@@ -363,7 +698,10 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     parent: string,
     files: { path: string; content: Uint8Array }[],
     createRef: boolean,
-  ): Promise<void> {
+    recordToolingCommitSha: (toolingSha: string, previousHeadSha: string | null) => Promise<void>,
+    recheckOwnedCommitEligibility?: (previousHeadSha: string | null) => Promise<void>,
+    beforeRefUpdate?: () => Promise<PhrasePullRequestState>,
+  ): Promise<LocaleCommitWriteResult> {
     const baseTree = await this.getCommitTree(parent);
     const entries: { path: string; mode: "100644"; type: "blob"; sha: string }[] = [];
     for (const file of files) {
@@ -416,6 +754,20 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     const refPath = createRef
       ? `${this.repositoryPath}/git/refs`
       : `${this.repositoryPath}/git/refs/heads/${encodeRefPath(branch)}`;
+    if (!createRef) {
+      const currentHead = await this.getReference(branch);
+      if (currentHead !== parent) {
+        throw new GitHubRepositoryError(
+          `Phrase locale branch ${branch} moved before the update; refusing to overwrite reviewer changes`,
+          409,
+        );
+      }
+      if (beforeRefUpdate) {
+        const pullRequestState = await beforeRefUpdate();
+        if (pullRequestState.state !== "open") return { finalized: pullRequestState.state };
+      }
+    }
+    await recordToolingCommitSha(commitValue.sha, createRef ? null : parent);
     const refInit: RequestInit = createRef
       ? {
           method: "POST",
@@ -425,6 +777,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
           method: "PATCH",
           body: JSON.stringify({ sha: commitValue.sha, force: false }),
         };
+    if (!createRef) await recheckOwnedCommitEligibility?.(parent);
     try {
       await this.request(refPath, refInit);
     } catch (error) {
@@ -432,10 +785,14 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
         error instanceof GitHubRepositoryError &&
         (error.status === 409 || error.status === 422)
       ) {
-        throw new PhraseBatchStateConflictError("Phrase locale branch changed concurrently");
+        throw new GitHubRepositoryError(
+          `Phrase locale branch ${branch} changed while applying the update; refusing to overwrite reviewer changes`,
+          error.status,
+        );
       }
       throw error;
     }
+    return { sha: commitValue.sha };
   }
 
   private async getCommitTree(commit: string): Promise<string> {

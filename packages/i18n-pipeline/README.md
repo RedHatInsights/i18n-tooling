@@ -29,7 +29,8 @@ The FormatJS adapter retains string/object descriptions and other descriptor met
 | Rule                             | Severity | Locales        | Finding                                                                                                                              |
 | -------------------------------- | -------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `missing-exact-plural-selector`  | error    | all            | The translation dropped a source `=N` branch.                                                                                        |
-| `plural-count-dropped`           | warning  | all            | The source `other` branch shows the count; the translation's does not. FormatJS treats `#` inside a nested `select` as literal text. |
+| `plural-count-dropped`           | error in `other`; warning in other branches | all | A structurally paired `other` branch drops a count shown by the source; use `#` where the number belongs. |
+| `ambiguous-plural-occurrence`    | warning  | all            | Repeated plurals at the same structural path cannot be paired safely, so count-drop checks are skipped.                                |
 | `unused-plural-category`         | warning  | all            | The translation has a category its locale never selects, such as `one` in zh, ja, or ko.                                             |
 | `korean-particle-after-argument` | warning  | ko             | A bare 이/가, 은/는, 을/를, 과/와, or (으)로 follows a runtime value. Use `을(를)`-style forms or rephrase.                          |
 | `french-punctuation-space`       | warning  | fr (not fr-CA) | A regular space precedes `: ; ! ? »` or follows `«`. Use U+00A0 or U+202F.                                                           |
