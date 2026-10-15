@@ -9,7 +9,7 @@ Add only the missing callers. Copy them from `assets/workflows/` next to this `r
 - `phrase-submit.yml` runs on a merge to the default branch that changes the source catalog or the Phrase config, and on manual dispatch with `retry-failed`. It grants `contents: write`.
 - `phrase-reconcile.yml` runs on a weekday schedule and on manual dispatch. It grants `contents: write` and `pull-requests: write`.
 
-Both callers name the same environment (the template uses `phrase-pilot`). The same callers serve both GitHub auth modes: the bound environment's secrets select the mode, so the callers pass no credentials. Never dispatch them from this skill. To pilot from a feature branch before merging, follow [consumer onboarding step 6](https://github.com/RedHatInsights/i18n-tooling/blob/main/docs/consumer-onboarding.md#6-pilot-phrase-from-a-feature-branch).
+Both callers name the same environment (the template uses `phrase-pilot`). A reusable workflow sees only the secrets its caller maps in `secrets:`; binding the environment in the called job does not expose that environment's secrets by itself. Each caller therefore maps `PHRASE_PLATFORM_API_TOKEN: ${{ secrets.PHRASE_PLATFORM_API_TOKEN }}`. In App mode, uncomment the `APP_CLIENT_ID` and `APP_PRIVATE_KEY` mappings; the bound environment supplies the values. A caller that omits them runs silently as `GITHUB_TOKEN`. Never dispatch them from this skill. To pilot from a feature branch before merging, follow [consumer onboarding step 6](https://github.com/RedHatInsights/i18n-tooling/blob/main/docs/consumer-onboarding.md#6-pilot-phrase-from-a-feature-branch).
 
 ## Environment and auth
 
@@ -31,7 +31,7 @@ Use `gh api` GET requests only, and never request, print, or copy a secret value
 - `repos/{owner}/{repo}/actions/secrets` lists repository secrets, which should hold none of these names.
 - In `GITHUB_TOKEN` mode, `repos/{owner}/{repo}/actions/permissions/workflow` reports whether Actions can create pull requests.
 
-Expect `PHRASE_PLATFORM_API_TOKEN`, plus both or neither of `APP_CLIENT_ID` and `APP_PRIVATE_KEY` to match the chosen auth mode. Flag Service Account secrets, and a lone App secret. If the repository cannot be resolved, or `gh` is absent, unauthenticated, or lacks permission, report the check as unverified and put it in the admin checklist. Do not create or update secrets or settings.
+Expect `PHRASE_PLATFORM_API_TOKEN`, plus both or neither of `APP_CLIENT_ID` and `APP_PRIVATE_KEY` to match the chosen auth mode. Flag Service Account secrets, and a lone App secret. Also check that every existing caller maps each expected name in `secrets:`; an unmapped name arrives empty. If the repository cannot be resolved, or `gh` is absent, unauthenticated, or lacks permission, report the check as unverified and put it in the admin checklist. Do not create or update secrets or settings.
 
 ## Admin follow-up
 

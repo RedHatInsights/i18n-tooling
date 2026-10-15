@@ -171,6 +171,16 @@ fixtures["formatjs-frontend-standalone"] = {
     ".github/workflows/phrase-reconcile.yml",
   ],
   forbiddenFiles: [],
+  // A reusable workflow sees only the secrets its caller maps.
+  requiredText: [
+    ...fixtures["formatjs-frontend"].requiredText,
+    ...["phrase-submit.yml", "phrase-reconcile.yml"].flatMap((name) =>
+      ["PHRASE_PLATFORM_API_TOKEN", "APP_CLIENT_ID", "APP_PRIVATE_KEY"].map((secret) => [
+        `.github/workflows/${name}`,
+        `${secret}: \${{ secrets.${secret} }}`,
+      ]),
+    ),
+  ],
 };
 
 const failures = [];
