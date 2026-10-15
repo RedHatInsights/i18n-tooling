@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
-import { parseCatalogValidationConfig } from "../src/index.js";
+import { BUILT_IN_CATALOG_ADAPTER_IDS, parseCatalogValidationConfig } from "../src/index.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -110,6 +110,14 @@ describe("repository i18n contracts", () => {
     expect(reconcile.on.schedule).toHaveLength(1);
     expect(reconcile.on.schedule[0].cron).toMatch(/^\S+ \S+ \S+ \S+ \S+$/);
     expect(reconcile.on).toHaveProperty("workflow_dispatch");
+  });
+
+  it("limits the TMS config schema to the built-in adapters", async () => {
+    const schema = JSON.parse(
+      await readFile(join(repositoryRoot, "schemas/phrase-tms-config.schema.json"), "utf8"),
+    );
+
+    expect(schema.$defs.builtInAdapter.enum).toEqual(BUILT_IN_CATALOG_ADAPTER_IDS);
   });
 
   it("calls the reusable workflow with a real repository fixture", async () => {

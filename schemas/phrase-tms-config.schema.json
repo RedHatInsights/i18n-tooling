@@ -5,6 +5,12 @@
   "description": "Consumer-repository configuration for reusable Phrase submission and reconciliation workflows. Credentials must be provided as protected workflow secrets; the CLI rejects credential-like keys anywhere in this file.",
   "type": "object",
   "required": ["provider", "project", "sourceCatalog", "targetLocales"],
+  "$defs": {
+    "builtInAdapter": {
+      "description": "tms submit and tms reconcile run with Phrase and GitHub write credentials, so they load only the CLI's built-in catalog adapters.",
+      "enum": ["formatjs-json", "icu-json", "openapi-problem-details"]
+    }
+  },
   "properties": {
     "provider": {
       "const": "phrase"
@@ -51,8 +57,7 @@
           "pattern": "^[^/\\\\]+$"
         },
         "adapter": {
-          "type": "string",
-          "minLength": 1
+          "$ref": "#/$defs/builtInAdapter"
         },
         "locale": {
           "type": "string",
@@ -73,8 +78,7 @@
       "additionalProperties": false
     },
     "targetAdapter": {
-      "type": "string",
-      "minLength": 1
+      "$ref": "#/$defs/builtInAdapter"
     },
     "targetOptions": {
       "type": "object",
