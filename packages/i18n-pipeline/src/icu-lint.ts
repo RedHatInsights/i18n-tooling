@@ -22,6 +22,7 @@ export type IcuLintRule =
   | "unformatted-count-argument"
   | "missing-exact-plural-selector"
   | "plural-count-dropped"
+  | "ambiguous-plural-occurrence"
   | "korean-particle-after-argument"
   | "french-punctuation-space";
 
@@ -95,6 +96,45 @@ function plurals(elements: MessageFormatElement[]): PluralElement[] {
     if (element.type === TYPE.plural) found.push(element);
   });
   return found;
+}
+
+function pluralOccurrencesByStructuralPath(
+  elements: MessageFormatElement[],
+): Map<string, PluralElement[]> {
+  const occurrences = new Map<string, PluralElement[]>();
+  const visit = (current: MessageFormatElement[], enclosingPath: string[]) => {
+    for (const element of current) {
+      if (element.type === TYPE.plural) {
+        const pluralKind = element.pluralType === "ordinal" ? "selectordinal" : "plural";
+        const path = JSON.stringify([
+          ...enclosingPath,
+          JSON.stringify([pluralKind, element.value]),
+        ]);
+        const group = occurrences.get(path) ?? [];
+        group.push(element);
+        occurrences.set(path, group);
+      }
+      if (element.type === TYPE.select || element.type === TYPE.plural) {
+        const selectorKind =
+          element.type === TYPE.select
+            ? "select"
+            : element.pluralType === "ordinal"
+              ? "selectordinal"
+              : "plural";
+        for (const [optionKey, option] of Object.entries(element.options)) {
+          visit(option.value, [
+            ...enclosingPath,
+            JSON.stringify([selectorKind, element.value, optionKey]),
+          ]);
+        }
+      }
+      if (element.type === TYPE.tag) {
+        visit(element.children, [...enclosingPath, JSON.stringify(["tag", element.value])]);
+      }
+    }
+  };
+  visit(elements, []);
+  return occurrences;
 }
 
 function argumentOccurrences(elements: MessageFormatElement[]): Map<string, number> {
@@ -310,26 +350,64 @@ export function lintTargetMessage(
     }
   }
 
-  const targetPlurals = plurals(target);
-  const checkedCounts = new Set<string>();
-  for (const element of plurals(source)) {
-    if (checkedCounts.has(element.value)) continue;
-    if (!rendersCount(element.options.other?.value ?? [], element.value)) continue;
-    checkedCounts.add(element.value);
-    const dropped = targetPlurals.some(
-      (translated) =>
-        translated.value === element.value &&
-        !rendersCount(translated.options.other?.value ?? [], element.value),
-    );
-    if (dropped) {
+  const sourcePluralGroups = pluralOccurrencesByStructuralPath(source);
+  const targetPluralGroups = pluralOccurrencesByStructuralPath(target);
+  for (const [path, sourceOccurrences] of sourcePluralGroups) {
+    const targetOccurrences = targetPluralGroups.get(path) ?? [];
+    if (sourceOccurrences.length > 1 || targetOccurrences.length > 1) {
+      const argument = sourceOccurrences[0]?.value ?? targetOccurrences[0]?.value ?? "?";
       findings.push({
         id,
-        rule: "plural-count-dropped",
+        rule: "ambiguous-plural-occurrence",
         severity: "warning",
         message:
-          `"${id}": the source "other" branch of plural {${element.value}} shows the count, ` +
-          `but the translation's does not. Use # where the number belongs.`,
+          `"${id}": repeated plural {${argument}} occurrences share a structural path and ` +
+          "cannot be paired unambiguously; count-drop checks were skipped.",
       });
+      continue;
+    }
+    if (!targetOccurrences.length || sourceOccurrences.length !== targetOccurrences.length)
+      continue;
+    for (const [index, element] of sourceOccurrences.entries()) {
+      const translated = targetOccurrences[index];
+      if (!translated) continue;
+      const argument = element.value;
+      const sourceOther = element.options.other;
+      const targetOther = translated.options.other;
+      if (
+        sourceOther &&
+        targetOther &&
+        rendersCount(sourceOther.value, argument) &&
+        !rendersCount(targetOther.value, argument)
+      ) {
+        findings.push({
+          id,
+          rule: "plural-count-dropped",
+          severity: "error",
+          message:
+            `"${id}": the source "other" branch of plural {${argument}} shows the count, ` +
+            `but the translation's does not. Use # where the number belongs.`,
+        });
+      }
+      for (const [branch, option] of Object.entries(element.options)) {
+        if (branch === "other") continue;
+        const translatedBranch = translated.options[branch];
+        if (
+          !rendersCount(option.value, argument) ||
+          !translatedBranch ||
+          rendersCount(translatedBranch.value, argument)
+        ) {
+          continue;
+        }
+        findings.push({
+          id,
+          rule: "plural-count-dropped",
+          severity: branch === "other" ? "error" : "warning",
+          message:
+            `"${id}": the source "${branch}" branch of plural {${argument}} shows the count, ` +
+            `but the translation's does not. Use # where the number belongs.`,
+        });
+      }
     }
   }
 

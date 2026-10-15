@@ -239,10 +239,21 @@ describe("target plural checks", () => {
     ).toEqual(["error:missing-exact-plural-selector"]);
   });
 
-  it("warns when the other branch no longer shows the count", () => {
+  it("still reports a dropped count for a single zh plural", () => {
+    const [finding] = lintTargetMessage(
+      "requests",
+      "{count, plural, one {# request} other {# requests}}",
+      "{count, plural, other {请求}}",
+      "zh",
+    );
     expect(
-      targetRules("{count, plural, other {# accounts}}", "{count, plural, other {帐户}}", "zh"),
-    ).toEqual(["warning:plural-count-dropped"]);
+      targetRules(
+        "{count, plural, one {# request} other {# requests}}",
+        "{count, plural, other {请求}}",
+        "zh",
+      ),
+    ).toEqual(["error:plural-count-dropped"]);
+    expect(finding?.message).toContain("Use # where the number belongs");
     expect(
       targetRules(
         "{count, plural, other {# accounts}}",
@@ -257,7 +268,94 @@ describe("target plural checks", () => {
         "{count, plural, other {{kind, select, other {<b>#</b> 个}}}}",
         "zh",
       ),
+    ).toEqual(["error:plural-count-dropped"]);
+  });
+
+  it("warns instead of pairing repeated plural occurrences by index", () => {
+    expect(
+      targetRules(
+        "{count, plural, one {# request} other {# requests}}; {count, plural, other {# requests}}",
+        "{count, plural, other {# 个请求}}; {count, plural, other {请求}}",
+        "zh",
+      ),
+    ).toEqual(["warning:ambiguous-plural-occurrence"]);
+  });
+
+  it("warns when repeated plural occurrences cannot be paired unambiguously", () => {
+    expect(
+      lintTargetMessage(
+        "requests",
+        "{count, plural, other {# first}}; {count, plural, other {# second}}",
+        "{count, plural, other {# first}}",
+        "zh",
+      ),
+    ).toMatchObject([
+      expect.objectContaining({
+        rule: "ambiguous-plural-occurrence",
+        severity: "warning",
+        message: expect.stringContaining("cannot be paired unambiguously"),
+      }),
+    ]);
+  });
+
+  it("pairs plurals by tag identity when tagged clauses are reordered", () => {
+    expect(
+      targetRules(
+        "<b>{count, plural, other {# bold}}</b> <i>{count, plural, other {items}}</i>",
+        "<i>{count, plural, other {éléments}}</i> <b>{count, plural, other {# éléments}}</b>",
+        "fr",
+      ),
+    ).toEqual([]);
+  });
+
+  it("pairs nested plurals by select option when target options are reordered", () => {
+    expect(
+      targetRules(
+        "{kind, select, a {{count, plural, one {One item} other {Many items}}} b {{count, plural, one {# item} other {Many items}}} other {None}}",
+        "{kind, select, b {{count, plural, one {# élément} other {plusieurs éléments}}} a {{count, plural, one {un élément} other {plusieurs éléments}}} other {Aucun}}",
+        "fr",
+      ),
+    ).toEqual([]);
+  });
+
+  it("reports a dropped count in the structurally matching reordered select option", () => {
+    expect(
+      targetRules(
+        "{kind, select, a {{count, plural, one {One item} other {Many items}}} b {{count, plural, one {# item} other {Many items}}} other {None}}",
+        "{kind, select, b {{count, plural, one {élément} other {plusieurs éléments}}} a {{count, plural, one {# élément} other {plusieurs éléments}}} other {Aucun}}",
+        "fr",
+      ),
     ).toEqual(["warning:plural-count-dropped"]);
+  });
+
+  it("does not report an extra target plural occurrence as a count drop", () => {
+    expect(
+      targetRules(
+        "{kind, select, a {None} other {Nothing}}",
+        "{kind, select, a {Aucun} other {{count, plural, one {# élément} other {# éléments}}}}",
+        "fr",
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not treat Russian few and many nested plurals as count drops", () => {
+    expect(
+      targetRules(
+        "{count, plural, one {{groupCount, plural, one {# group} other {# groups}}} other {# requests}}",
+        "{count, plural, one {# запрос} few {{groupCount, plural, one {# группа} few {# группы} many {# групп} other {# группы}}} many {{groupCount, plural, one {# группа} few {# группы} many {# групп} other {# группы}}} other {# запросов}}",
+        "ru",
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not report a source one branch that Japanese omits with its nested plural", () => {
+    expect(
+      targetRules(
+        "{count, plural, one {{itemCount, plural, other {# item}}} other {# items}}",
+        "{count, plural, other {# 件}}",
+        "ja",
+      ),
+    ).toEqual([]);
   });
 
   it("does not count # of a nested plural over another argument", () => {
@@ -266,6 +364,26 @@ describe("target plural checks", () => {
         "{count, plural, other {# in {groups, plural, other {# groups}}}}",
         "{count, plural, other {{groups, plural, other {# 组}}}}",
         "zh",
+      ),
+    ).toEqual(["error:plural-count-dropped"]);
+  });
+
+  it("warns when a non-other plural category drops the count", () => {
+    expect(
+      targetRules(
+        "{count, plural, one {# request} other {# requests}}",
+        "{count, plural, one {请求} other {# 个请求}}",
+        "en",
+      ),
+    ).toEqual(["warning:plural-count-dropped"]);
+  });
+
+  it("warns when an exact plural selector drops the count", () => {
+    expect(
+      targetRules(
+        "{count, plural, =1 {# request} other {# requests}}",
+        "{count, plural, =1 {请求} other {# 个请求}}",
+        "en",
       ),
     ).toEqual(["warning:plural-count-dropped"]);
   });
