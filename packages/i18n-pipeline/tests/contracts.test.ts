@@ -90,17 +90,16 @@ describe("repository i18n contracts", () => {
   });
 
   it("triggers the example Phrase callers on merge and on a schedule, with manual fallbacks", async () => {
-    const example = join(repositoryRoot, "examples/phrase-consumer/.github");
-    const readYaml = async (path: string) => parse(await readFile(join(example, path), "utf8"));
-    const config = JSON.parse(await readFile(join(example, "i18n/phrase-tms.json"), "utf8"));
-    const submit = await readYaml("workflows/phrase-submit.yml");
-    const reconcile = await readYaml("workflows/phrase-reconcile.yml");
+    const consumer = join(repositoryRoot, "examples/phrase-consumer");
+    const read = (path: string) => readFile(join(consumer, path), "utf8");
+    const submit = parse(await read(".github/workflows/phrase-submit.yml"));
+    const reconcile = parse(await read(".github/workflows/phrase-reconcile.yml"));
+    const configPath = submit.jobs.submit.with["config-path"];
+    const config = JSON.parse(await read(configPath));
 
+    expect(reconcile.jobs.reconcile.with["config-path"]).toBe(configPath);
     expect(submit.on.push.branches).toEqual(["main"]);
-    expect(submit.on.push.paths).toEqual([
-      config.sourceCatalog.path,
-      ".github/i18n/phrase-tms.json",
-    ]);
+    expect(submit.on.push.paths).toEqual([config.sourceCatalog.path, configPath]);
     expect(submit.on.workflow_dispatch.inputs["retry-failed"]).toMatchObject({
       type: "boolean",
       default: false,
