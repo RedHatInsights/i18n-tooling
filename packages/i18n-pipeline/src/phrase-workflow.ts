@@ -200,6 +200,11 @@ type LocaleReadiness =
   | { phase: "pending" }
   | { phase: "failed"; reason: string };
 
+interface SourceCatalogReadResult {
+  bytes: Uint8Array | null;
+  formatError?: string;
+}
+
 const MAX_PULL_REQUEST_WARNINGS = 50;
 
 /** Lists non-blocking translation lint findings for the locale PR reviewer. */
@@ -399,17 +404,25 @@ export class PhraseWorkflow {
   private async readSourceCatalog(
     config: PhraseWorkflowConfig,
     ref: string,
-  ): Promise<Uint8Array | null> {
+  ): Promise<SourceCatalogReadResult> {
     if (config.frontendTemplate?.generateSourceCatalog) {
       const template = await this.dependencies.repository.readFile(
         config.frontendTemplate.path,
         ref,
       );
-      return template
-        ? new TextEncoder().encode(formatFeoCatalog(new TextDecoder().decode(template)))
-        : null;
+      if (!template) return { bytes: null };
+      try {
+        return {
+          bytes: new TextEncoder().encode(formatFeoCatalog(new TextDecoder().decode(template))),
+        };
+      } catch (error) {
+        return {
+          bytes: null,
+          formatError: error instanceof Error ? error.message : String(error),
+        };
+      }
     }
-    return this.dependencies.repository.readFile(config.sourceCatalog.path, ref);
+    return { bytes: await this.dependencies.repository.readFile(config.sourceCatalog.path, ref) };
   }
 
   async submit(input: PhraseSubmitInput): Promise<PhraseBatchRecord> {
@@ -441,7 +454,13 @@ export class PhraseWorkflow {
     this.dependencies.catalogAdapters.get(targetAdapterId(input.config));
 
     const sourceDigest = digest(input.sourceBytes);
-    const pinnedSourceBytes = await this.readSourceCatalog(input.config, input.sourceCommit);
+    const pinnedSource = await this.readSourceCatalog(input.config, input.sourceCommit);
+    if (pinnedSource.formatError) {
+      throw new PhraseWorkflowError(
+        `Frontend template cannot be inlined: ${pinnedSource.formatError}`,
+      );
+    }
+    const pinnedSourceBytes = pinnedSource.bytes;
     if (!pinnedSourceBytes || digest(pinnedSourceBytes) !== sourceDigest) {
       throw new PhraseWorkflowError(
         "Source bytes do not match the source file at the requested commit",
@@ -623,10 +642,27 @@ export class PhraseWorkflow {
     }
 
     const baseCommit = await this.dependencies.repository.resolveCommit(record.baseRef);
-    const [pinnedSourceBytes, currentSourceBytes] = await Promise.all([
+    const [pinnedSource, currentSource] = await Promise.all([
       this.readSourceCatalog(record.config, record.sourceCommit),
       this.readSourceCatalog(record.config, baseCommit),
     ]);
+    const invalidTemplateRead = pinnedSource.formatError
+      ? { ref: record.sourceCommit, error: pinnedSource.formatError }
+      : currentSource.formatError
+        ? { ref: baseCommit, error: currentSource.formatError }
+        : undefined;
+    if (invalidTemplateRead) {
+      await this.closeBatch(
+        record,
+        revision,
+        "superseded",
+        `Frontend template cannot be inlined on ${invalidTemplateRead.ref}: ${invalidTemplateRead.error}`,
+        results,
+      );
+      return;
+    }
+    const pinnedSourceBytes = pinnedSource.bytes;
+    const currentSourceBytes = currentSource.bytes;
     if (!pinnedSourceBytes || digest(pinnedSourceBytes) !== record.sourceDigest) {
       await this.closeBatch(
         record,
@@ -780,7 +816,18 @@ export class PhraseWorkflow {
           sourceCatalog,
           targetAdapter,
         );
-        const latestSourceBytes = await this.readSourceCatalog(record.config, baseCommit);
+        const latestSource = await this.readSourceCatalog(record.config, baseCommit);
+        if (latestSource.formatError) {
+          await this.closeBatch(
+            record,
+            revision,
+            "superseded",
+            `Frontend template cannot be inlined on ${baseCommit}: ${latestSource.formatError}`,
+            results,
+          );
+          return;
+        }
+        const latestSourceBytes = latestSource.bytes;
         if (!latestSourceBytes || digest(latestSourceBytes) !== record.sourceDigest) {
           await this.closeBatch(
             record,
@@ -792,6 +839,13 @@ export class PhraseWorkflow {
           return;
         }
         const additionalFiles: { path: string; content: Uint8Array }[] = [];
+        let frontendTemplateData:
+          | {
+              path: string;
+              descriptors: FeoCatalog;
+              translated: Record<string, string>;
+            }
+          | undefined;
         if (record.config.frontendTemplate) {
           const path = record.config.frontendTemplate.path;
           const templateBytes = await this.dependencies.repository.readFile(path, baseCommit);
@@ -806,6 +860,7 @@ export class PhraseWorkflow {
               string,
               string
             >;
+            frontendTemplateData = { path, descriptors, translated };
             additionalFiles.push({
               path,
               content: new TextEncoder().encode(
@@ -816,6 +871,64 @@ export class PhraseWorkflow {
             throw new PhraseCatalogValidationError(
               `Frontend template inline failed: ${error instanceof Error ? error.message : String(error)}`,
             );
+          }
+        }
+        const latestBaseCommit = await this.dependencies.repository.resolveCommit(record.baseRef);
+        if (latestBaseCommit !== baseCommit) {
+          const latestSource = await this.readSourceCatalog(record.config, latestBaseCommit);
+          if (latestSource.formatError) {
+            await this.closeBatch(
+              record,
+              revision,
+              "superseded",
+              `Frontend template cannot be inlined on ${latestBaseCommit}: ${latestSource.formatError}`,
+              results,
+            );
+            return;
+          }
+          const latestSourceBytes = latestSource.bytes;
+          if (!latestSourceBytes || digest(latestSourceBytes) !== record.sourceDigest) {
+            await this.closeBatch(
+              record,
+              revision,
+              "superseded",
+              "Source catalog changed before the locale PR was created",
+              results,
+            );
+            return;
+          }
+          if (frontendTemplateData) {
+            const latestTemplateBytes = await this.dependencies.repository.readFile(
+              frontendTemplateData.path,
+              latestBaseCommit,
+            );
+            if (!latestTemplateBytes) {
+              await this.closeBatch(
+                record,
+                revision,
+                "superseded",
+                "Frontend template changed on the recorded PR base ref",
+                results,
+              );
+              return;
+            }
+            try {
+              inlineFeoLocale(
+                new TextDecoder().decode(latestTemplateBytes),
+                frontendTemplateData.descriptors,
+                frontendTemplateData.translated,
+                target.repositoryLocale,
+              );
+            } catch (error) {
+              await this.closeBatch(
+                record,
+                revision,
+                "superseded",
+                `Frontend template changed on the recorded PR base ref: ${error instanceof Error ? error.message : String(error)}`,
+                results,
+              );
+              return;
+            }
           }
         }
         const localeSlug = target.repositoryLocale.replace(/[^A-Za-z0-9._-]+/g, "-");
