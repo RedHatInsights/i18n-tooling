@@ -15,9 +15,12 @@ const fixtures = {
       "i18n/phrase-tms.json",
       "locales/translation-template.json",
       "src/locales/en.json",
+      ".github/workflows/locale-validation.yml",
+    ],
+    // Hub mode is the default: the i18n-hub runs submit and reconcile.
+    forbiddenFiles: [
       ".github/workflows/phrase-submit.yml",
       ".github/workflows/phrase-reconcile.yml",
-      ".github/workflows/locale-validation.yml",
     ],
     sections: ["checks", "generated", "catalogDirectories", "sourceLint"],
     packageScript: "translations:validate",
@@ -159,6 +162,17 @@ const fixtures = {
   },
 };
 
+fixtures["formatjs-frontend-standalone"] = {
+  ...fixtures["formatjs-frontend"],
+  fixture: "formatjs-frontend",
+  requiredFiles: [
+    ...fixtures["formatjs-frontend"].requiredFiles,
+    ".github/workflows/phrase-submit.yml",
+    ".github/workflows/phrase-reconcile.yml",
+  ],
+  forbiddenFiles: [],
+};
+
 const failures = [];
 function fail(item) {
   failures.push(item);
@@ -176,8 +190,12 @@ if (!onboardedRoot || !existsSync(onboardedRoot) || !statSync(onboardedRoot).isD
   process.exit(2);
 }
 
-const fixtureRoot = join(repositoryRoot, "tests/skill-fixtures", fixtureName);
 const expectation = fixtures[fixtureName];
+const fixtureRoot = join(
+  repositoryRoot,
+  "tests/skill-fixtures",
+  expectation.fixture ?? fixtureName,
+);
 const cliPath = resolve(
   process.env.I18N_PIPELINE_CLI ?? join(repositoryRoot, "packages/i18n-pipeline/dist/cli.js"),
 );
@@ -199,6 +217,12 @@ for (const relativePath of expectation.requiredFiles) {
 for (const relativePath of expectation.absentFiles ?? []) {
   if (existsSync(join(onboardedRoot, relativePath))) {
     fail(`generated file is absent until Phrase delivers it: ${relativePath}`);
+  }
+}
+
+for (const relativePath of expectation.forbiddenFiles ?? []) {
+  if (existsSync(join(onboardedRoot, relativePath))) {
+    fail(`file is absent in the selected Phrase mode: ${relativePath}`);
   }
 }
 
