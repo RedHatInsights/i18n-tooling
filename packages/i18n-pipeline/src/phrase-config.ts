@@ -138,11 +138,8 @@ export function validatePhraseWorkflowConfig(config: PhraseWorkflowConfig): void
   const repositoryLocales = new Set<string>();
   if (config.frontendTemplate) {
     validateRepoPath(config.frontendTemplate.path, "Frontend template path");
-    if (
-      config.frontendTemplate.generateSourceCatalog &&
-      (config.sourceCatalog.adapter !== "formatjs-json" || config.sourceCatalog.locale !== "en")
-    ) {
-      throw new TypeError("Generated Frontend source catalog requires formatjs-json and en");
+    if (config.sourceCatalog.adapter !== "formatjs-json" || config.sourceCatalog.locale !== "en") {
+      throw new TypeError("Frontend template requires formatjs-json and en");
     }
     if (
       config.frontendTemplate.path === config.sourceCatalog.path ||
@@ -155,6 +152,13 @@ export function validatePhraseWorkflowConfig(config: PhraseWorkflowConfig): void
   for (const locale of config.targetLocales) {
     if (!locale.phraseLocale.trim() || !locale.repositoryLocale.trim()) {
       throw new TypeError("Each target locale needs Phrase language and repository locale");
+    }
+    if (
+      config.frontendTemplate &&
+      (!/^[a-z]{2,3}(?:-[A-Za-z0-9]+)*$/.test(locale.repositoryLocale) ||
+        locale.repositoryLocale === "en")
+    ) {
+      throw new TypeError(`Invalid target repository locale: ${locale.repositoryLocale}`);
     }
     validateRepoPath(locale.outputPath, "Target output path");
     if (locale.outputPath === config.sourceCatalog.path) {

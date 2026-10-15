@@ -1,0 +1,22 @@
+{
+  "provider": "phrase",
+  "project": {
+    "uid": "project-uid",
+    "region": "eu"
+  },
+  "sourceCatalog": {
+    "path": "locales/en.json",
+    "adapter": "icu-json",
+    "locale": "en"
+  },
+  "frontendTemplate": {
+    "path": "deploy/frontend.yaml"
+  },
+  "targetLocales": [
+    {
+      "phraseLocale": "fr",
+      "repositoryLocale": "fr",
+      "outputPath": "locales/fr.json"
+    }
+  ]
+}

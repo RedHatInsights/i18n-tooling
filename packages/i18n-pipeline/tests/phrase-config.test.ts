@@ -53,6 +53,40 @@ describe("Phrase TMS config parser", () => {
     }
   });
 
+  it("requires a FormatJS English source catalog for every Frontend template", () => {
+    const frontendConfig = {
+      ...minimalConfig,
+      frontendTemplate: { path: "deploy/frontend.yaml" },
+    };
+    expect(() =>
+      parsePhraseTmsConfig({
+        ...frontendConfig,
+        sourceCatalog: { ...minimalConfig.sourceCatalog, adapter: "icu-json" },
+      }),
+    ).toThrow(/formatjs-json and en/);
+    expect(() =>
+      parsePhraseTmsConfig({
+        ...frontendConfig,
+        sourceCatalog: { ...minimalConfig.sourceCatalog, locale: "fr" },
+      }),
+    ).toThrow(/formatjs-json and en/);
+  });
+
+  it.each(["en", "zh_cn"])(
+    "rejects unsupported FEO repository locale %s during parsing",
+    (locale) => {
+      expect(() =>
+        parsePhraseTmsConfig({
+          ...minimalConfig,
+          frontendTemplate: { path: "deploy/frontend.yaml" },
+          targetLocales: [
+            { phraseLocale: "fr", repositoryLocale: locale, outputPath: "locales/fr.json" },
+          ],
+        }),
+      ).toThrow(/Invalid target repository locale/);
+    },
+  );
+
   it("opts into generating a FormatJS source catalog from Frontend YAML", () => {
     const config = {
       ...minimalConfig,
