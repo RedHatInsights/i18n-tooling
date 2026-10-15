@@ -8,11 +8,21 @@ on:
         required: true
         type: string
       environment:
-        description: Protected Actions environment that holds the Phrase API token
+        description: Protected Actions environment that holds the Phrase API token and optional GitHub App secrets
         required: true
         type: string
       node-version:
         description: Optional Node.js override; defaults to the tooling .nvmrc
+        required: false
+        type: string
+        default: ""
+      base-ref:
+        description: Optional target branch used only when repository targets another repository; same-repository runs check out the triggering commit
+        required: false
+        type: string
+        default: ""
+      repository:
+        description: Optional target repository in owner/name form; defaults to the caller
         required: false
         type: string
         default: ""
@@ -30,6 +40,12 @@ on:
       PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET:
         description: Phrase Platform Service Account client secret
         required: false
+      APP_CLIENT_ID:
+        description: Normally supplied by the bound environment; set with APP_PRIVATE_KEY for App mode, or leave both unset for GITHUB_TOKEN mode
+        required: false
+      APP_PRIVATE_KEY:
+        description: Normally supplied by the bound environment; set with APP_CLIENT_ID for App mode, or leave both unset for GITHUB_TOKEN mode
+        required: false
 
 jobs:
   reconcile:
@@ -39,16 +55,40 @@ jobs:
     environment: ${{ inputs.environment }}
     # A newer queued reconcile replacing a pending one is harmless: it re-reads all state.
     concurrency:
-      group: i18n-tms-reconcile-${{ github.repository }}
+      group: i18n-tms-reconcile-${{ inputs.repository || github.repository }}
       cancel-in-progress: false
     permissions:
       contents: write
       pull-requests: write
     steps:
-      - name: Check out consumer repository
+      - name: Select GitHub authentication mode and target repository
+        id: github-auth
+        uses: $/.github/actions/select-github-target
+        with:
+          app-client-id-set: ${{ secrets.APP_CLIENT_ID != '' }}
+          app-private-key-set: ${{ secrets.APP_PRIVATE_KEY != '' }}
+          repository: ${{ inputs.repository }}
+          base-ref: ${{ inputs.base-ref }}
+          require-base-ref: "false"
+
+      - name: Create GitHub App token
+        id: create-app-token
+        if: steps.github-auth.outputs.mode == 'app'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ steps.github-auth.outputs.target-owner }}
+          repositories: ${{ steps.github-auth.outputs.target-name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Check out target consumer repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.sha }}
+          repository: ${{ steps.github-auth.outputs.target-repository }}
+          ref: ${{ steps.github-auth.outputs.checkout-ref }}
+          token: ${{ steps.create-app-token.outputs.token || github.token }}
           persist-credentials: false
 
       - name: Check out i18n tooling source
@@ -77,11 +117,20 @@ jobs:
       - name: Reconcile Phrase jobs and open locale pull requests
         env:
           CONFIG_PATH: ${{ inputs.config-path }}
+          TARGET_REPOSITORY: ${{ steps.github-auth.outputs.target-repository }}
+          GITHUB_AUTH_MODE: ${{ steps.github-auth.outputs.mode }}
+          APP_SLUG: ${{ steps.create-app-token.outputs.app-slug }}
           PHRASE_PLATFORM_API_TOKEN: ${{ secrets.PHRASE_PLATFORM_API_TOKEN }}
           PHRASE_SERVICE_ACCOUNT_CLIENT_ID: ${{ secrets.PHRASE_SERVICE_ACCOUNT_CLIENT_ID }}
           PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET: ${{ secrets.PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET }}
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ steps.create-app-token.outputs.token || github.token }}
           GITHUB_API_URL: ${{ github.api_url }}
-        run: >-
-          node "$GITHUB_WORKSPACE/i18n-tooling-source/packages/i18n-pipeline/dist/cli.js"
-          tms reconcile --config "$CONFIG_PATH"
+        run: |
+          set -eu
+          if [ "$GITHUB_AUTH_MODE" = "app" ]; then
+            printf 'GitHub auth: app %s[bot]\n' "$APP_SLUG"
+          else
+            printf 'GitHub auth: GITHUB_TOKEN (github-actions[bot])\n'
+          fi
+          node "$GITHUB_WORKSPACE/i18n-tooling-source/packages/i18n-pipeline/dist/cli.js" \
+            tms reconcile --config "$CONFIG_PATH" --repository "$TARGET_REPOSITORY"

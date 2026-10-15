@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       environment:
-        description: Protected Actions environment that holds the Phrase API token
+        description: Protected Actions environment that holds the Phrase API token and optional GitHub App secrets
         required: true
         type: string
       node-version:
@@ -17,7 +17,12 @@ on:
         type: string
         default: ""
       base-ref:
-        description: PR base branch for translations; defaults to the dispatched or pushed branch
+        description: PR base branch; required when repository targets another repository
+        required: false
+        type: string
+        default: ""
+      repository:
+        description: Optional target repository in owner/name form; defaults to the caller
         required: false
         type: string
         default: ""
@@ -40,6 +45,12 @@ on:
       PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET:
         description: Phrase Platform Service Account client secret
         required: false
+      APP_CLIENT_ID:
+        description: Normally supplied by the bound environment; set with APP_PRIVATE_KEY for App mode, or leave both unset for GITHUB_TOKEN mode
+        required: false
+      APP_PRIVATE_KEY:
+        description: Normally supplied by the bound environment; set with APP_CLIENT_ID for App mode, or leave both unset for GITHUB_TOKEN mode
+        required: false
 
 jobs:
   submit:
@@ -50,15 +61,38 @@ jobs:
     # Separate from reconciliation: one shared group lets a queued reconcile cancel a pending
     # submission. State writes are compare-and-swap, so the two may run concurrently.
     concurrency:
-      group: i18n-tms-submit-${{ github.repository }}-${{ inputs.base-ref || github.ref }}
+      group: i18n-tms-submit-${{ inputs.repository || github.repository }}-${{ inputs.base-ref || github.ref }}
       cancel-in-progress: false
     permissions:
       contents: write
     steps:
-      - name: Check out consumer repository
+      - name: Select GitHub authentication mode and target repository
+        id: github-auth
+        uses: $/.github/actions/select-github-target
+        with:
+          app-client-id-set: ${{ secrets.APP_CLIENT_ID != '' }}
+          app-private-key-set: ${{ secrets.APP_PRIVATE_KEY != '' }}
+          repository: ${{ inputs.repository }}
+          base-ref: ${{ inputs.base-ref }}
+          require-base-ref: "true"
+
+      - name: Create GitHub App token
+        id: create-app-token
+        if: steps.github-auth.outputs.mode == 'app'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ steps.github-auth.outputs.target-owner }}
+          repositories: ${{ steps.github-auth.outputs.target-name }}
+          permission-contents: write
+
+      - name: Check out target consumer repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.sha }}
+          repository: ${{ steps.github-auth.outputs.target-repository }}
+          ref: ${{ steps.github-auth.outputs.checkout-ref }}
+          token: ${{ steps.create-app-token.outputs.token || github.token }}
           persist-credentials: false
 
       - name: Check out i18n tooling source
@@ -89,13 +123,26 @@ jobs:
           CONFIG_PATH: ${{ inputs.config-path }}
           I18N_BASE_REF: ${{ inputs.base-ref }}
           RETRY_FAILED: ${{ inputs.retry-failed }}
+          TARGET_REPOSITORY: ${{ steps.github-auth.outputs.target-repository }}
+          CROSS_REPOSITORY: ${{ steps.github-auth.outputs.cross-repository }}
+          GITHUB_AUTH_MODE: ${{ steps.github-auth.outputs.mode }}
+          APP_SLUG: ${{ steps.create-app-token.outputs.app-slug }}
           PHRASE_PLATFORM_API_TOKEN: ${{ secrets.PHRASE_PLATFORM_API_TOKEN }}
           PHRASE_SERVICE_ACCOUNT_CLIENT_ID: ${{ secrets.PHRASE_SERVICE_ACCOUNT_CLIENT_ID }}
           PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET: ${{ secrets.PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET }}
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ steps.create-app-token.outputs.token || github.token }}
           GITHUB_API_URL: ${{ github.api_url }}
         run: |
-          set --
-          if [ "$RETRY_FAILED" = "true" ]; then set -- --retry-failed; fi
+          set -eu
+          if [ "$GITHUB_AUTH_MODE" = "app" ]; then
+            printf 'GitHub auth: app %s[bot]\n' "$APP_SLUG"
+          else
+            printf 'GitHub auth: GITHUB_TOKEN (github-actions[bot])\n'
+          fi
+          set -- --repository "$TARGET_REPOSITORY"
+          if [ "$RETRY_FAILED" = "true" ]; then set -- "$@" --retry-failed; fi
+          if [ "$CROSS_REPOSITORY" = "true" ]; then
+            set -- "$@" --base-ref "$I18N_BASE_REF" --source-commit "$(git rev-parse HEAD)"
+          fi
           node "$GITHUB_WORKSPACE/i18n-tooling-source/packages/i18n-pipeline/dist/cli.js" \
             tms submit --config "$CONFIG_PATH" "$@"
