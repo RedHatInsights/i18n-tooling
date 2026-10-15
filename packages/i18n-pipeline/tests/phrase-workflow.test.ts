@@ -323,6 +323,55 @@ describe("PhraseWorkflow submission", () => {
     expect(state.records.get(submitted.key)?.revision).toBe(forgedRevision);
   });
 
+  it("refuses a pinned resume whose same-project job has another consumer's filename", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository: new FakeRepository(),
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const input = {
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    };
+    const submitted = await workflow.submit(input);
+    const stored = state.records.get(submitted.key)!;
+    stored.record.phase = "importing";
+    stored.record.importAsyncRequestId = "other-consumer-import";
+    stored.record.jobs[0]!.uid = "other-consumer-job";
+    phrase.jobFilenamesByUid.set("other-consumer-job", "other-consumer.json");
+    const forgedRecord = structuredClone(stored.record);
+    const forgedRevision = stored.revision;
+    const writesBeforeResume = state.writes;
+    phrase.callOrder.length = 0;
+    phrase.getJobCalls.length = 0;
+    phrase.asyncRequestIds.length = 0;
+
+    await expect(
+      workflow.submit({
+        ...input,
+        expectedProjectUid: "project-uid",
+        expectedSourceFilename: "translation-template.json",
+      }),
+    ).rejects.toThrow(
+      'Phrase job other-consumer-job source filename mismatch: expected "translation-template.json", actual "other-consumer.json"',
+    );
+
+    expect(phrase.getJobCalls).toEqual([
+      { projectUid: "project-uid", jobUid: "other-consumer-job" },
+    ]);
+    expect(phrase.asyncRequestIds).toEqual([]);
+    expect(phrase.callOrder).toEqual(["get:project-uid:other-consumer-job"]);
+    expect(state.writes).toBe(writesBeforeResume);
+    expect(state.records.get(submitted.key)?.record).toEqual(forgedRecord);
+    expect(state.records.get(submitted.key)?.revision).toBe(forgedRevision);
+  });
+
   it("does not poll an untrusted async request ID when pinned jobs are genuine", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
