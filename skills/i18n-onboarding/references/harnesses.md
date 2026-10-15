@@ -11,8 +11,8 @@ Use the same workflow in Claude Code, Codex CLI, opencode, and Pi. Ask the wizar
 When no question tool is available, send the whole wizard as one message:
 
 - One short heading per question, with lettered options on separate lines.
-- Mark each preselected option with `(default)`. A question without a default says "choose one".
-- End with one reply line showing how to answer, for example: `Reply "ok" to accept the defaults, plus your answers to 2 and 4 (e.g. "ok, 2c, 4a"). Free text works for anything else.`
+- Mark each preselected option with `(default)`.
+- End with one reply line showing how to answer, for example: `Reply "ok" to accept all defaults, or list only what changes (e.g. "ok, 4c"). Free text works for anything else.`
 
 ## Jira
 
