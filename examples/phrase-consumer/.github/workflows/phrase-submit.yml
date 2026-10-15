@@ -25,5 +25,10 @@ jobs:
       config-path: .github/i18n/phrase-tms.json
       environment: phrase-pilot
       retry-failed: ${{ inputs.retry-failed == true }}
+    secrets:
+      # Map this name even when its value is in phrase-pilot; uncomment both APP_* lines for App mode.
+      PHRASE_PLATFORM_API_TOKEN: ${{ secrets.PHRASE_PLATFORM_API_TOKEN }}
+      # APP_CLIENT_ID: ${{ secrets.APP_CLIENT_ID }}
+      # APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
     permissions:
       contents: write

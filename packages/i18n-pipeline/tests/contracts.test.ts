@@ -179,10 +179,20 @@ describe("repository i18n contracts", () => {
       expect(workflow.on.workflow_call.secrets.APP_PRIVATE_KEY).toMatchObject({ required: false });
       const clientIdDescription = workflow.on.workflow_call.secrets.APP_CLIENT_ID.description;
       const privateKeyDescription = workflow.on.workflow_call.secrets.APP_PRIVATE_KEY.description;
+      for (const secretName of [
+        "PHRASE_PLATFORM_API_TOKEN",
+        "PHRASE_SERVICE_ACCOUNT_CLIENT_ID",
+        "PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET",
+        "APP_CLIENT_ID",
+        "APP_PRIVATE_KEY",
+      ]) {
+        const description = workflow.on.workflow_call.secrets[secretName].description;
+        expect(description).toContain("caller must map this name");
+        expect(description).toContain("protected environment");
+      }
       expect(clientIdDescription).toContain("APP_PRIVATE_KEY");
       expect(privateKeyDescription).toContain("APP_CLIENT_ID");
       for (const description of [clientIdDescription, privateKeyDescription]) {
-        expect(description).toContain("bound environment");
         expect(description).toContain("App mode");
         expect(description).toContain("GITHUB_TOKEN mode");
         expect(description).toContain("leave both unset");
@@ -434,6 +444,13 @@ describe("repository i18n contracts", () => {
     const reconcile = parse(await read(".github/workflows/phrase-reconcile.yml"));
     const configPath = submit.jobs.submit.with["config-path"];
     const config = JSON.parse(await read(configPath));
+
+    for (const caller of [submit.jobs.submit, reconcile.jobs.reconcile]) {
+      expect(caller.secrets).not.toBe("inherit");
+      expect(caller.secrets.PHRASE_PLATFORM_API_TOKEN).toBe(
+        "${{ secrets.PHRASE_PLATFORM_API_TOKEN }}",
+      );
+    }
 
     expect(reconcile.jobs.reconcile.with["config-path"]).toBe(configPath);
     expect(submit.on.push.branches).toEqual(["main"]);
