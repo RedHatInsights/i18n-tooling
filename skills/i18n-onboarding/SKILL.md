@@ -1,6 +1,6 @@
 ---
 name: i18n-onboarding
-description: Use when a developer asks to onboard a repository to i18n tooling, add i18n validation, set up translations/Phrase, or localize FEO navigation/search/tiles. Inspect the repository, select applicable validation, Phrase, Konflux, and FEO tracks, and drive i18n-pipeline to wire and verify them.
+description: Use when a developer asks to onboard a repository to i18n tooling, add i18n validation, set up translations/Phrase (i18n-hub or standalone), or localize FEO navigation/search/tiles. Inspect the repository, select applicable validation, Phrase, Konflux, and FEO tracks, and drive i18n-pipeline to wire and verify them.
 ---
 
 # Onboard a repository to i18n tooling
@@ -42,13 +42,14 @@ After inspection, ask one consolidated question set through the current harness'
 1. **Tracks to run** — multi-select the applicable validation baseline, Phrase submit/reconcile, FEO localization, and Konflux tracks. Preselect the relevant available tracks. When FEO localization applies and the installed FEC schema does not accept `spec.locales`, list **FEC upgrade (required by FEO)** as its own preselected item in this list. Show Konflux as **not yet available** unless the PipelineRun's referenced shared pipeline at its recorded revision declares `i18n-validation-mode`; state that check as the condition and do not guess.
 2. **Jira tickets** — create through an available Jira tool, draft only, or none. Use a choice the developer already stated in this session if there is one; otherwise leave this answer unselected. If creation was selected but no Jira tool is available, write the drafts to `i18n-onboarding-ticket-drafts.md` in the repository and report that fallback.
 3. **Branch layout** — one branch with one commit per logical unit (default), or one branch per selected track.
-4. **Autonomy** — edit files only, commit the selected changes, or also push and open a PR. Use a level the developer already stated in this session if there is one; otherwise leave this answer unselected. Never infer permission to commit, push, or open a PR.
+4. **Autonomy** — edit files only, commit the selected changes, or also push and open a PR. In hub mode, push-and-PR also covers the i18n-hub registration PR. Use a level the developer already stated in this session if there is one; otherwise leave this answer unselected. Never infer permission to commit, push, or open a PR.
 5. **Message IDs and source catalog, only when detected** — when IDs are generated or no source catalog is committed, keep the repository's current ID style and validate without the missing-ID rule, or migrate to explicit IDs. Preselect keeping the current style. Ask this as part of the same wizard question set, not as a later prompt.
-6. **Phrase details, only when the Phrase track is offered and they are not discoverable** — target locales (preselect the tier-1 set `fr`, `ko`, `ja`, `zh-CN`), and the Phrase project UID and region. When the developer does not supply the project details, write `phrase-tms.json` as a draft with clearly marked placeholders, do not reference it from the validation config yet (the CLI rejects a config whose region is not `us` or `eu`), and list completing it and adding `tmsConfig` as follow-ups; never invent a UID or guess the region.
+6. **Phrase mode, only when the Phrase track is offered** — **i18n-hub** (default; preselect it for a `RedHatInsights` repository), **standalone with the repository's own GitHub App**, or **standalone with `GITHUB_TOKEN`**. When the repository is outside `RedHatInsights`, omit the hub option and preselect the standalone App option. [references/phrase.md](references/phrase.md) defines the modes and how to detect an existing one.
+7. **Phrase details, only when the Phrase track is offered and they are not discoverable** — target locales (preselect the tier-1 set `fr`, `ko`, `ja`, `zh-CN`), and the Phrase project UID and region. When the developer does not supply the project details, write `phrase-tms.json` as a draft with clearly marked placeholders, do not reference it from the validation config yet (the CLI rejects a config whose region is not `us` or `eu`), and list completing it and adding `tmsConfig` as follow-ups; never invent a UID or guess the region.
 
-If the repository already has a working validation config or callers, show those tracks as done and offer only missing tracks and upgrades. An upgrade means a new config field, a newer reviewed workflow pin, or changing an existing `warn` setting to `error` where supported.
+If the repository already has a working validation config or callers, show those tracks as done and offer only missing tracks and upgrades. An upgrade means a new config field, a newer reviewed workflow pin, changing an existing `warn` setting to `error` where supported, or moving a `RedHatInsights` repository's standalone Phrase callers to the i18n-hub. When the Phrase track is already done, leave out the mode question: the migration upgrade in the track list stands in for it.
 
-When the final question applies and the developer keeps the existing style, generate the source catalog if the repository's extractor can produce one, include it as a repository deliverable, and omit `sourceLint.catalog` so validation does not enforce explicit IDs. Stage or commit it only if the selected autonomy allows that. If migration is selected, use stable explicit IDs and update the source catalog. Do not include this question when neither condition is present.
+When the message-ID question applies and the developer keeps the existing style, generate the source catalog if the repository's extractor can produce one, include it as a repository deliverable, and omit `sourceLint.catalog` so validation does not enforce explicit IDs. Stage or commit it only if the selected autonomy allows that. If migration is selected, use stable explicit IDs and update the source catalog. Do not include this question when neither condition is present.
 
 ## Work safely and in reviewable units
 
@@ -57,7 +58,7 @@ When the final question applies and the developer keeps the existing style, gene
 - Never run live Phrase submit or reconcile operations, create secrets, or inspect secret values. Never hand-write generated locale JSON. Stage only files changed for the selected unit; never use `git add -A`.
 - Fix unambiguous ICU syntax defects mechanically in their own unit. Do not change meaning or wording to silence a finding. Report those findings with file and line for the developer.
 - Draft missing FormatJS `description` fields by reading the surrounding component. Keep all drafts in a separate unit. Its commit message must say the descriptions are AI-drafted and require human review before they reach Phrase. Where context is ambiguous, suggest a screenshot that shows the message in use.
-- Keep work in this order: validation configuration and script; mechanical ICU fixes; AI-drafted descriptions; dependency upgrades; Konflux switch; Phrase files; FEO files. With one branch per track, preserve this order within each branch where units depend on one another.
+- Keep work in this order: validation configuration and script; mechanical ICU fixes; AI-drafted descriptions; dependency upgrades; Konflux switch; Phrase files; FEO files. Open the i18n-hub registration PR last, after the consumer PR exists. With one branch per track, preserve this order within each branch where units depend on one another.
 - When the developer chose commits, make one commit per logical unit. If they chose files only, leave all edits unstaged. If they chose a PR, put every manual follow-up item in its description and retain the repository's PR template.
 
 ## Run the selected tracks
@@ -72,7 +73,7 @@ Run this track only when the referenced shared pipeline at the PipelineRun's pin
 
 ### Phrase submit and reconcile
 
-Read [references/phrase.md](references/phrase.md). Add or update `phrase-tms.json` and only the missing caller workflows. Map Phrase locale codes to repository locale codes. Use `gh` read-only requests to check the chosen GitHub environment and the expected secret names; list anything the admin still needs to create. Never submit, reconcile, create secrets, or run a live Phrase operation.
+Read [references/phrase.md](references/phrase.md), then the reference for the selected mode. Add or update `phrase-tms.json` and the locale validation caller, mapping Phrase locale codes to repository locale codes. In hub mode, add no submit or reconcile callers, then register the repository in the i18n-hub as [references/phrase-hub.md](references/phrase-hub.md) describes. In standalone mode, add only the missing submit and reconcile callers and check the environment's secret names read-only as [references/phrase-standalone.md](references/phrase-standalone.md) describes. List every admin step that is still needed. Never submit, reconcile, create secrets, or run a live Phrase operation.
 
 ### FEO localization
 
@@ -80,4 +81,4 @@ Read [references/feo.md](references/feo.md). Add stable YAML item IDs and transl
 
 ## Finish and report
 
-Run `validate-ci --mode error` after every selected track. Restore all deliberate test breaks and confirm the final working tree contains only intended changes. If a PR was selected, include the manual admin checklist and every unresolved wording finding in its description, above the unchanged PR template. Report the selected tracks, validation findings, CLI source and version, branch and commits, Jira tickets or draft path, pending devDependency, and manual follow-ups.
+Run `validate-ci --mode error` after every selected track. Restore all deliberate test breaks and confirm the final working tree contains only intended changes. If a PR was selected, include the manual admin checklist and every unresolved wording finding in its description, above the unchanged PR template. Report the selected tracks, validation findings, CLI source and version, branch and commits, Phrase mode with the i18n-hub entry and registration PR or the standalone auth mode, Jira tickets or draft path, pending devDependency, and manual follow-ups.

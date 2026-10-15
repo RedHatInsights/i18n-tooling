@@ -105,7 +105,7 @@ Alternatives:
 - **Claude Code plugin:** `/plugin marketplace add RedHatInsights/i18n-tooling`, then `/plugin install i18n-onboarding@i18n-tooling`. Update with `/plugin marketplace update i18n-tooling`.
 - **Without third-party tools:** clone this repository and symlink `skills/i18n-onboarding` into `~/.agents/skills/` and `~/.claude/skills/`.
 
-Then ask the agent to onboard the repository to i18n tooling. The skill inspects first, asks one set of questions (tracks, Jira tickets, branch layout, how far to go), and then runs the selected tracks.
+Then ask the agent to onboard the repository to i18n tooling. The skill inspects first, asks one set of questions (tracks, Jira tickets, branch layout, how far to go, Phrase mode), and then runs the selected tracks. For Phrase, the default is registering the repository in the central [i18n-hub](https://github.com/RedHatInsights/i18n-hub), which holds the Phrase credential and the i18n GitHub App. In that mode the repository gets no Phrase callers or secrets. The alternative is standalone: the repository runs its own callers, using its own GitHub App or, as a fallback, `GITHUB_TOKEN`.
 
 `rbac-ui` can declare its FormatJS extraction/compile outputs and catalog checks without a custom validation script:
 
