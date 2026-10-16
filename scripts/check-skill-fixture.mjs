@@ -25,6 +25,7 @@ const fixtures = {
     sections: ["checks", "generated", "catalogDirectories", "sourceLint"],
     packageScript: "translations:validate",
     configChecks: [
+      ["tmsConfig", "i18n/phrase-tms.json"],
       ["sourceLint.catalog", "locales/translation-template.json"],
       ["checks[0].source.path", "locales/translation-template.json"],
       ["checks[0].targets[0].path", "src/locales/en.json"],
@@ -38,6 +39,8 @@ const fixtures = {
     requiredText: [
       ["src/messages.js", 'defaultMessage: "Stop the bill for service."'],
       ["src/messages.js", 'defaultMessage: "{count, plural, one {# result} other {# results}}"'],
+      // Every repository joins the shared HCC Phrase project.
+      ["i18n/phrase-tms.json", "yWWEIEQgpNVK650YBQhGx6"],
     ],
   },
   "formatjs-generated-ids": {
