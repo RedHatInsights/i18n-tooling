@@ -109,9 +109,10 @@ Options:
 Use i18n-pipeline tms <command> --help for command options.
 
 Environment:
-  PHRASE_SERVICE_ACCOUNT_CLIENT_ID and PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET
-                              Phrase Service Account (preferred), or
-  PHRASE_PLATFORM_API_TOKEN   a user's Phrase Platform API token
+  PHRASE_PLATFORM_API_TOKEN   a user's Platform API token (required for submit)
+  PHRASE_SERVICE_ACCOUNT_CLIENT_ID and
+  PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET
+                              Service Account; reconciliation support remains unverified
   GITHUB_TOKEN                State-branch and pull-request access`,
   "tms submit": `Usage: i18n-pipeline tms submit --config <path> [options]
 

@@ -27,12 +27,12 @@ on:
         type: string
         default: ""
       expected-phrase-project:
-        description: Expected Phrase project UID for a consumer when workflows share a Phrase credential
+        description: Optional pin requiring the config and batch to use the reviewed Phrase project UID for hub consumers sharing a credential
         required: false
         type: string
         default: ""
       expected-source-filename:
-        description: Expected Phrase source filename for a consumer when workflows share a Phrase credential
+        description: Optional pin requiring the config, batch, and jobs to use the effective Phrase upload filename; keep it unique per project
         required: false
         type: string
         default: ""
@@ -41,8 +41,8 @@ on:
       PHRASE_PLATFORM_API_TOKEN:
         description: The caller must map this name; store the Phrase Platform API token in the protected environment named by the `environment` input
         required: false
-      # A Phrase Platform Service Account. Its bot user cannot create jobs, so submit cannot use it.
-      # Set both of these instead of PHRASE_PLATFORM_API_TOKEN, never alongside it.
+      # Service Account reconciliation support is unverified; submit still requires a user token.
+      # Set both only after verifying read access, never alongside PHRASE_PLATFORM_API_TOKEN.
       PHRASE_SERVICE_ACCOUNT_CLIENT_ID:
         description: The caller must map this name; store the Service Account client ID in the protected environment named by the `environment` input
         required: false
