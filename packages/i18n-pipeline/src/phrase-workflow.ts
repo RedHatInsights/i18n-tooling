@@ -139,6 +139,8 @@ export interface PhraseSubmitInput {
   sourceCommit: string;
   sourceBytes: Uint8Array;
   config: PhraseWorkflowConfig;
+  expectedProjectUid?: string;
+  expectedSourceFilename?: string;
   /** Create a new Phrase job for batch- or locale-level failures of this exact source. */
   retryFailed?: boolean;
 }
@@ -152,6 +154,16 @@ export interface PhraseReconcileResult {
   pullRequestUrl?: string;
   reason?: string;
 }
+
+export interface PhraseReconcileOptions {
+  expectedProjectUid?: string;
+  expectedSourceFilename?: string;
+}
+
+type PhrasePinOptions = Pick<
+  PhraseReconcileOptions,
+  "expectedProjectUid" | "expectedSourceFilename"
+>;
 
 export class PhraseBatchStateConflictError extends Error {
   constructor(message = "Phrase batch state changed concurrently") {
@@ -167,6 +179,13 @@ export class PhraseWorkflowError extends Error {
   ) {
     super(message);
     this.name = "PhraseWorkflowError";
+  }
+}
+
+class PhrasePinMismatchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PhrasePinMismatchError";
   }
 }
 
@@ -237,6 +256,7 @@ function digest(bytes: Uint8Array): string {
 }
 
 function safeFailureReason(error: unknown): string {
+  if (error instanceof PhrasePinMismatchError) return error.message;
   if (error instanceof PhraseAsyncRequestError) return "Phrase asynchronous request failed";
   if (error instanceof PhraseAuthError) return error.message;
   if (error instanceof PhraseApiError) return `Phrase API returned HTTP ${error.status}`;
@@ -427,6 +447,15 @@ export class PhraseWorkflow {
 
   async submit(input: PhraseSubmitInput): Promise<PhraseBatchRecord> {
     validatePhraseWorkflowConfig(input.config);
+    const pins: PhrasePinOptions =
+      input.expectedProjectUid !== undefined || input.expectedSourceFilename !== undefined
+        ? {
+            expectedProjectUid: input.expectedProjectUid ?? input.config.projectUid,
+            expectedSourceFilename:
+              input.expectedSourceFilename ?? input.config.sourceCatalog.filename,
+          }
+        : {};
+    assertExpectedWorkflowConfig(input.config, pins);
     if (!input.repository.trim() || !input.baseRef.trim() || !input.sourceCommit.trim()) {
       throw new TypeError("Repository, PR base ref, and source commit are required");
     }
@@ -485,27 +514,41 @@ export class PhraseWorkflow {
       const key = batchKey(identity, attempt);
       const existing = await this.dependencies.state.readBatch(key);
       if (!existing)
-        return this.createSubmission(input, key, attempt, sourceDigest, previousFailedBatch);
+        return this.createSubmission(input, key, attempt, sourceDigest, previousFailedBatch, pins);
       if (input.retryFailed && hasRetryableFailures(existing.record)) {
         previousFailedBatch = existing.record;
         continue;
       }
-      return this.resumeSubmission(existing, input.config);
+      return this.resumeSubmission(existing, input.config, pins);
     }
     throw new PhraseWorkflowError(
       `Phrase submission failed ${MAX_SUBMISSION_ATTEMPTS} times for this source; fix the Phrase project before retrying`,
     );
   }
 
-  async reconcile(): Promise<PhraseReconcileResult[]> {
+  async reconcile(options: PhraseReconcileOptions = {}): Promise<PhraseReconcileResult[]> {
+    if (
+      hasPhrasePins(options) &&
+      (options.expectedProjectUid === undefined || options.expectedSourceFilename === undefined)
+    ) {
+      throw new PhrasePinMismatchError(
+        "Pinned reconciliation requires both an expected Phrase project UID and source filename",
+      );
+    }
     const results: PhraseReconcileResult[] = [];
     for (const key of await this.dependencies.state.listBatchKeys()) {
       try {
         const stored = await this.dependencies.state.readBatch(key);
-        if (!stored || !needsReconciliation(stored.record)) continue;
-        await this.reconcileBatch(stored, results);
+        if (!stored) continue;
+        if (!needsReconciliation(stored.record)) continue;
+        assertExpectedBatchConfig(stored.record, options);
+        await this.reconcileBatch(stored, results, options);
       } catch (error) {
-        results.push({ batchKey: key, phase: "retrying", reason: safeFailureReason(error) });
+        results.push({
+          batchKey: key,
+          phase: error instanceof PhrasePinMismatchError ? "failed" : "retrying",
+          reason: safeFailureReason(error),
+        });
       }
     }
     return results;
@@ -517,6 +560,7 @@ export class PhraseWorkflow {
     attempt: number,
     sourceDigest: string,
     previousRecord?: PhraseBatchRecord,
+    pins: PhrasePinOptions = {},
   ): Promise<PhraseBatchRecord> {
     const record = makeBatchRecord(input, key, attempt, sourceDigest, this.now(), previousRecord);
     const targetLangs = input.config.targetLocales
@@ -530,7 +574,7 @@ export class PhraseWorkflow {
       revision = await this.dependencies.state.createBatch(record);
     } catch (error) {
       const raced = await this.dependencies.state.readBatch(key);
-      if (raced) return this.resumeSubmission(raced, input.config);
+      if (raced) return this.resumeSubmission(raced, input.config, pins);
       throw error;
     }
 
@@ -559,8 +603,16 @@ export class PhraseWorkflow {
       throw error;
     }
 
+    const jobs =
+      hasPhrasePins(pins) && created.jobs.length
+        ? await this.verifyPinnedJobs(
+            input.config.projectUid,
+            created.jobs.map((job) => job.uid),
+            pins.expectedSourceFilename,
+          )
+        : created.jobs;
     record.importAsyncRequestId = created.asyncRequest.id;
-    record.jobs = created.jobs;
+    record.jobs = jobs;
     record.warningCount = created.warnings.length;
     record.phase = "importing";
     revision = await this.dependencies.state.updateBatch(record, revision);
@@ -578,15 +630,18 @@ export class PhraseWorkflow {
       throw new PhraseWorkflowError(record.failureReason, key);
     }
 
-    return (await this.finishImport(record, revision)).record;
+    // This request ID came from this Phrase response, after its jobs were verified above.
+    return (await this.finishImport(record, revision, pins, jobs, true)).record;
   }
 
   private async resumeSubmission(
     stored: StoredPhraseBatch,
     config: PhraseWorkflowConfig,
+    pins: PhrasePinOptions = {},
   ): Promise<PhraseBatchRecord> {
     const { record } = stored;
     let revision = stored.revision;
+    if (hasPhrasePins(pins)) assertExpectedBatchConfig(record, pins);
     if (record.phase === "creating" || record.phase === "unknown") {
       throw new PhraseWorkflowError(
         "Unknown Phrase submission outcome; inspect Phrase and bind or void the batch before retrying",
@@ -601,9 +656,29 @@ export class PhraseWorkflow {
     }
     if (record.phase === "completed") return record;
 
+    let verifiedJobs: PhraseJobPart[] | undefined;
+    const configChanged = stableJson(record.config) !== stableJson(config);
+    if (
+      hasPhrasePins(pins) &&
+      (record.phase === "importing" || record.phase === "superseded" || configChanged)
+    ) {
+      if (record.jobs.length) {
+        verifiedJobs = await this.verifyPinnedJobs(
+          record.config.projectUid,
+          record.jobs.map((job) => job.uid),
+          pins.expectedSourceFilename,
+        );
+        record.jobs = verifiedJobs;
+      } else if (record.phase === "importing") {
+        throw new PhrasePinMismatchError(
+          "Refusing to poll a Phrase import request without verifiable job UIDs",
+        );
+      }
+    }
+
     // Phrase-facing settings are part of the batch key, so a differing config only changes
     // repository-side mapping (output paths, adapters, completion policy). Adopt the latest.
-    if (stableJson(record.config) !== stableJson(config)) {
+    if (configChanged) {
       record.config = config;
       revision = await this.dependencies.state.updateBatch(record, revision);
     }
@@ -615,18 +690,22 @@ export class PhraseWorkflow {
       await this.dependencies.state.updateBatch(record, revision);
       return record;
     }
-    if (record.phase === "importing") return (await this.finishImport(record, revision)).record;
+    if (record.phase === "importing")
+      return (await this.finishImport(record, revision, pins, verifiedJobs)).record;
     return record;
   }
 
   private async reconcileBatch(
     stored: StoredPhraseBatch,
     results: PhraseReconcileResult[],
+    pins: PhrasePinOptions = {},
   ): Promise<void> {
     let { record, revision } = stored;
+    let pinnedJobs: PhraseJobPart[] | undefined;
     if (record.phase === "importing") {
       try {
-        ({ record, revision } = await this.finishImport(record, revision));
+        ({ record, revision } = await this.finishImport(record, revision, pins));
+        if (hasPhrasePins(pins)) pinnedJobs = record.jobs;
       } catch (error) {
         if (record.phase !== "failed") throw error;
         for (const target of record.config.targetLocales) {
@@ -639,6 +718,14 @@ export class PhraseWorkflow {
         }
         return;
       }
+    }
+    if (hasPhrasePins(pins) && !pinnedJobs && record.jobs.length) {
+      pinnedJobs = await this.verifyPinnedJobs(
+        record.config.projectUid,
+        record.jobs.map((job) => job.uid),
+        pins.expectedSourceFilename,
+      );
+      record.jobs = pinnedJobs;
     }
 
     const baseCommit = await this.dependencies.repository.resolveCommit(record.baseRef);
@@ -713,7 +800,9 @@ export class PhraseWorkflow {
     const readiness = new Map<string, LocaleReadiness>();
     const refreshedJobs: PhraseJobPart[] = [];
     for (const target of unresolvedTargets(record)) {
-      const targetJobs = record.jobs.filter((job) => job.targetLang === target.phraseLocale);
+      const targetJobs = (pinnedJobs ?? record.jobs).filter(
+        (job) => job.targetLang === target.phraseLocale,
+      );
       if (!targetJobs.length) {
         readiness.set(target.phraseLocale, {
           phase: "failed",
@@ -721,9 +810,17 @@ export class PhraseWorkflow {
         });
         continue;
       }
-      const jobs = await Promise.all(
-        targetJobs.map((job) => this.dependencies.phrase.getJob(record.config.projectUid, job.uid)),
-      );
+      const jobs = pinnedJobs
+        ? pinnedJobs.filter((job) => job.targetLang === target.phraseLocale)
+        : await Promise.all(
+            targetJobs.map((job) =>
+              this.dependencies.phrase.getJob(record.config.projectUid, job.uid),
+            ),
+          );
+      for (const [index, job] of jobs.entries()) {
+        assertExpectedJobUid(job, targetJobs[index]!.uid);
+        assertExpectedJobFilename(job, pins.expectedSourceFilename);
+      }
       refreshedJobs.push(...jobs);
       readiness.set(target.phraseLocale, assessReadiness(jobs));
     }
@@ -1065,15 +1162,39 @@ export class PhraseWorkflow {
   private async finishImport(
     record: PhraseBatchRecord,
     revision: string,
+    pins: PhrasePinOptions = {},
+    verifiedJobs?: PhraseJobPart[],
+    asyncRequestIsFresh = false,
   ): Promise<StoredPhraseBatch> {
+    if (hasPhrasePins(pins)) {
+      assertExpectedBatchConfig(record, pins);
+      if (!record.jobs.length) {
+        throw new PhrasePinMismatchError(
+          "Refusing to poll a Phrase import request without verifiable job UIDs",
+        );
+      }
+      verifiedJobs ??= await this.verifyPinnedJobs(
+        record.config.projectUid,
+        record.jobs.map((job) => job.uid),
+        pins.expectedSourceFilename,
+      );
+      record.jobs = verifiedJobs;
+    }
     try {
-      if (!record.importAsyncRequestId) {
+      const shouldPollAsyncRequest = !hasPhrasePins(pins) || asyncRequestIsFresh;
+      if (shouldPollAsyncRequest && !record.importAsyncRequestId) {
         throw new PhraseWorkflowError("Phrase batch is missing its import request ID", record.key);
       }
-      await this.dependencies.phrase.waitForAsyncRequest(record.importAsyncRequestId, {
-        timeoutMs: this.importTimeoutMs,
-        pollIntervalMs: this.pollIntervalMs,
-      });
+      // PhraseAsyncRequest exposes only id, action, and asyncResponse, with no project/job reference.
+      // Pinned resumes skip its global endpoint; fresh IDs are polled only after job checks above.
+      // If polled, only the status of a request whose ID the attacker already knows is observable;
+      // no translation data is read.
+      if (shouldPollAsyncRequest) {
+        await this.dependencies.phrase.waitForAsyncRequest(record.importAsyncRequestId!, {
+          timeoutMs: this.importTimeoutMs,
+          pollIntervalMs: this.pollIntervalMs,
+        });
+      }
       const deadline = this.now() + this.importTimeoutMs;
       while (true) {
         const jobs = await Promise.all(
@@ -1081,6 +1202,10 @@ export class PhraseWorkflow {
             this.dependencies.phrase.getJob(record.config.projectUid, job.uid),
           ),
         );
+        for (const [index, job] of jobs.entries()) {
+          assertExpectedJobUid(job, record.jobs[index]!.uid);
+          assertExpectedJobFilename(job, pins.expectedSourceFilename);
+        }
         record.jobs = jobs;
         const failed = jobs.find((job) => job.importStatus?.status === "ERROR");
         if (failed) {
@@ -1100,11 +1225,88 @@ export class PhraseWorkflow {
       return { record, revision: await this.dependencies.state.updateBatch(record, revision) };
     } catch (error) {
       // Rewriting with the same stale revision would only fail again and mask the conflict.
-      if (error instanceof PhraseBatchStateConflictError) throw error;
+      if (error instanceof PhraseBatchStateConflictError || error instanceof PhrasePinMismatchError)
+        throw error;
       record.phase = retryableImportFailure(error) ? "importing" : "failed";
       record.failureReason = safeFailureReason(error);
       await this.dependencies.state.updateBatch(record, revision);
       throw error;
     }
   }
+
+  private async verifyPinnedJobs(
+    projectUid: string,
+    jobUids: readonly string[],
+    expectedSourceFilename?: string,
+  ): Promise<PhraseJobPart[]> {
+    if (jobUids.some((jobUid) => typeof jobUid !== "string" || !jobUid.trim())) {
+      throw new PhrasePinMismatchError("Pinned Phrase batch contains an invalid job UID");
+    }
+    return Promise.all(
+      jobUids.map(async (jobUid) => {
+        let job: PhraseJobPart;
+        try {
+          job = await this.dependencies.phrase.getJob(projectUid, jobUid);
+        } catch (error) {
+          if (error instanceof PhraseApiError && error.status === 404) {
+            throw new PhrasePinMismatchError(
+              "Stored Phrase jobs could not be verified in the pinned project",
+            );
+          }
+          throw error;
+        }
+        assertExpectedJobUid(job, jobUid);
+        assertExpectedJobFilename(job, expectedSourceFilename);
+        return job;
+      }),
+    );
+  }
+}
+
+function assertExpectedBatchConfig(record: PhraseBatchRecord, options: PhrasePinOptions): void {
+  assertExpectedWorkflowConfig(record.config, options);
+}
+
+function assertExpectedWorkflowConfig(
+  config: PhraseWorkflowConfig,
+  options: PhrasePinOptions,
+): void {
+  const mismatches: string[] = [];
+  if (
+    options.expectedProjectUid !== undefined &&
+    config.projectUid !== options.expectedProjectUid
+  ) {
+    mismatches.push(
+      `project UID expected ${JSON.stringify(options.expectedProjectUid)}, actual ${JSON.stringify(config.projectUid)}`,
+    );
+  }
+  if (
+    options.expectedSourceFilename !== undefined &&
+    config.sourceCatalog.filename !== options.expectedSourceFilename
+  ) {
+    mismatches.push(
+      `source filename expected ${JSON.stringify(options.expectedSourceFilename)}, actual ${JSON.stringify(config.sourceCatalog.filename)}`,
+    );
+  }
+  if (mismatches.length) {
+    throw new PhrasePinMismatchError(`Batch config mismatch: ${mismatches.join("; ")}`);
+  }
+}
+
+function hasPhrasePins(options: PhrasePinOptions): boolean {
+  return options.expectedProjectUid !== undefined || options.expectedSourceFilename !== undefined;
+}
+
+function assertExpectedJobUid(job: PhraseJobPart, expectedJobUid: string): void {
+  if (job.uid === expectedJobUid) return;
+  throw new PhrasePinMismatchError(
+    `Phrase returned job UID ${JSON.stringify(job.uid)} for requested UID ${JSON.stringify(expectedJobUid)}`,
+  );
+}
+
+function assertExpectedJobFilename(job: PhraseJobPart, expectedSourceFilename?: string): void {
+  if (expectedSourceFilename === undefined || job.filename === expectedSourceFilename) return;
+  throw new PhrasePinMismatchError(
+    `Phrase job ${job.uid} source filename mismatch: expected ${JSON.stringify(expectedSourceFilename)}, actual ${job.filename === undefined ? "(missing)" : JSON.stringify(job.filename)}`,
+  );
 }

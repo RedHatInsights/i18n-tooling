@@ -526,13 +526,23 @@ objects:
       }),
     ).toBe(0);
     expect(help[0]).toContain("Usage: i18n-pipeline tms submit --config <path>");
+    expect(help[0]).toContain("--expect-project <uid>");
+    expect(help[0]).toContain("--expect-source-filename <name>");
+    expect(
+      await runCli(["tms", "reconcile", "--help"], {
+        stdout: (message) => help.push(message),
+        stderr: () => undefined,
+      }),
+    ).toBe(0);
+    expect(help[1]).toContain("--expect-project <uid>");
+    expect(help[1]).toContain("--expect-source-filename <name>");
     expect(
       await runCli(["tms", "--help"], {
         stdout: (message) => help.push(message),
         stderr: () => undefined,
       }),
     ).toBe(0);
-    expect(help[1]).toContain("PHRASE_SERVICE_ACCOUNT_CLIENT_ID");
+    expect(help[2]).toContain("PHRASE_SERVICE_ACCOUNT_CLIENT_ID");
 
     projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-"));
     await mkdir(join(projectRoot, "locales"));
@@ -570,6 +580,89 @@ objects:
       "Set PHRASE_SERVICE_ACCOUNT_CLIENT_ID and PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET, or PHRASE_PLATFORM_API_TOKEN, as protected workflow secrets",
     );
   });
+
+  it.each([
+    [
+      "submit",
+      "--expect-project",
+      "other-project",
+      'Phrase project UID mismatch: expected "other-project", actual "project-uid"',
+    ],
+    [
+      "submit",
+      "--expect-source-filename",
+      "other.json",
+      'Phrase source filename mismatch: expected "other.json", actual "en.json"',
+    ],
+    [
+      "reconcile",
+      "--expect-project",
+      "other-project",
+      'Phrase project UID mismatch: expected "other-project", actual "project-uid"',
+    ],
+    [
+      "reconcile",
+      "--expect-source-filename",
+      "other.json",
+      'Phrase source filename mismatch: expected "other.json", actual "en.json"',
+    ],
+  ] as const)(
+    "checks %s %s against parsed config before reading credentials",
+    async (command, option, value, message) => {
+      projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-pins-"));
+      await mkdir(join(projectRoot, "locales"));
+      await writeFile(join(projectRoot, "phrase.json"), phraseTmsConfig());
+      await writeFile(join(projectRoot, "locales/en.json"), JSON.stringify({ greeting: "Hello" }));
+      const credentialReads: string[] = [];
+      const errors: string[] = [];
+
+      const exitCode = await runCli(["tms", command, "--config", "phrase.json", option, value], {
+        cwd: projectRoot,
+        env: credentialTrackingEnv(credentialReads),
+        stdout: () => undefined,
+        stderr: (message) => errors.push(message),
+      });
+
+      expect(exitCode).toBe(1);
+      expect(errors[0]).toContain(message);
+      expect(credentialReads).toEqual([]);
+    },
+  );
+
+  it.each(["submit", "reconcile"] as const)(
+    "accepts matching Phrase pins for %s before credential checks",
+    async (command) => {
+      projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-pins-match-"));
+      await mkdir(join(projectRoot, "locales"));
+      await writeFile(join(projectRoot, "phrase.json"), phraseTmsConfig());
+      await writeFile(join(projectRoot, "locales/en.json"), JSON.stringify({ greeting: "Hello" }));
+      const credentialReads: string[] = [];
+      const errors: string[] = [];
+
+      const exitCode = await runCli(
+        [
+          "tms",
+          command,
+          "--config",
+          "phrase.json",
+          "--expect-project",
+          "project-uid",
+          "--expect-source-filename",
+          "en.json",
+        ],
+        {
+          cwd: projectRoot,
+          env: credentialTrackingEnv(credentialReads),
+          stdout: () => undefined,
+          stderr: (message) => errors.push(message),
+        },
+      );
+
+      expect(exitCode).toBe(1);
+      expect(errors[0]).toContain("Set PHRASE_SERVICE_ACCOUNT_CLIENT_ID");
+      expect(credentialReads).toContain("PHRASE_PLATFORM_API_TOKEN");
+    },
+  );
 
   it.each(["submit", "reconcile"] as const)(
     "rejects a symbolic-link TMS config for %s before reading credentials",
@@ -809,6 +902,7 @@ objects:
             uid: "job-fr",
             targetLang: "fr",
             workflowLevel: 1,
+            filename: "en.json",
             importStatus: { status: "OK" },
           }),
           { status: 200 },
@@ -817,19 +911,31 @@ objects:
       return new Response(`Unexpected request: ${method} ${url}`, { status: 500 });
     };
 
-    const exitCode = await runCli(["tms", "submit", "--config", "phrase.json"], {
-      cwd: projectRoot,
-      env: {
-        PHRASE_PLATFORM_API_TOKEN: "platform-token",
-        GITHUB_TOKEN: "run-token",
-        GITHUB_REPOSITORY: "example/app",
-        GITHUB_REF: "refs/heads/main",
-        GITHUB_SHA: "abc123",
+    const exitCode = await runCli(
+      [
+        "tms",
+        "submit",
+        "--config",
+        "phrase.json",
+        "--expect-project",
+        "project-uid",
+        "--expect-source-filename",
+        "en.json",
+      ],
+      {
+        cwd: projectRoot,
+        env: {
+          PHRASE_PLATFORM_API_TOKEN: "platform-token",
+          GITHUB_TOKEN: "run-token",
+          GITHUB_REPOSITORY: "example/app",
+          GITHUB_REF: "refs/heads/main",
+          GITHUB_SHA: "abc123",
+        },
+        fetch,
+        stdout: (message) => output.push(message),
+        stderr: (message) => errors.push(message),
       },
-      fetch,
-      stdout: (message) => output.push(message),
-      stderr: (message) => errors.push(message),
-    });
+    );
 
     expect(exitCode).toBe(0);
     expect(output[0]).toBe("Phrase auth: user Platform API token (PHRASE_PLATFORM_API_TOKEN)");

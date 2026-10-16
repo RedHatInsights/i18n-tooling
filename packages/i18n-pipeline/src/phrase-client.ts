@@ -48,6 +48,7 @@ export interface PhraseJobPart {
   uid: string;
   targetLang: string;
   workflowLevel: number;
+  filename?: string;
   lastWorkflowLevel?: number;
   imported?: boolean;
   status?: string;
@@ -511,6 +512,7 @@ function isPhraseJobPart(value: unknown): value is PhraseJobPart {
   }
   if (value.lastWorkflowLevel !== undefined && typeof value.lastWorkflowLevel !== "number")
     return false;
+  if (value.filename !== undefined && typeof value.filename !== "string") return false;
   if (value.imported !== undefined && typeof value.imported !== "boolean") return false;
   if (value.status !== undefined && typeof value.status !== "string") return false;
   if (value.importStatus !== undefined) {

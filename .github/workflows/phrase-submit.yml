@@ -26,6 +26,16 @@ on:
         required: false
         type: string
         default: ""
+      expected-phrase-project:
+        description: Expected Phrase project UID for a consumer when workflows share a Phrase credential
+        required: false
+        type: string
+        default: ""
+      expected-source-filename:
+        description: Expected Phrase source filename for a consumer when workflows share a Phrase credential
+        required: false
+        type: string
+        default: ""
       retry-failed:
         description: Create a new Phrase job for failed batch or locale outcomes of this exact source
         required: false
@@ -122,6 +132,8 @@ jobs:
           CONFIG_PATH: ${{ inputs.config-path }}
           I18N_BASE_REF: ${{ inputs.base-ref }}
           RETRY_FAILED: ${{ inputs.retry-failed }}
+          EXPECTED_PHRASE_PROJECT: ${{ inputs.expected-phrase-project }}
+          EXPECTED_SOURCE_FILENAME: ${{ inputs.expected-source-filename }}
           TARGET_REPOSITORY: ${{ steps.github-auth.outputs.target-repository }}
           CROSS_REPOSITORY: ${{ steps.github-auth.outputs.cross-repository }}
           GITHUB_AUTH_MODE: ${{ steps.github-auth.outputs.mode }}
@@ -140,6 +152,8 @@ jobs:
           fi
           set -- --repository "$TARGET_REPOSITORY"
           if [ "$RETRY_FAILED" = "true" ]; then set -- "$@" --retry-failed; fi
+          if [ -n "$EXPECTED_PHRASE_PROJECT" ]; then set -- "$@" --expect-project "$EXPECTED_PHRASE_PROJECT"; fi
+          if [ -n "$EXPECTED_SOURCE_FILENAME" ]; then set -- "$@" --expect-source-filename "$EXPECTED_SOURCE_FILENAME"; fi
           if [ "$CROSS_REPOSITORY" = "true" ]; then
             set -- "$@" --base-ref "$I18N_BASE_REF" --source-commit "$(git rev-parse HEAD)"
           fi

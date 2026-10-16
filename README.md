@@ -139,6 +139,15 @@ The reusable Phrase workflows submit one validated source catalog and reconcile 
 - `i18n-pipeline tms submit --config <path>` validates and submits the pinned source revision. The PR base defaults to the pushed or dispatched branch; direct CLI runs for pull-request and tag events must pass `--base-ref`. The reusable-workflow `base-ref` input is used only when `repository` targets another repository.
 - `i18n-pipeline tms reconcile --config <path>` reads durable batch state, waits for each locale's final Phrase workflow step to reach `COMPLETED`, downloads and validates the target catalog, and opens or updates one PR per locale.
 
+Central hubs that use one shared Phrase credential across consumer repositories can set the optional
+`expected-phrase-project` and `expected-source-filename` workflow inputs to pin each config to its
+reviewed project UID and effective source filename; reconciliation also rejects mismatched batch
+records and Phrase job filenames before downloading translations or creating PRs. The filename pin
+separates consumers only if every pinned source filename is unique within the Phrase project and is
+never reused by any job, including jobs created outside the hub; use repository-qualified names such
+as `insights-rbac-ui.ui.en.json`. The hub's consumer list rejects duplicate filenames between hub
+consumers, but cannot detect filename reuse by jobs created outside the hub.
+
 Consumer configuration follows [the Phrase TMS config schema](schemas/phrase-tms-config.schema.json). For copyable caller/config examples and a test of the per-locale-to-runtime-data handoff, see the [Phrase consumer integration example](docs/phrase-consumer-integration.md):
 
 ```json
