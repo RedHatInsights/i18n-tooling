@@ -16,6 +16,10 @@ Detect the current mode during inspection:
 
 When a repository has both, report it as a conflict for the developer to resolve. Otherwise, show the detected mode as done. For a standalone repository under `RedHatInsights`, offer **Migrate to i18n-hub** as an upgrade (see [phrase-hub.md](phrase-hub.md#migrate-from-standalone)).
 
+## Shared project
+
+Both modes use the shared HCC Phrase project, `yWWEIEQgpNVK650YBQhGx6` in region `eu`, created from the `[HCC UI]` template with shared translation memories and term bases. Developers do not know these details, so write them into the config directly. Its file import settings fit FormatJS JSON, so set `useProjectFileImportSettings: true`. Its Phrase locale for `zh-CN` is `zh_cn`; `fr`, `ja`, and `ko` match the repository codes. Use another project only when the developer names its UID and region. The i18n-hub's `docs/operations.md` records the shared project; when it is readable and disagrees, follow it and report the difference.
+
 ## Config (both modes)
 
 Write `i18n/phrase-tms.json` (or keep the repository's existing location). Keep the extracted FormatJS source catalog in the repository change, normally at `locales/translation-template.json`. Phrase submission reads that file from the commit it syncs; it does not extract messages. Set `sourceCatalog.adapter` to `formatjs-json`, keep `description` as translator context, and confirm the Phrase project parses ICU. A minimal `phrase-tms.json` has this shape:
@@ -23,7 +27,7 @@ Write `i18n/phrase-tms.json` (or keep the repository's existing location). Keep 
 ```json
 {
   "provider": "phrase",
-  "project": { "uid": "<phrase-project-uid>", "region": "us" },
+  "project": { "uid": "yWWEIEQgpNVK650YBQhGx6", "region": "eu" },
   "state": { "branch": "i18n-tms-state" },
   "sourceCatalog": {
     "path": "locales/translation-template.json",
@@ -46,9 +50,9 @@ Write `i18n/phrase-tms.json` (or keep the repository's existing location). Keep 
 
 Set `sourceCatalog.filename` to `<repository-name>.<catalog>.en.json`, where `<catalog>` is `ui` for application messages and `feo` for FEO's catalog (for example `insights-rbac-ui.ui.en.json`). This is the shared HCC Phrase project's convention: the name the file gets in Phrase shows which app and catalog it belongs to. Without it, the pipeline uploads the source path's basename, which for most apps is the generic `translation-template.json`. The repository file keeps its path.
 
-Use either `sourceCatalog.importSettingsUid` or `useProjectFileImportSettings`. Use the latter only when it matches the Phrase project. Map each Phrase locale to its repository locale once, in `targetLocales`. `catalog-validation.json` can use `tmsConfig` to derive those target checks; do not list them again.
+Use either `sourceCatalog.importSettingsUid` or `useProjectFileImportSettings`, not both. Map each Phrase locale to its repository locale once, in `targetLocales`. `catalog-validation.json` can use `tmsConfig` to derive those target checks; do not list them again.
 
-Add `tmsConfig` only once the Phrase config is complete, with `project.region` set to `us` or `eu` and `project.uid` set to the real project. While either is unknown, keep the Phrase config as a draft with marked placeholders and leave `tmsConfig` out, so validation of the rest of the repository keeps passing. A target file that has not arrived yet is pending, not a validation error.
+Point the validation config's `tmsConfig` at `phrase-tms.json` in the same change. A target file that has not arrived yet is pending, not a validation error.
 
 The reusable reconciliation workflow writes one flat locale JSON file per target locale and opens or updates one PR per locale. It does not run the consumer's build or aggregation scripts. Never use an aggregate file as a target `outputPath`.
 
@@ -60,7 +64,6 @@ Neither mode checks pull requests. The validation baseline's locale validation c
 
 Put a manual follow-up checklist in the consumer PR description and the final report; never in a repository file. Include every item that applies, plus the mode-specific items from the mode reference:
 
-- Replace the Phrase project UID and verify the project region and import settings.
 - Confirm the map from Phrase locale to repository locale, and the output paths.
 - Confirm repository owners, and the Phrase project settings for `defaultMessage`, `description`, and ICU parsing.
 - Replace workflow SHA placeholders with reviewed immutable commits.

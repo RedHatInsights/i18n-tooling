@@ -25,14 +25,13 @@ Work out one `consumers.json` entry:
 - `configPath` is the repository-relative path of `phrase-tms.json`.
 - `phraseFile` equals `sourceCatalog.filename` from the Phrase config exactly, `<name>.<catalog>.en.json` (`ui` or `feo`). The hub requires it to start with `<name>.` and to be unique across entries; check the current `consumers.json` (see [phrase.md](phrase.md#choose-the-mode)). The repository's source catalog path stays unchanged.
 
-The hub reads the config from `baseRef`. An entry is ready only when the Phrase config is complete (real project UID and region) and the consumer change has merged to `baseRef`.
+The hub reads the config from `baseRef`, so an entry is ready only once the consumer change has merged there.
 
 ## Register in the hub
 
 Open the hub PR only when all of these hold:
 
 - The developer chose **push and open a PR**.
-- The Phrase config is complete.
 - `gh api repos/RedHatInsights/i18n-hub` succeeds.
 - The consumer PR is open.
 
