@@ -83,13 +83,19 @@ const fixtures = {
       ["feo[0].template", "deploy/frontend.yaml"],
       ["feo[0].source", "deploy/locales/translation-template.json"],
     ],
-    requireEmptyFEOLocales: true,
+    // Target locales are listed up front; validation skips undelivered ones.
+    feoLocales: {
+      fr: "deploy/locales/fr.json",
+      ja: "deploy/locales/ja.json",
+      ko: "deploy/locales/ko.json",
+      "zh-CN": "deploy/locales/zh-CN.json",
+    },
     unchangedFiles: [
       "node_modules/@redhat-cloud-services/frontend-components-config-utilities/package.json",
       "node_modules/@redhat-cloud-services/frontend-components-config-utilities/index.js",
       "node_modules/@redhat-cloud-services/frontend-components-config-utilities/schemas/frontend-crd.schema.json",
     ],
-    absentFiles: ["deploy/locales/zh-CN.json"],
+    absentFiles: ["fr", "ja", "ko", "zh-CN"].map((locale) => `deploy/locales/${locale}.json`),
     requiredText: [
       ["deploy/frontend.yaml", "defaultDocumentTitle: Identity Management"],
       ["deploy/locales/translation-template.json", '"description"'],
@@ -275,17 +281,13 @@ try {
   ) {
     fail(`${expectation.config} omits sourceLint.catalog for generated IDs`);
   }
-  if (expectation.requireEmptyFEOLocales) {
-    const locales = config.feo?.[0]?.locales;
-    if (
-      !locales ||
-      typeof locales !== "object" ||
-      Array.isArray(locales) ||
-      Object.keys(locales).length !== 0
-    ) {
-      fail(
-        `${expectation.config} sets feo[0].locales to an empty object until Phrase delivers translations`,
-      );
+  if (expectation.feoLocales) {
+    const received = JSON.stringify(config.feo?.[0]?.locales ?? null);
+    const expected = JSON.stringify(expectation.feoLocales);
+    // Compare as sorted entries so key order does not matter.
+    const sorted = (value) => JSON.stringify(Object.entries(JSON.parse(value) ?? {}).sort());
+    if (sorted(received) !== sorted(expected)) {
+      fail(`${expectation.config} feo[0].locales equals ${expected} (received ${received})`);
     }
   }
 } catch (error) {
