@@ -39,26 +39,65 @@ parameters:
 `;
 
 describe("FEO template localization", () => {
-  it("extracts stable ID keys, translator context and pipe-delimited search aliases", () => {
+  it("extracts stable ID keys, translator context and one message per search alias", () => {
     const catalog = extractFeoCatalog(template);
-    expect(catalog["searchEntries.roles.alt_title"]?.defaultMessage).toBe("role|RBAC");
+    expect(catalog["searchEntries.roles.alt_title.role"]?.defaultMessage).toBe("role");
+    expect(catalog["searchEntries.roles.alt_title.rbac"]?.defaultMessage).toBe("RBAC");
+    expect(catalog["searchEntries.roles.alt_title"]?.defaultMessage).toBeUndefined();
     expect(
       catalog["bundleSegments.iam.segment.navItems.access.routes.roles.title"]?.defaultMessage,
     ).toBe("Roles");
     expect(catalog["serviceTiles.iam.iam.roles.description"]?.defaultMessage).toBe("View roles");
     expect(catalog["module.defaultDocumentTitle"]?.defaultMessage).toBe("Access | IAM");
     expect(catalog["searchEntries.roles.title"]?.description).toContain("searchEntries.roles");
+    expect(catalog["searchEntries.roles.alt_title.role"]?.description).toContain(
+      "search alias (keyword/synonym) of searchEntries.roles",
+    );
+    expect(catalog["searchEntries.roles.alt_title.role"]?.description).toContain(
+      "short search term, not a sentence",
+    );
     expect(Object.keys(catalog).some((key) => key.includes("segmentRef"))).toBe(false);
     const reordered = template.replace(
       / {8}- id: roles\n {10}title: Roles\n {10}alt_title: \[role, RBAC\]\n {8}- id: users\n {10}title: Users/,
       "        - id: users\n          title: Users\n        - id: roles\n          title: Roles\n          alt_title: [role, RBAC]",
     );
     expect(extractFeoCatalog(reordered)).toEqual(catalog);
+    const aliasesReordered = template.replace("alt_title: [role, RBAC]", "alt_title: [RBAC, role]");
+    expect(extractFeoCatalog(aliasesReordered)).toEqual(catalog);
     const named = template.replace(
       "  - kind: Frontend\n    spec:",
       "  - kind: Frontend\n    metadata:\n      name: access\n    spec:",
     );
     expect(extractFeoCatalog(named)).toEqual(catalog);
+  });
+
+  it("slugifies aliases by case and punctuation while allowing a pipe in an alias", () => {
+    const aliased = template.replace(
+      "alt_title: [role, RBAC]",
+      'alt_title: [" Admin Console!! ", "RBAC|Admin", "R&D"]',
+    );
+    const catalog = extractFeoCatalog(aliased);
+
+    expect(catalog["searchEntries.roles.alt_title.admin-console"]?.defaultMessage).toBe(
+      " Admin Console!! ",
+    );
+    expect(catalog["searchEntries.roles.alt_title.rbac-admin"]?.defaultMessage).toBe("RBAC|Admin");
+    expect(catalog["searchEntries.roles.alt_title.r-d"]?.defaultMessage).toBe("R&D");
+  });
+
+  it("rejects aliases with empty or duplicate slugs and names the entry and aliases", () => {
+    const emptySlug = template.replace("alt_title: [role, RBAC]", 'alt_title: ["!!!"]');
+    expect(() => extractFeoCatalog(emptySlug)).toThrow(
+      'searchEntries.roles: alt_title alias "!!!" has an empty slug',
+    );
+
+    const duplicateSlug = template.replace(
+      "alt_title: [role, RBAC]",
+      'alt_title: ["Roles", "ROLES!"]',
+    );
+    expect(() => extractFeoCatalog(duplicateSlug)).toThrow(
+      'searchEntries.roles: alt_title aliases "Roles" and "ROLES!" have the same slug "roles"',
+    );
   });
 
   it("splices only locale data, preserves English, other locales, comments and is idempotent", () => {
@@ -89,6 +128,16 @@ describe("FEO template localization", () => {
     );
     expect(updated).toBe(withOther);
     expect(updated).toContain("de:\n          searchEntries.roles.title: Rollen");
+  });
+
+  it("inlines only translated aliases and leaves missing alias keys absent", () => {
+    const source = extractFeoCatalog(template);
+    const target = { "searchEntries.roles.alt_title.role": "rôle" };
+    const result = inlineFeoLocale(template, source, target, "fr");
+
+    expect(parse(result).objects[0].spec.locales.fr).toEqual(target);
+    expect(result).not.toContain("searchEntries.roles.alt_title.rbac:");
+    expect(inlineFeoLocale(result, source, target, "fr")).toBe(result);
   });
 
   it("places translations in their owning Frontend object", () => {
@@ -214,6 +263,19 @@ describe("FEO template localization", () => {
     expect(() =>
       inlineFeoLocale(template, source, { "searchEntries.nope.title": "未知" }, "zh-CN"),
     ).toThrow("Unknown translation key");
+    expect(() =>
+      inlineFeoLocale(template, source, { "searchEntries.roles.alt_title": "role|RBAC" }, "zh-CN"),
+    ).toThrow(
+      "Unknown translation key: searchEntries.roles.alt_title; alt_title is now one message per alias",
+    );
+    expect(() =>
+      inlineFeoLocale(
+        template.replace("alt_title: [role, RBAC]", "alt_title: [role, RBAC Tools]"),
+        source,
+        {},
+        "zh-CN",
+      ),
+    ).toThrow("English source changed for searchEntries.roles.alt_title.rbac");
     for (const key of ["toString", "constructor", "__proto__"]) {
       expect(() => inlineFeoLocale(template, source, { [key]: "未知" }, "zh-CN")).toThrow(
         `Unknown translation key: ${key}`,

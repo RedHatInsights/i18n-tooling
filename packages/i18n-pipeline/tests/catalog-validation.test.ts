@@ -49,8 +49,8 @@ const feoZhTranslations = {
   "bundleSegments.access.administration.navItems.groups.title": "SAMPLE ONLY — NOT REVIEWED 群组",
   "searchEntries.people.title": "SAMPLE ONLY — NOT REVIEWED 用户管理",
   "searchEntries.people.description": "SAMPLE ONLY — NOT REVIEWED 管理人员及其权限",
-  "searchEntries.people.alt_title":
-    "SAMPLE ONLY — NOT REVIEWED 人员|SAMPLE ONLY — NOT REVIEWED 账户",
+  "searchEntries.people.alt_title.people": "SAMPLE ONLY — NOT REVIEWED 人员",
+  "searchEntries.people.alt_title.accounts": "SAMPLE ONLY — NOT REVIEWED 账户",
   "serviceTiles.security.access.user-management.title": "SAMPLE ONLY — NOT REVIEWED 用户访问",
   "serviceTiles.security.access.user-management.description":
     "SAMPLE ONLY — NOT REVIEWED 管理团队的控制台访问权限",
@@ -62,7 +62,8 @@ const feoFrTranslations = {
   "bundleSegments.access.administration.navItems.groups.title": "EXAMPLE NOT REVIEWED Équipes",
   "searchEntries.people.title": "EXAMPLE NOT REVIEWED Gestion des utilisateurs",
   "searchEntries.people.description": "EXAMPLE NOT REVIEWED Gérer les personnes et leurs droits",
-  "searchEntries.people.alt_title": "EXAMPLE NOT REVIEWED Personnes|EXAMPLE NOT REVIEWED Comptes",
+  "searchEntries.people.alt_title.people": "EXAMPLE NOT REVIEWED Personnes",
+  "searchEntries.people.alt_title.accounts": "EXAMPLE NOT REVIEWED Comptes",
   "serviceTiles.security.access.user-management.title": "EXAMPLE NOT REVIEWED Accès utilisateur",
   "serviceTiles.security.access.user-management.description":
     "EXAMPLE NOT REVIEWED Gérer l'accès console de votre équipe",
@@ -834,6 +835,39 @@ describe("catalog project validation", () => {
     expect(validationWarnings(result.output)).toEqual([]);
   });
 
+  it("validates per-alias FEO keys and allows an untranslated alias", async () => {
+    await createFeoProject();
+    const localePath = join(projectRoot!, "deploy/locales/zh-CN.json");
+    const locale = JSON.parse(await readFile(localePath, "utf8")) as Record<string, string>;
+    delete locale["searchEntries.people.alt_title.accounts"];
+    await writeFile(localePath, `${JSON.stringify(locale, null, 2)}\n`);
+    await runFeo([
+      "inline",
+      "--template",
+      "deploy/frontend.yaml",
+      "--source",
+      "deploy/locales/translation-template.json",
+      "--target",
+      "deploy/locales/zh-CN.json",
+      "--locale",
+      "zh-CN",
+    ]);
+
+    const source = JSON.parse(
+      await readFile(join(projectRoot!, "deploy/locales/translation-template.json"), "utf8"),
+    ) as Record<string, unknown>;
+    const template = await readFile(join(projectRoot!, "deploy/frontend.yaml"), "utf8");
+    const zhLocale = template.split("        zh-CN:\n")[1]?.split("        fr:\n")[0] ?? "";
+    const result = await runValidation(feoValidationConfig());
+
+    expect(source).toHaveProperty("searchEntries.people.alt_title.people");
+    expect(source).toHaveProperty("searchEntries.people.alt_title.accounts");
+    expect(zhLocale).toContain("searchEntries.people.alt_title.people:");
+    expect(zhLocale).not.toContain("searchEntries.people.alt_title.accounts:");
+    expect(result.exitCode).toBe(0);
+    expect(result.errors).toEqual([]);
+  });
+
   it("reports locale findings in the order configured", async () => {
     await createFeoProject();
     const zhPath = join(projectRoot!, "deploy/locales/zh-CN.json");
@@ -1043,6 +1077,23 @@ describe("catalog project validation", () => {
     expect(result.exitCode).toBe(1);
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]).toContain("Unknown translation key: searchEntries.people.missing");
+    expect(result.errors[0]).toContain("i18n-pipeline feo inline");
+  });
+
+  it("reports the old joined alt_title key as unknown in a locale file", async () => {
+    await createFeoProject();
+    const localePath = join(projectRoot!, "deploy/locales/zh-CN.json");
+    const locale = JSON.parse(await readFile(localePath, "utf8")) as Record<string, string>;
+    locale["searchEntries.people.alt_title"] = "SAMPLE ONLY — NOT REVIEWED 人员|账户";
+    await writeFile(localePath, `${JSON.stringify(locale, null, 2)}\n`);
+
+    const result = await runValidation(feoValidationConfig());
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain(
+      "Unknown translation key: searchEntries.people.alt_title; alt_title is now one message per alias",
+    );
     expect(result.errors[0]).toContain("i18n-pipeline feo inline");
   });
 
