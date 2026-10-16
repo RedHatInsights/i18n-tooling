@@ -62,9 +62,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: ${{ inputs.environment }}
-    # A newer queued reconcile replacing a pending one is harmless: it re-reads all state.
+    # Keyed by config, so configs with their own state branches run in parallel.
     concurrency:
-      group: i18n-tms-reconcile-${{ inputs.repository || github.repository }}
+      group: i18n-tms-reconcile-${{ inputs.repository || github.repository }}-${{ inputs.config-path }}
       cancel-in-progress: false
     permissions:
       contents: write

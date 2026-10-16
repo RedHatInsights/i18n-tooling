@@ -146,6 +146,12 @@ describe("repository i18n contracts", () => {
         ],
       },
     ];
+    const expectedConcurrencyGroups: Record<string, string> = {
+      submit:
+        "i18n-tms-submit-${{ inputs.repository || github.repository }}-${{ inputs.config-path }}-${{ inputs.base-ref || github.ref }}",
+      reconcile:
+        "i18n-tms-reconcile-${{ inputs.repository || github.repository }}-${{ inputs.config-path }}",
+    };
 
     for (const { path, jobName, permissions, requireBaseRef, workflowInputs } of workflows) {
       const raw = await readFile(join(repositoryRoot, path), "utf8");
@@ -159,7 +165,13 @@ describe("repository i18n contracts", () => {
             secrets: Record<string, { description: string; required: boolean }>;
           };
         };
-        jobs: Record<string, { concurrency: { group: string }; steps: WorkflowStep[] }>;
+        jobs: Record<
+          string,
+          {
+            concurrency: { group: string; "cancel-in-progress": boolean };
+            steps: WorkflowStep[];
+          }
+        >;
       };
       const job = workflow.jobs[jobName];
       const steps = job.steps;
@@ -217,7 +229,8 @@ describe("repository i18n contracts", () => {
         expect(description).toContain("GITHUB_TOKEN mode");
         expect(description).toContain("leave both unset");
       }
-      expect(job.concurrency.group).toContain("${{ inputs.repository || github.repository }}");
+      expect(job.concurrency.group).toBe(expectedConcurrencyGroups[jobName]);
+      expect(job.concurrency["cancel-in-progress"]).toBe(false);
       expect(authStep.uses).toBe("$/.github/actions/select-github-target");
       expect(authStep.with).toEqual({
         "app-client-id-set": "${{ secrets.APP_CLIENT_ID != '' }}",

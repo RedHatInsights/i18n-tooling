@@ -4,15 +4,18 @@ import {
   PhraseBatchStateConflictError,
   type PhraseBatchRecord,
   type PhraseLocalePullRequest,
+  type PhraseLocalePullRequestUpdate,
 } from "../src/phrase-workflow.js";
 
 const baseCommitSha = "a".repeat(40);
+const noToolingCommitWrite = async (_pendingSha: string, _previousHeadSha: string | null) => {};
 const pullRequest: PhraseLocalePullRequest & { baseCommit: string } = {
   repository: "example/app",
   baseRef: "phrase-pilot",
   baseCommit: baseCommitSha,
   branch: "i18n/phrase-batch-fr",
-  title: "i18n(fr): Phrase translation update",
+  recordToolingCommitSha: noToolingCommitWrite,
+  title: "i18n(fr): Phrase translation update for locales/en.json",
   body: "Phrase batch test",
   path: "locales/fr.json",
   content: new TextEncoder().encode('{"hello":"Bonjour"}\n'),
@@ -20,6 +23,13 @@ const pullRequest: PhraseLocalePullRequest & { baseCommit: string } = {
 
 function response(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status });
+}
+
+function commitDetails(sha: string, options: { paths?: string[] } = {}) {
+  return {
+    sha,
+    files: (options.paths ?? ["locales/fr.json"]).map((filename) => ({ filename })),
+  };
 }
 
 function batchRecord(key = "a".repeat(64)): PhraseBatchRecord {
@@ -52,6 +62,119 @@ function batchRecord(key = "a".repeat(64)): PhraseBatchRecord {
   };
 }
 
+function openPullRequestHarness(
+  initialHead: string,
+  options: {
+    currentContent?: string;
+    compare?: (headSha: string) => unknown;
+    refUpdateStatuses?: number[];
+  } = {},
+) {
+  const calls: Array<{ url: string; method: string }> = [];
+  const events: string[] = [];
+  const refUpdateStatuses = [...(options.refUpdateStatuses ?? [])];
+  let branchHead = initialHead;
+  let currentContent = options.currentContent ?? "old";
+  let pendingContent: string | undefined;
+  let commitNumber = 0;
+  const fetch: typeof globalThis.fetch = async (input, init) => {
+    const url = input instanceof Request ? input.url : String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    calls.push({ url, method });
+    if (url.endsWith("/pulls/7") && method === "GET") {
+      return response({ state: "open", head: { sha: branchHead } });
+    }
+    if (url.endsWith("/pulls/7") && method === "PATCH") return response({});
+    if (url.includes("/contents/locales/fr.json?ref=")) {
+      return response({
+        type: "file",
+        sha: "translation-blob",
+        encoding: "base64",
+        content: Buffer.from(currentContent).toString("base64"),
+      });
+    }
+    if (url.includes("/compare/")) {
+      return response(
+        options.compare?.(branchHead) ?? {
+          ahead_by: 1,
+          commits: [{ sha: branchHead }],
+          files: [{ filename: "locales/fr.json" }],
+        },
+      );
+    }
+    if (url.endsWith(`/git/commits/${branchHead}`) && method === "GET") {
+      return response({
+        sha: branchHead,
+        tree: { sha: "branch-tree" },
+        author: { name: "integration-bot", email: "bot@example.invalid" },
+        committer: { name: "web-flow", email: "noreply@github.com" },
+        verification: { verified: false, reason: "unsigned" },
+      });
+    }
+    if (url.endsWith("/git/blobs") && method === "POST") {
+      const body = JSON.parse(String(init?.body)) as { content: string };
+      pendingContent = Buffer.from(body.content, "base64").toString();
+      return response({ sha: "blob-new" }, 201);
+    }
+    if (url.endsWith("/git/trees") && method === "POST") {
+      return response({ sha: "tree-new" }, 201);
+    }
+    if (url.endsWith("/git/commits") && method === "POST") {
+      commitNumber += 1;
+      return response({ sha: `${String(commitNumber).padStart(40, "0")}` }, 201);
+    }
+    if (url.endsWith("/git/ref/heads/i18n/phrase-batch-fr") && method === "GET") {
+      return response({ object: { sha: branchHead } });
+    }
+    if (url.endsWith("/git/refs/heads/i18n/phrase-batch-fr") && method === "PATCH") {
+      const failedStatus = refUpdateStatuses.shift();
+      if (failedStatus) return response({ message: "ref update failed" }, failedStatus);
+      const body = JSON.parse(String(init?.body)) as { sha: string };
+      branchHead = body.sha;
+      currentContent = pendingContent ?? currentContent;
+      return response({ ref: "refs/heads/i18n/phrase-batch-fr" });
+    }
+    throw new Error(`Unexpected GitHub request: ${method} ${url}`);
+  };
+  const repository = new GitHubPhraseRepository({
+    repository: "example/app",
+    token: "token",
+    stateBranch: "i18n-state",
+    fetch,
+  });
+  const makeUpdate = (
+    recordToolingCommitSha = noToolingCommitWrite,
+    overrides: Partial<PhraseLocalePullRequestUpdate> = {},
+  ): PhraseLocalePullRequestUpdate => ({
+    repository: "example/app",
+    baseRef: "phrase-pilot",
+    branch: pullRequest.branch,
+    pullRequestUrl: "https://github.com/example/app/pull/7",
+    headSha: branchHead,
+    recordToolingCommitSha,
+    title: pullRequest.title,
+    path: pullRequest.path,
+    content: new TextEncoder().encode("updated"),
+    body: "updated warning list",
+    ...overrides,
+  });
+  return {
+    repository,
+    calls,
+    events,
+    makeUpdate,
+    queueRefUpdateStatus(status: number) {
+      refUpdateStatuses.push(status);
+    },
+    get branchHead() {
+      return branchHead;
+    },
+    get currentContent() {
+      return currentContent;
+    },
+  };
+}
+
 describe("GitHubPhraseRepository", () => {
   it("rejects a locale PR base commit that is not a full commit SHA", async () => {
     let requests = 0;
@@ -76,7 +199,7 @@ describe("GitHubPhraseRepository", () => {
     expect(requests).toBe(0);
   });
 
-  it("writes all locale PR files in one verified Git Data commit from the resolved base SHA", async () => {
+  it("writes all locale PR files in one Git Data commit from the resolved base SHA", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const blobs: Record<string, unknown>[] = [];
     let treeBody: Record<string, unknown> | undefined;
@@ -176,6 +299,20 @@ describe("GitHubPhraseRepository", () => {
       ) {
         return response({ object: { sha: "branch-head" } });
       }
+      if (url.includes("/compare/")) {
+        return response({
+          ahead_by: 1,
+          commits: [commitDetails("branch-head")],
+          files: [{ filename: "locales/fr.json" }],
+        });
+      }
+      if (url.endsWith("/git/commits/branch-head")) {
+        return response({
+          sha: "branch-head",
+          tree: { sha: "branch-tree" },
+          files: [{ filename: "locales/fr.json" }],
+        });
+      }
       if (url.includes("/contents/locales/fr.json?ref=branch-head")) {
         return response({
           type: "file",
@@ -183,9 +320,6 @@ describe("GitHubPhraseRepository", () => {
           encoding: "base64",
           content: Buffer.from("old").toString("base64"),
         });
-      }
-      if (url.endsWith("/git/commits/branch-head")) {
-        return response({ tree: { sha: "branch-tree" } });
       }
       if (url.endsWith("/git/blobs")) return response({ sha: "blob-new" }, 201);
       if (url.endsWith("/git/trees")) return response({ sha: "tree-new" }, 201);
@@ -205,9 +339,12 @@ describe("GitHubPhraseRepository", () => {
       fetch,
     });
 
-    await expect(repository.createOrUpdatePullRequest(pullRequest)).rejects.toBeInstanceOf(
-      PhraseBatchStateConflictError,
-    );
+    await expect(repository.createOrUpdatePullRequest(pullRequest)).rejects.toMatchObject({
+      name: "GitHubRepositoryError",
+      status: 422,
+      permanent: false,
+      message: expect.stringContaining("refusing to overwrite reviewer changes"),
+    });
     expect(refUpdate).toEqual({ sha: "commit-new", force: false });
   });
 
@@ -269,10 +406,25 @@ describe("GitHubPhraseRepository", () => {
       if (url.endsWith("/git/ref/heads/i18n/phrase-batch-fr")) {
         return response({ object: { sha: "branch-head" } });
       }
-      if (url.includes("/contents/")) return response({}, 404);
-      if (url.endsWith("/git/commits/branch-head")) {
-        return response({ tree: { sha: "branch-tree" } });
+      if (url.includes("/compare/")) {
+        return response({
+          ahead_by: 1,
+          commits: [
+            commitDetails("branch-head", {
+              paths: ["locales/fr.json", "deploy/frontend.yaml"],
+            }),
+          ],
+          files: [{ filename: "locales/fr.json" }, { filename: "deploy/frontend.yaml" }],
+        });
       }
+      if (url.endsWith("/git/commits/branch-head")) {
+        return response({
+          sha: "branch-head",
+          tree: { sha: "branch-tree" },
+          files: [{ filename: "locales/fr.json" }, { filename: "deploy/frontend.yaml" }],
+        });
+      }
+      if (url.includes("/contents/")) return response({}, 404);
       if (url.endsWith("/git/blobs")) return response({ sha: "blob" }, 201);
       if (url.endsWith("/git/trees")) {
         treeBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -559,11 +711,495 @@ describe("GitHubPhraseRepository", () => {
     );
   });
 
-  it("reuses open or merged PRs and refuses closed unmerged PRs", async () => {
-    const openFetch: typeof globalThis.fetch = async (input) => {
+  it("checks one PR by number and updates changed locale files with a non-force Git Data commit", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetch: typeof globalThis.fetch = async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
+      calls.push({ url, init });
+      if (url.endsWith("/pulls/7") && init?.method === "GET") {
+        return response({ state: "open", head: { sha: "branch-head" } });
+      }
+      if (url.includes("/contents/locales/fr.json?ref=branch-head")) {
+        return response({
+          type: "file",
+          sha: "translation-blob",
+          encoding: "base64",
+          content: Buffer.from("old").toString("base64"),
+        });
+      }
+      if (url.endsWith("/git/commits/branch-head"))
+        return response({ tree: { sha: "branch-tree" } });
+      if (url.endsWith("/git/blobs")) return response({ sha: "blob-new" }, 201);
+      if (url.endsWith("/git/trees")) return response({ sha: "tree-new" }, 201);
+      if (url.endsWith("/git/commits") && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({
+          message: expect.any(String),
+          tree: "tree-new",
+          parents: ["branch-head"],
+        });
+        return response({ sha: "commit-new" }, 201);
+      }
+      if (url.endsWith("/git/ref/heads/i18n/phrase-batch-fr") && init?.method === "GET") {
+        return response({ object: { sha: "branch-head" } });
+      }
+      if (url.endsWith("/git/refs/heads/i18n/phrase-batch-fr") && init?.method === "PATCH") {
+        expect(JSON.parse(String(init.body))).toEqual({ sha: "commit-new", force: false });
+        return response({ ref: "refs/heads/i18n/phrase-batch-fr" });
+      }
+      if (url.endsWith("/pulls/7") && init?.method === "PATCH") {
+        expect(JSON.parse(String(init.body))).toEqual({
+          title: update.title,
+          body: "updated warning list",
+        });
+        return response({});
+      }
+      throw new Error(`Unexpected GitHub request: ${url}`);
+    };
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "token",
+      stateBranch: "i18n-state",
+      fetch,
+    });
+    const update: PhraseLocalePullRequestUpdate = {
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      branch: pullRequest.branch,
+      pullRequestUrl: "https://github.com/example/app/pull/7",
+      headSha: "branch-head",
+      expectedToolingCommitSha: "branch-head",
+      recordToolingCommitSha: noToolingCommitWrite,
+      title: "i18n(fr): Phrase translation update for locales/en.json",
+      path: pullRequest.path,
+      content: new TextEncoder().encode("updated"),
+      body: "updated warning list",
+    };
+
+    await expect(repository.getPullRequestState(update.pullRequestUrl)).resolves.toEqual({
+      state: "open",
+      headSha: "branch-head",
+    });
+    await expect(repository.updateOpenPullRequest(update)).resolves.toEqual({
+      changed: true,
+      toolingCommitSha: "commit-new",
+      bodyUpdated: true,
+    });
+    expect(calls.filter(({ url }) => url.endsWith("/pulls/7"))).toHaveLength(5);
+    expect(calls.some(({ url }) => url.includes("/compare/"))).toBe(false);
+    expect(
+      calls.some(({ url, init }) => url.includes("/contents/") && init?.method === "PUT"),
+    ).toBe(false);
+  });
+
+  it("retries when a recorded PR URL returns 404 instead of treating it as closed", async () => {
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "token",
+      stateBranch: "i18n-state",
+      fetch: async () => response({}, 404),
+    });
+
+    await expect(
+      repository.getPullRequestState("https://github.com/example/app/pull/7"),
+    ).rejects.toMatchObject({ status: 404, permanent: false });
+  });
+
+  it("treats a reviewer commit on top of a recorded commit as a retryable conflict", async () => {
+    const harness = openPullRequestHarness("reviewer-head");
+
+    await expect(
+      harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(noToolingCommitWrite, {
+          expectedToolingCommitShas: ["tooling-head"],
+        }),
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining("refusing to overwrite reviewer changes"),
+    });
+    expect(harness.calls.some(({ url }) => url.includes("/contents/"))).toBe(false);
+    expect(
+      harness.calls.some(({ url, method }) => url.endsWith("/git/blobs") && method === "POST"),
+    ).toBe(false);
+  });
+
+  it("adopts a legacy single commit that changes only the expected output path", async () => {
+    const harness = openPullRequestHarness("legacy-head", {
+      compare: (headSha) => ({
+        ahead_by: 1,
+        commits: [{ sha: headSha }],
+        files: [{ filename: "locales/fr.json" }],
+      }),
+    });
+    const state: { toolingCommitShas: string[] } = { toolingCommitShas: [] };
+    const persistOwnership = async (toolingSha: string, previousHeadSha: string | null) => {
+      expect(previousHeadSha).toBe("legacy-head");
+      state.toolingCommitShas = [
+        ...new Set([
+          ...state.toolingCommitShas,
+          ...(previousHeadSha ? [previousHeadSha] : []),
+          toolingSha,
+        ]),
+      ].slice(-20);
+    };
+
+    const result = await harness.repository.updateOpenPullRequest(
+      harness.makeUpdate(persistOwnership),
+    );
+
+    expect(result).toMatchObject({ changed: true, bodyUpdated: true });
+    expect(state.toolingCommitShas).toContain("legacy-head");
+    expect(state.toolingCommitShas).toContain(result.toolingCommitSha);
+    expect(harness.calls.some(({ url }) => url.includes("/app/commits/"))).toBe(false);
+  });
+
+  it("rejects a legacy branch with two commits even when both touch expected paths", async () => {
+    const harness = openPullRequestHarness("legacy-head", {
+      compare: (headSha) => ({
+        ahead_by: 2,
+        commits: [{ sha: "legacy-parent" }, { sha: headSha }],
+        files: [{ filename: "locales/fr.json" }],
+      }),
+    });
+
+    await expect(
+      harness.repository.updateOpenPullRequest(harness.makeUpdate()),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining("refusing to overwrite reviewer changes"),
+    });
+    expect(
+      harness.calls.some(({ url, method }) => url.endsWith("/git/blobs") && method === "POST"),
+    ).toBe(false);
+  });
+
+  it("owns a recorded tooling SHA without checking author, signature, or committer", async () => {
+    const recordedSha = "a".repeat(40);
+    const harness = openPullRequestHarness(recordedSha);
+
+    await expect(
+      harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(noToolingCommitWrite, {
+          expectedToolingCommitSha: recordedSha,
+        }),
+      ),
+    ).resolves.toMatchObject({ changed: true, bodyUpdated: true });
+    expect(harness.calls.some(({ url }) => url.includes("/compare/"))).toBe(false);
+    expect(harness.calls.some(({ url }) => url.includes("/app/commits/"))).toBe(false);
+  });
+
+  it("accepts ownership from the SHA history and from the legacy pending field", async () => {
+    const recordedSha = "e".repeat(40);
+    const harness = openPullRequestHarness(recordedSha);
+
+    await expect(
+      harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(noToolingCommitWrite, {
+          expectedToolingCommitShas: ["older-tooling-sha", recordedSha],
+        }),
+      ),
+    ).resolves.toMatchObject({ changed: true, bodyUpdated: true });
+
+    const legacyPendingHarness = openPullRequestHarness(recordedSha);
+    await expect(
+      legacyPendingHarness.repository.updateOpenPullRequest(
+        legacyPendingHarness.makeUpdate(noToolingCommitWrite, {
+          expectedPendingToolingCommitSha: recordedSha,
+        }),
+      ),
+    ).resolves.toMatchObject({ changed: true, bodyUpdated: true });
+  });
+
+  it("blocks ref movement until ownership is saved", async () => {
+    const oldHead = "b".repeat(40);
+    const harness = openPullRequestHarness(oldHead);
+    let failSave = true;
+    let toolingCommitShas = [oldHead];
+    const persistOwnership = async (toolingSha: string, previousHeadSha: string | null) => {
+      expect(
+        harness.calls.some(
+          ({ url, method }) =>
+            url.endsWith("/git/refs/heads/i18n/phrase-batch-fr") && method === "PATCH",
+        ),
+      ).toBe(false);
+      if (failSave) {
+        failSave = false;
+        throw new Error("state save failed");
+      }
+      toolingCommitShas = [
+        ...new Set([
+          ...toolingCommitShas,
+          ...(previousHeadSha ? [previousHeadSha] : []),
+          toolingSha,
+        ]),
+      ].slice(-20);
+    };
+    const update = () =>
+      harness.makeUpdate(persistOwnership, { expectedToolingCommitShas: toolingCommitShas });
+
+    await expect(harness.repository.updateOpenPullRequest(update())).rejects.toThrow(
+      "state save failed",
+    );
+    expect(harness.branchHead).toBe(oldHead);
+    expect(
+      harness.calls.some(
+        ({ url, method }) =>
+          url.endsWith("/git/refs/heads/i18n/phrase-batch-fr") && method === "PATCH",
+      ),
+    ).toBe(false);
+
+    await expect(harness.repository.updateOpenPullRequest(update())).resolves.toMatchObject({
+      changed: true,
+      bodyUpdated: true,
+    });
+    expect(toolingCommitShas).toContain(harness.branchHead);
+    expect(harness.branchHead).not.toBe(oldHead);
+  });
+
+  it("recovers an owned head after ref update failure", async () => {
+    const oldHead = "c".repeat(40);
+    const harness = openPullRequestHarness(oldHead, { refUpdateStatuses: [503] });
+    let toolingCommitShas = [oldHead];
+    const persistOwnership = async (toolingSha: string, previousHeadSha: string | null) => {
+      toolingCommitShas = [
+        ...new Set([
+          ...toolingCommitShas,
+          ...(previousHeadSha ? [previousHeadSha] : []),
+          toolingSha,
+        ]),
+      ].slice(-20);
+    };
+    const update = () =>
+      harness.makeUpdate(persistOwnership, {
+        expectedToolingCommitShas: toolingCommitShas,
+      });
+
+    await expect(harness.repository.updateOpenPullRequest(update())).rejects.toMatchObject({
+      status: 503,
+    });
+    expect(toolingCommitShas).toHaveLength(2);
+    expect(harness.branchHead).toBe(oldHead);
+
+    await expect(harness.repository.updateOpenPullRequest(update())).resolves.toMatchObject({
+      changed: true,
+      bodyUpdated: true,
+    });
+    expect(toolingCommitShas).toContain(harness.branchHead);
+    expect(harness.branchHead).not.toBe(oldHead);
+  });
+
+  it("keeps ownership through a failed final save and a later failed ref update", async () => {
+    const oldHead = "d".repeat(40);
+    const harness = openPullRequestHarness(oldHead);
+    const state: { toolingCommitSha: string; toolingCommitShas: string[] } = {
+      toolingCommitSha: oldHead,
+      toolingCommitShas: [oldHead],
+    };
+    const persistOwnership = async (toolingSha: string, previousHeadSha: string | null) => {
+      state.toolingCommitShas = [
+        ...new Set([
+          ...state.toolingCommitShas,
+          ...(previousHeadSha ? [previousHeadSha] : []),
+          toolingSha,
+        ]),
+      ].slice(-20);
+    };
+    const reconcile = async (content: string, failFinalStateSave = false) => {
+      const result = await harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(persistOwnership, {
+          expectedToolingCommitShas: state.toolingCommitShas,
+          content: new TextEncoder().encode(content),
+        }),
+      );
+      if (failFinalStateSave) {
+        throw new Error("final state save failed");
+      }
+      state.toolingCommitSha = result.toolingCommitSha;
+      return result;
+    };
+
+    await expect(reconcile("first export", true)).rejects.toThrow("final state save failed");
+    const firstPushedHead = harness.branchHead;
+    expect(state.toolingCommitSha).toBe(oldHead);
+    expect(state.toolingCommitShas).toContain(firstPushedHead);
+
+    harness.queueRefUpdateStatus(503);
+    await expect(reconcile("changed export after interruption")).rejects.toMatchObject({
+      status: 503,
+    });
+    expect(harness.branchHead).toBe(firstPushedHead);
+    expect(state.toolingCommitSha).toBe(oldHead);
+    expect(state.toolingCommitShas).toHaveLength(3);
+
+    const recovered = await reconcile("changed export after interruption");
+    expect(recovered).toMatchObject({
+      changed: true,
+      bodyUpdated: true,
+    });
+    expect(state.toolingCommitSha).toBe(harness.branchHead);
+    expect(state.toolingCommitShas).toContain(firstPushedHead);
+    expect(state.toolingCommitShas).toContain(harness.branchHead);
+  });
+
+  it("skips branch and metadata writes when an open PR closes before the branch update", async () => {
+    const writes: string[] = [];
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (init?.method && init.method !== "GET") writes.push(url);
+      if (url.endsWith("/pulls/7") && init?.method === "GET") {
+        return response({ state: "closed", merged_at: null });
+      }
+      if (url.includes("/contents/locales/fr.json?ref=branch-head")) {
+        return response({
+          type: "file",
+          sha: "translation-blob",
+          encoding: "base64",
+          content: Buffer.from("old").toString("base64"),
+        });
+      }
+      if (url.endsWith("/git/commits/branch-head")) {
+        return response({ tree: { sha: "branch-tree" } });
+      }
+      if (url.endsWith("/git/blobs")) return response({ sha: "blob-new" }, 201);
+      if (url.endsWith("/git/trees")) return response({ sha: "tree-new" }, 201);
+      if (url.endsWith("/git/commits") && init?.method === "POST") {
+        return response({ sha: "commit-new" }, 201);
+      }
+      if (url.endsWith("/git/ref/heads/i18n/phrase-batch-fr")) {
+        return response({ object: { sha: "branch-head" } });
+      }
+      if (url.endsWith("/git/refs/heads/i18n/phrase-batch-fr")) return response({});
+      if (url.endsWith("/pulls/7") && init?.method === "PATCH") return response({});
+      throw new Error(`Unexpected GitHub request: ${url}`);
+    };
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "token",
+      stateBranch: "i18n-state",
+      fetch,
+    });
+    const update: PhraseLocalePullRequestUpdate = {
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      branch: pullRequest.branch,
+      pullRequestUrl: "https://github.com/example/app/pull/7",
+      headSha: "branch-head",
+      expectedToolingCommitSha: "branch-head",
+      recordToolingCommitSha: noToolingCommitWrite,
+      title: pullRequest.title,
+      path: pullRequest.path,
+      content: new TextEncoder().encode("updated"),
+      body: "updated warning list",
+    };
+
+    await expect(repository.updateOpenPullRequest(update)).resolves.toMatchObject({
+      changed: false,
+      pullRequestFinalized: true,
+    });
+    expect(writes).toEqual([]);
+  });
+
+  it("skips the PR metadata write when it closes after the branch update", async () => {
+    const branchHead = "branch-head";
+    let pullRequestChecks = 0;
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      calls.push({ url, init });
+      if (url.endsWith("/pulls/7") && init?.method === "GET") {
+        pullRequestChecks += 1;
+        return pullRequestChecks < 3
+          ? response({ state: "open", head: { sha: branchHead } })
+          : response({ state: "closed", merged_at: null });
+      }
+      if (url.includes(`/contents/locales/fr.json?ref=${branchHead}`)) {
+        return response({
+          type: "file",
+          sha: "translation-blob",
+          encoding: "base64",
+          content: Buffer.from("old").toString("base64"),
+        });
+      }
+      if (url.endsWith(`/git/commits/${branchHead}`)) {
+        return response({ tree: { sha: "branch-tree" } });
+      }
+      if (url.endsWith("/git/blobs")) return response({ sha: "blob-new" }, 201);
+      if (url.endsWith("/git/trees")) return response({ sha: "tree-new" }, 201);
+      if (url.endsWith("/git/commits") && init?.method === "POST") {
+        return response({ sha: "commit-new" }, 201);
+      }
+      if (url.endsWith("/git/ref/heads/i18n/phrase-batch-fr")) {
+        return response({ object: { sha: branchHead } });
+      }
+      if (url.endsWith("/git/refs/heads/i18n/phrase-batch-fr") && init?.method === "PATCH") {
+        return response({ ref: "refs/heads/i18n/phrase-batch-fr" });
+      }
+      if (url.endsWith("/pulls/7") && init?.method === "PATCH") return response({});
+      throw new Error(`Unexpected GitHub request: ${url}`);
+    };
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "token",
+      stateBranch: "i18n-state",
+      fetch,
+    });
+    const update: PhraseLocalePullRequestUpdate = {
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      branch: pullRequest.branch,
+      pullRequestUrl: "https://github.com/example/app/pull/7",
+      headSha: branchHead,
+      expectedToolingCommitSha: branchHead,
+      recordToolingCommitSha: noToolingCommitWrite,
+      title: pullRequest.title,
+      path: pullRequest.path,
+      content: new TextEncoder().encode("updated"),
+      body: "updated warning list",
+    };
+
+    await expect(repository.updateOpenPullRequest(update)).resolves.toMatchObject({
+      changed: true,
+      bodyUpdated: false,
+      pullRequestFinalized: true,
+    });
+    expect(pullRequestChecks).toBe(3);
+    expect(
+      calls.filter(
+        ({ url, init }) =>
+          url.endsWith("/git/refs/heads/i18n/phrase-batch-fr") && init?.method === "PATCH",
+      ),
+    ).toHaveLength(1);
+    expect(
+      calls.some(({ url, init }) => url.endsWith("/pulls/7") && init?.method === "PATCH"),
+    ).toBe(false);
+  });
+
+  it("reuses open, merged, or closed PRs without changing their branches", async () => {
+    const openMetadataUpdates: Record<string, unknown>[] = [];
+    const openFetch: typeof globalThis.fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith("/pulls/7") && init?.method === "GET") {
+        return response({ state: "open", head: { sha: "branch-head" } });
+      }
+      if (url.endsWith("/pulls/7") && init?.method === "PATCH") {
+        openMetadataUpdates.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return response({});
+      }
       if (url.includes("/pulls?")) {
         return response([{ state: "open", html_url: "https://github.com/example/app/pull/7" }]);
+      }
+      if (url.includes("/compare/")) {
+        return response({
+          ahead_by: 1,
+          commits: [commitDetails("branch-head")],
+          files: [{ filename: "locales/fr.json" }],
+        });
+      }
+      if (url.endsWith("/git/commits/branch-head")) {
+        return response({
+          sha: "branch-head",
+          tree: { sha: "branch-tree" },
+        });
       }
       if (url.endsWith("/git/ref/heads/i18n/phrase-batch-fr")) {
         return response({ object: { sha: "branch-head" } });
@@ -587,14 +1223,17 @@ describe("GitHubPhraseRepository", () => {
     await expect(openRepository.createOrUpdatePullRequest(pullRequest)).resolves.toBe(
       "https://github.com/example/app/pull/7",
     );
+    expect(openMetadataUpdates).toEqual([{ title: pullRequest.title, body: pullRequest.body }]);
 
     let calls = 0;
+    let mergedPatches = 0;
     const mergedRepository = new GitHubPhraseRepository({
       repository: "example/app",
       token: "github-run-token",
       stateBranch: "i18n-state",
-      fetch: async () => {
+      fetch: async (_input, init) => {
         calls += 1;
+        if (init?.method === "PATCH") mergedPatches += 1;
         return response([
           {
             state: "closed",
@@ -608,16 +1247,43 @@ describe("GitHubPhraseRepository", () => {
       "https://github.com/example/app/pull/7",
     );
     expect(calls).toBe(1);
+    expect(mergedPatches).toBe(0);
 
+    let closedCalls = 0;
+    let closedPatches = 0;
     const closedRepository = new GitHubPhraseRepository({
       repository: "example/app",
       token: "github-run-token",
       stateBranch: "i18n-state",
-      fetch: async () => response([{ state: "closed", merged_at: null }]),
+      fetch: async (input, init) => {
+        closedCalls += 1;
+        if (init?.method === "PATCH") closedPatches += 1;
+        const url = input instanceof Request ? input.url : String(input);
+        return url.includes("/pulls?")
+          ? response([
+              {
+                state: "closed",
+                merged_at: null,
+                html_url: "https://github.com/example/app/pull/7",
+              },
+            ])
+          : response({ state: "closed", merged_at: null });
+      },
     });
-    await expect(closedRepository.createOrUpdatePullRequest(pullRequest)).rejects.toMatchObject({
-      status: 409,
-      permanent: true,
+    await expect(
+      closedRepository.createOrUpdatePullRequestWithCommit(pullRequest),
+    ).resolves.toEqual({
+      pullRequestUrl: "https://github.com/example/app/pull/7",
+      pullRequestFinalized: true,
     });
+    expect(closedCalls).toBe(1);
+    expect(closedPatches).toBe(0);
+    expect(
+      await closedRepository.getPullRequestState("https://github.com/example/app/pull/7"),
+    ).toEqual({
+      state: "closed",
+    });
+    expect(closedCalls).toBe(2);
+    expect(closedPatches).toBe(0);
   });
 });

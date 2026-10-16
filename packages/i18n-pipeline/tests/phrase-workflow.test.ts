@@ -8,7 +8,11 @@ import {
   PhraseWorkflowError,
   type PhraseBatchRecord,
   type PhraseBatchStateStore,
+  type PhraseLocalePullRequestCreated,
   type PhraseLocalePullRequest,
+  type PhraseLocalePullRequestUpdate,
+  type PhraseLocalePullRequestUpdateResult,
+  type PhrasePullRequestState,
   type PhraseWorkflowConfig,
   type PhraseWorkflowRepository,
 } from "../src/phrase-workflow.js";
@@ -35,6 +39,9 @@ class MemoryStateStore implements PhraseBatchStateStore {
   readonly records = new Map<string, { record: PhraseBatchRecord; revision: string }>();
   readonly corruptKeys = new Set<string>();
   conflictOnPhase?: string;
+  failUpdateMatching?: (record: PhraseBatchRecord) => boolean;
+  beforeNextUpdateConflict?: (store: MemoryStateStore, record: PhraseBatchRecord) => void;
+  beforeEveryUpdateConflict?: (store: MemoryStateStore, record: PhraseBatchRecord) => void;
   writes = 0;
 
   constructor(private readonly events: string[] = []) {}
@@ -62,9 +69,21 @@ class MemoryStateStore implements PhraseBatchStateStore {
   }
 
   async updateBatch(record: PhraseBatchRecord, expectedRevision: string): Promise<string> {
+    if (this.beforeEveryUpdateConflict) {
+      this.beforeEveryUpdateConflict(this, record);
+    } else if (this.beforeNextUpdateConflict) {
+      const beforeConflict = this.beforeNextUpdateConflict;
+      this.beforeNextUpdateConflict = undefined;
+      beforeConflict(this, record);
+    }
     const current = this.records.get(record.key);
-    if (!current || current.revision !== expectedRevision) throw new Error("state conflict");
+    if (!current || current.revision !== expectedRevision)
+      throw new PhraseBatchStateConflictError();
     if (record.phase === this.conflictOnPhase) throw new PhraseBatchStateConflictError();
+    if (this.failUpdateMatching?.(record)) {
+      this.failUpdateMatching = undefined;
+      throw new Error("state save failed");
+    }
     this.events.push(`state:${record.phase}`);
     this.writes += 1;
     const revision = String(Number(expectedRevision) + 1);
@@ -80,6 +99,7 @@ class FakePhrase {
   readonly asyncRequestIds: string[] = [];
   readonly inaccessibleJobUids = new Set<string>();
   readonly targetDownloadJobUids: string[] = [];
+  readonly targetDownloadProjectUids: string[] = [];
   readonly targetFileDownloadJobUids: string[] = [];
   createJobCalls = 0;
   targetDownloadCalls = 0;
@@ -87,8 +107,11 @@ class FakePhrase {
   waitError?: Error;
   exportError?: Error;
   getJobError?: Error;
+  readonly getJobErrors = new Map<string, Error>();
+  getJobErrorOnCall?: (projectUid: string, uid: string, callNumber: number) => Error | undefined;
   jobStatus = "NEW";
   importStatus: "RUNNING" | "ERROR" | "OK" = "OK";
+  readonly importStatuses = new Map<string, "RUNNING" | "ERROR" | "OK">();
   expectedTargetLangs = ["fr"];
   expectedFilename = "translation-template.json";
   unsupportedFiles: string[] = [];
@@ -96,6 +119,16 @@ class FakePhrase {
   onDownloadTargetFile?: () => void;
   readonly jobStatuses = new Map<string, string>();
   readonly jobFilenamesByUid = new Map<string, string | undefined>();
+  private readonly knownJobParts = new Map<
+    string,
+    {
+      uid: string;
+      targetLang: string;
+      workflowLevel: number;
+      filename?: string;
+      lastWorkflowLevel?: number;
+    }
+  >();
   jobParts: Array<{
     uid: string;
     targetLang: string;
@@ -116,6 +149,7 @@ class FakePhrase {
     if (this.createError) throw this.createError;
     expect(input.filename).toBe(this.expectedFilename);
     expect(input.targetLangs).toEqual(this.expectedTargetLangs);
+    for (const job of this.jobParts) this.knownJobParts.set(job.uid, job);
     return {
       asyncRequest: { id: "import-1", action: "IMPORT_JOB" },
       jobs: this.jobParts,
@@ -138,11 +172,19 @@ class FakePhrase {
   async getJob(projectUid: string, uid: string) {
     this.callOrder.push(`get:${projectUid}:${uid}`);
     this.getJobCalls.push({ projectUid, jobUid: uid });
+    const callError = this.getJobErrorOnCall?.(projectUid, uid, this.getJobCalls.length);
+    if (callError) throw callError;
     if (this.inaccessibleJobUids.has(uid)) {
       throw new PhraseApiError("Phrase API returned HTTP 404", 404);
     }
+    const jobError = this.getJobErrors.get(uid);
+    if (jobError) throw jobError;
     if (this.getJobError) throw this.getJobError;
-    const job = this.jobParts.find((part) => part.uid === uid) ?? {
+    const knownJob = this.jobParts.find((part) => part.uid === uid) ?? this.knownJobParts.get(uid);
+    if (!knownJob && !this.jobFilenamesByUid.has(uid)) {
+      throw new Error(`Unexpected job ${uid}`);
+    }
+    const job = knownJob ?? {
       uid,
       targetLang: "fr",
       workflowLevel: 1,
@@ -155,12 +197,13 @@ class FakePhrase {
       ...(filename === undefined ? {} : { filename }),
       lastWorkflowLevel: job.lastWorkflowLevel ?? job.workflowLevel,
       status: this.jobStatuses.get(uid) ?? this.jobStatus,
-      importStatus: { status: this.importStatus },
+      importStatus: { status: this.importStatuses.get(uid) ?? this.importStatus },
     };
   }
 
-  async startTargetDownload(_projectUid: string, jobUid: string) {
+  async startTargetDownload(projectUid: string, jobUid: string) {
     this.targetDownloadCalls += 1;
+    this.targetDownloadProjectUids.push(projectUid);
     this.targetDownloadJobUids.push(jobUid);
     this.events.push(`phrase:export:${jobUid}`);
     if (this.exportError) throw this.exportError;
@@ -176,18 +219,37 @@ class FakePhrase {
 }
 
 class FakeRepository implements PhraseWorkflowRepository {
-  readonly pullRequests: PhraseLocalePullRequest[] = [];
+  readonly pullRequests: Omit<
+    PhraseLocalePullRequest,
+    "recordToolingCommitSha" | "recheckOwnedCommitEligibility"
+  >[] = [];
   readonly resolvedRefs: string[] = [];
+  readonly pullRequestStates = new Map<string, "open" | "merged" | "closed">();
+  pullRequestStateCalls = 0;
+  readonly branchHeads = new Map<string, string>();
+  readonly branchFiles = new Map<string, Map<string, Uint8Array>>();
+  readonly branchCommits = new Map<string, { sha: string; paths: string[] }[]>();
+  readonly pullRequestBranches = new Map<string, string>();
+  readonly pullRequestBodies = new Map<string, string>();
   baseCommit = "resolved-base-commit";
   baseSourceBytes = sourceBytes;
   pinnedSourceBytes = sourceBytes;
   pullRequestError?: Error;
+  bodyUpdateError?: Error;
+  refUpdateError?: Error;
+  preverifiedRefUpdateHeadSha?: string;
+  closeOnNextOpenPullRequestUpdate = false;
+  beforeOpenPullRequestRefRecheck?: () => void;
   readFileCalls = 0;
+  private commitNumber = 0;
   onReadFile?: (path: string, ref: string, call: number) => Uint8Array | null;
 
   async readFile(path: string, ref: string) {
     this.readFileCalls += 1;
     if (this.onReadFile) return this.onReadFile(path, ref, this.readFileCalls);
+    for (const [branch, headSha] of this.branchHeads) {
+      if (headSha === ref) return this.branchFiles.get(branch)?.get(path) ?? null;
+    }
     return ref === "abc123" ? this.pinnedSourceBytes : this.baseSourceBytes;
   }
 
@@ -197,10 +259,248 @@ class FakeRepository implements PhraseWorkflowRepository {
   }
 
   async createOrUpdatePullRequest(input: PhraseLocalePullRequest) {
-    if (this.pullRequestError) throw this.pullRequestError;
-    this.pullRequests.push(input);
-    return "https://github.com/example/app/pull/42";
+    return (await this.createOrUpdatePullRequestWithCommit(input)).pullRequestUrl;
   }
+
+  async getPullRequestState(pullRequestUrl: string): Promise<PhrasePullRequestState> {
+    this.pullRequestStateCalls += 1;
+    const state = this.pullRequestStates.get(pullRequestUrl) ?? "open";
+    if (state !== "open") return { state };
+    const branch = this.pullRequestBranches.get(pullRequestUrl);
+    const headSha =
+      this.preverifiedRefUpdateHeadSha ?? (branch ? this.branchHeads.get(branch) : undefined);
+    if (!headSha) throw new PhraseRepositoryError("Fake pull request has no branch head", 500);
+    return { state: "open", headSha };
+  }
+
+  async createOrUpdatePullRequestWithCommit(
+    input: PhraseLocalePullRequest,
+  ): Promise<PhraseLocalePullRequestCreated> {
+    if (this.pullRequestError) throw this.pullRequestError;
+    const pullRequestUrl = `https://github.com/example/app/pull/${42 + this.pullRequests.length}`;
+    const files = [{ path: input.path, content: input.content }, ...(input.additionalFiles ?? [])];
+    const previousHeadSha = this.branchHeads.get(input.branch) ?? null;
+    const toolingCommitSha = this.createCommitSha();
+    await input.recordToolingCommitSha(toolingCommitSha, previousHeadSha);
+    if (previousHeadSha) await input.recheckOwnedCommitEligibility?.(previousHeadSha);
+    if ((this.branchHeads.get(input.branch) ?? null) !== previousHeadSha) {
+      throw new PhraseRepositoryError(
+        "Phrase locale branch changed while applying the update; refusing to overwrite reviewer changes",
+        409,
+      );
+    }
+    this.pushCommit(
+      input.branch,
+      toolingCommitSha,
+      files.map((file) => file.path),
+      files,
+    );
+    const { recordToolingCommitSha, recheckOwnedCommitEligibility, ...storedInput } = input;
+    void recordToolingCommitSha;
+    void recheckOwnedCommitEligibility;
+    this.pullRequests.push(storedInput);
+    this.pullRequestBranches.set(pullRequestUrl, input.branch);
+    this.pullRequestBodies.set(pullRequestUrl, input.body);
+    return { pullRequestUrl, toolingCommitSha };
+  }
+
+  async updateOpenPullRequest(
+    input: PhraseLocalePullRequestUpdate,
+  ): Promise<PhraseLocalePullRequestUpdateResult> {
+    if (this.pullRequestError) throw this.pullRequestError;
+    if (this.closeOnNextOpenPullRequestUpdate) {
+      this.closeOnNextOpenPullRequestUpdate = false;
+      this.pullRequestStates.set(input.pullRequestUrl, "closed");
+      return {
+        changed: false,
+        toolingCommitSha: input.headSha,
+        bodyUpdated: false,
+        pullRequestFinalized: true,
+      };
+    }
+    const headSha = this.branchHeads.get(input.branch);
+    if (!headSha || (this.preverifiedRefUpdateHeadSha === undefined && headSha !== input.headSha)) {
+      throw new PhraseRepositoryError("Phrase locale branch moved during re-export", 409);
+    }
+    const commits = this.branchCommits.get(input.branch) ?? [];
+    const expectedPaths = new Set([
+      input.path,
+      ...(input.additionalFiles ?? []).map((file) => file.path),
+    ]);
+    const expectedToolingShas = new Set(
+      [
+        ...(Array.isArray(input.expectedToolingCommitShas) ? input.expectedToolingCommitShas : []),
+        input.expectedToolingCommitSha,
+        input.expectedPendingToolingCommitSha,
+      ].filter((sha): sha is string => typeof sha === "string" && Boolean(sha.trim())),
+    );
+    const toolingOwned = expectedToolingShas.size
+      ? expectedToolingShas.has(headSha)
+      : commits.length === 1 &&
+        Boolean(commits[0]?.paths.length) &&
+        commits[0]?.paths.every((path) => expectedPaths.has(path));
+    if (!toolingOwned) {
+      throw new PhraseRepositoryError(
+        "Phrase locale branch moved after the last tooling commit; refusing to overwrite reviewer changes",
+        409,
+      );
+    }
+    const files = [{ path: input.path, content: input.content }, ...(input.additionalFiles ?? [])];
+    const currentFiles = this.branchFiles.get(input.branch) ?? new Map<string, Uint8Array>();
+    const changedFiles = files.filter((file) => {
+      const current = currentFiles.get(file.path);
+      return !current || !Buffer.from(current).equals(Buffer.from(file.content));
+    });
+    if (!changedFiles.length) {
+      return { changed: false, toolingCommitSha: headSha, bodyUpdated: false };
+    }
+    const toolingCommitSha = this.createCommitSha();
+    await input.recordToolingCommitSha(toolingCommitSha, input.headSha);
+    this.beforeOpenPullRequestRefRecheck?.();
+    await input.recheckOwnedCommitEligibility?.(input.headSha);
+    if (this.refUpdateError) {
+      const error = this.refUpdateError;
+      this.refUpdateError = undefined;
+      throw error;
+    }
+    if (this.preverifiedRefUpdateHeadSha !== undefined) {
+      throw new PhraseRepositoryError(
+        "Phrase locale branch changed while applying the update; refusing to overwrite reviewer changes",
+        409,
+      );
+    }
+    if (this.branchHeads.get(input.branch) !== headSha) {
+      throw new PhraseRepositoryError(
+        "Phrase locale branch changed while applying the update; refusing to overwrite reviewer changes",
+        409,
+      );
+    }
+    this.pushCommit(
+      input.branch,
+      toolingCommitSha,
+      changedFiles.map((file) => file.path),
+      files,
+    );
+    try {
+      await this.updatePullRequestBody(input.pullRequestUrl, input.body, input.title);
+      return { changed: true, toolingCommitSha, bodyUpdated: true };
+    } catch (bodyError) {
+      return { changed: true, toolingCommitSha, bodyUpdated: false, bodyError };
+    }
+  }
+
+  async updatePullRequestBody(
+    pullRequestUrl: string,
+    body: string,
+    title?: string,
+  ): Promise<boolean> {
+    if (this.bodyUpdateError) throw this.bodyUpdateError;
+    this.pullRequestBodies.set(pullRequestUrl, body);
+    const branch = this.pullRequestBranches.get(pullRequestUrl);
+    const index = branch ? this.pullRequests.findIndex((input) => input.branch === branch) : -1;
+    if (index !== -1) {
+      this.pullRequests[index] = {
+        ...this.pullRequests[index]!,
+        ...(title === undefined ? {} : { title }),
+        body,
+      };
+    }
+    return true;
+  }
+
+  pushHumanCommit(branch: string, paths: string[] = ["reviewer.md"]) {
+    const sha = `human-${++this.commitNumber}`;
+    this.branchHeads.set(branch, sha);
+    const commits = this.branchCommits.get(branch) ?? [];
+    commits.push({ sha, paths });
+    this.branchCommits.set(branch, commits);
+  }
+
+  commitCount(branch: string): number {
+    return this.branchCommits.get(branch)?.length ?? 0;
+  }
+
+  private createCommitSha(): string {
+    return `tooling-${++this.commitNumber}`;
+  }
+
+  private pushCommit(
+    branch: string,
+    sha: string,
+    paths: string[],
+    files?: { path: string; content: Uint8Array }[],
+  ): void {
+    this.branchHeads.set(branch, sha);
+    const commits = this.branchCommits.get(branch) ?? [];
+    commits.push({ sha, paths });
+    this.branchCommits.set(branch, commits);
+    const storedFiles = this.branchFiles.get(branch) ?? new Map<string, Uint8Array>();
+    for (const file of files ?? []) storedFiles.set(file.path, new Uint8Array(file.content));
+    this.branchFiles.set(branch, storedFiles);
+  }
+}
+
+const japaneseConfig: PhraseWorkflowConfig = {
+  ...config,
+  targetLocales: [
+    ...config.targetLocales,
+    { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
+  ],
+};
+
+const phrasePins = {
+  expectedProjectUid: "project-uid",
+  expectedSourceFilename: "translation-template.json",
+};
+
+function makeJapaneseWorkflowScenario() {
+  const state = new MemoryStateStore();
+  const phrase = new FakePhrase();
+  phrase.expectedTargetLangs = ["fr", "ja"];
+  phrase.jobParts = [
+    { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
+    { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
+  ];
+  phrase.jobStatus = "COMPLETED";
+  phrase.targetBytesByJob.set(
+    "job-ja",
+    new TextEncoder().encode('{"greeting":"こんにちは {name}"}'),
+  );
+  const repository = new FakeRepository();
+  const workflow = new PhraseWorkflow({
+    phrase,
+    state,
+    repository,
+    catalogAdapters: new CatalogAdapterRegistry(),
+  });
+  const input = {
+    repository: "example/app",
+    baseRef: "phrase-pilot",
+    sourceCommit: "abc123",
+    sourceBytes,
+    config: japaneseConfig,
+  };
+  return { state, phrase, repository, workflow, input };
+}
+
+async function submitWithJapaneseImportRetrying(
+  scenario: ReturnType<typeof makeJapaneseWorkflowScenario>,
+) {
+  scenario.phrase.getJobErrors.set(
+    "job-ja",
+    new PhraseApiError("Phrase API returned HTTP 503", 503),
+  );
+  return scenario.workflow.submit(scenario.input);
+}
+
+function failJobLookupAt(
+  phrase: FakePhrase,
+  jobUid: string,
+  callNumber: number,
+  error: Error,
+): void {
+  phrase.getJobErrorOnCall = (_projectUid, requestedJobUid, currentCall) =>
+    requestedJobUid === jobUid && currentCall === callNumber ? error : undefined;
 }
 
 describe("PhraseWorkflow submission", () => {
@@ -658,7 +958,7 @@ describe("PhraseWorkflow submission", () => {
     expect(phrase.createJobCalls).toBe(1);
   });
 
-  it("does not resubmit a job after Phrase reports an import failure", async () => {
+  it("isolates an import failure to its locale and retries that locale in a new attempt", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
     phrase.importStatus = "ERROR";
@@ -676,12 +976,16 @@ describe("PhraseWorkflow submission", () => {
       config,
     };
 
-    await expect(workflow.submit(input)).rejects.toThrow("Phrase failed to import job job-fr");
+    const submitted = await workflow.submit(input);
     const [stored] = await state.listBatches();
-    expect(stored?.record.phase).toBe("failed");
-    await expect(workflow.submit(input)).rejects.toThrow(
-      /cannot be submitted again from phase failed/i,
-    );
+    expect(submitted.phase).toBe("ready");
+    expect(submitted.locales.fr).toMatchObject({
+      phase: "failed",
+      failureReason: "Phrase failed to import job job-fr: unknown error",
+    });
+    expect(stored?.record.phase).toBe("ready");
+    expect(stored?.record.locales.fr?.phase).toBe("failed");
+    expect((await workflow.submit(input)).key).toBe(submitted.key);
     expect(phrase.createJobCalls).toBe(1);
 
     phrase.importStatus = "OK";
@@ -695,6 +999,271 @@ describe("PhraseWorkflow submission", () => {
       key: retried.key,
     });
     expect(phrase.createJobCalls).toBe(2);
+  });
+
+  it("keeps a transient initial import lookup failure retryable while a sibling reconciles", async () => {
+    const localesConfig: PhraseWorkflowConfig = {
+      ...config,
+      targetLocales: [
+        ...config.targetLocales,
+        { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
+      ],
+    };
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.expectedTargetLangs = ["fr", "ja"];
+    phrase.jobParts = [
+      { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
+      { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
+    ];
+    phrase.jobStatus = "COMPLETED";
+    phrase.getJobErrors.set("job-fr", new PhraseApiError("Phrase API returned HTTP 503", 503));
+    phrase.targetBytesByJob.set(
+      "job-ja",
+      new TextEncoder().encode('{"greeting":"こんにちは {name}"}'),
+    );
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+
+    const submitted = await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config: localesConfig,
+    });
+    const [stored] = await state.listBatches();
+    const results = await workflow.reconcile();
+    const [afterReconcile] = await state.listBatches();
+
+    expect(submitted.phase).toBe("importing");
+    expect(submitted.locales.fr).toEqual({ phase: "pending" });
+    expect(stored?.record.phase).toBe("importing");
+    expect(stored?.record.locales.fr).toEqual({ phase: "pending" });
+    expect(results.map(({ phraseLocale, phase }) => [phraseLocale, phase])).toEqual([
+      ["fr", "retrying"],
+      ["ja", "pr-created"],
+    ]);
+    expect(results[0]?.reason).toBe("Phrase API returned HTTP 503");
+    expect(afterReconcile?.record.phase).toBe("importing");
+    expect(afterReconcile?.record.locales.fr).toEqual({ phase: "pending" });
+    expect(repository.pullRequests.map(({ path }) => path)).toEqual(["locales/ja.json"]);
+
+    const japaneseBranch = afterReconcile?.record.locales.ja?.pullRequestBranch;
+    phrase.targetBytesByJob.set(
+      "job-ja",
+      new TextEncoder().encode('{"greeting":"ようこそ {name}"}'),
+    );
+    const reexportResults = await workflow.reconcile();
+    const [afterReexport] = await state.listBatches();
+
+    expect(reexportResults.map(({ phraseLocale, phase }) => [phraseLocale, phase])).toEqual([
+      ["fr", "retrying"],
+      ["ja", "pr-created"],
+    ]);
+    expect(reexportResults[0]?.reason).toBe("Phrase API returned HTTP 503");
+    expect(afterReexport?.record.phase).toBe("importing");
+    expect(repository.commitCount(japaneseBranch!)).toBe(2);
+    expect(
+      new TextDecoder().decode(repository.branchFiles.get(japaneseBranch!)?.get("locales/ja.json")),
+    ).toContain("ようこそ");
+  });
+
+  it("fails a permanent import lookup after a transient failure without affecting siblings", async () => {
+    const localesConfig: PhraseWorkflowConfig = {
+      ...config,
+      targetLocales: [
+        ...config.targetLocales,
+        { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
+      ],
+    };
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.expectedTargetLangs = ["fr", "ja"];
+    phrase.jobParts = [
+      { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
+      { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
+    ];
+    phrase.jobStatus = "COMPLETED";
+    phrase.getJobErrors.set("job-fr", new PhraseApiError("Phrase API returned HTTP 503", 503));
+    phrase.targetBytesByJob.set(
+      "job-ja",
+      new TextEncoder().encode('{"greeting":"こんにちは {name}"}'),
+    );
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+
+    const submitted = await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config: localesConfig,
+    });
+    phrase.getJobErrors.set("job-fr", new PhraseApiError("Phrase API returned HTTP 404", 404));
+    const results = await workflow.reconcile();
+    const [stored] = await state.listBatches();
+
+    expect(submitted.phase).toBe("importing");
+    expect(submitted.locales.fr).toEqual({ phase: "pending" });
+    expect(results.map(({ phraseLocale, phase }) => [phraseLocale, phase])).toEqual([
+      ["fr", "failed"],
+      ["ja", "pr-created"],
+    ]);
+    expect(results[0]?.reason).toBe("Phrase API returned HTTP 404");
+    expect(stored?.record.phase).toBe("ready");
+    expect(stored?.record.locales.fr).toMatchObject({
+      phase: "failed",
+      failureReason: "Phrase API returned HTTP 404",
+    });
+    expect(repository.pullRequests.map(({ path }) => path)).toEqual(["locales/ja.json"]);
+  });
+
+  it("retries a transient import lookup on the next reconcile without creating another job", async () => {
+    const localesConfig: PhraseWorkflowConfig = {
+      ...config,
+      targetLocales: [
+        ...config.targetLocales,
+        { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
+      ],
+    };
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.expectedTargetLangs = ["fr", "ja"];
+    phrase.jobParts = [
+      { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
+      { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
+    ];
+    phrase.jobStatus = "COMPLETED";
+    phrase.getJobErrors.set("job-fr", new PhraseApiError("Phrase API returned HTTP 503", 503));
+    phrase.targetBytesByJob.set(
+      "job-fr",
+      new TextEncoder().encode('{"greeting":"Bonjour {name}"}'),
+    );
+    phrase.targetBytesByJob.set(
+      "job-ja",
+      new TextEncoder().encode('{"greeting":"こんにちは {name}"}'),
+    );
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+
+    const submitted = await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config: localesConfig,
+    });
+    phrase.getJobErrors.delete("job-fr");
+    const results = await workflow.reconcile();
+    const [stored] = await state.listBatches();
+
+    expect(submitted.phase).toBe("importing");
+    expect(submitted.locales.fr).toEqual({ phase: "pending" });
+    expect(results.map(({ phraseLocale, phase }) => [phraseLocale, phase])).toEqual([
+      ["fr", "pr-created"],
+      ["ja", "pr-created"],
+    ]);
+    expect(phrase.getJobCalls.filter(({ jobUid }) => jobUid === "job-fr")).toHaveLength(3);
+    expect(stored?.record.phase).toBe("ready");
+    expect(phrase.createJobCalls).toBe(1);
+    expect(stored?.record.jobs.map(({ uid, targetLang }) => [uid, targetLang])).toEqual([
+      ["job-fr", "fr"],
+      ["job-ja", "ja"],
+    ]);
+    expect(repository.pullRequests.map(({ path }) => path)).toEqual([
+      "locales/fr.json",
+      "locales/ja.json",
+    ]);
+  });
+
+  it("settles replacement import jobs per locale while carrying an open locale PR", async () => {
+    const localesConfig: PhraseWorkflowConfig = {
+      ...config,
+      targetLocales: [
+        ...config.targetLocales,
+        { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
+        { phraseLocale: "ko", repositoryLocale: "ko", outputPath: "locales/ko.json" },
+      ],
+    };
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.expectedTargetLangs = ["fr", "ja", "ko"];
+    phrase.jobParts = [
+      { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
+      { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
+      { uid: "job-ko", targetLang: "ko", workflowLevel: 1 },
+    ];
+    phrase.jobStatuses.set("job-fr", "COMPLETED");
+    phrase.jobStatuses.set("job-ja", "CANCELLED");
+    phrase.jobStatuses.set("job-ko", "CANCELLED");
+    phrase.targetBytesByJob.set(
+      "job-ko",
+      new TextEncoder().encode('{"greeting":"안녕하세요 {name}"}'),
+    );
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const input = {
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config: localesConfig,
+    };
+    await workflow.submit(input);
+    await workflow.reconcile();
+
+    phrase.expectedTargetLangs = ["ja", "ko"];
+    phrase.jobParts = [
+      { uid: "job-ja-retry", targetLang: "ja", workflowLevel: 1 },
+      { uid: "job-ko-retry", targetLang: "ko", workflowLevel: 1 },
+    ];
+    phrase.jobStatuses.set("job-ko-retry", "COMPLETED");
+    phrase.getJobErrors.set(
+      "job-ja-retry",
+      new PhraseApiError("Phrase API returned HTTP 503", 503),
+    );
+    phrase.targetBytesByJob.set(
+      "job-ko-retry",
+      new TextEncoder().encode('{"greeting":"안녕하세요 {name}"}'),
+    );
+
+    const retry = await workflow.submit({ ...input, retryFailed: true });
+    const results = await workflow.reconcile();
+
+    expect(retry.locales.fr?.phase).toBe("pr-created");
+    expect(retry.locales.ja).toEqual({ phase: "pending" });
+    expect(retry.locales.ko?.phase).toBe("pending");
+    expect(results).toContainEqual({
+      batchKey: retry.key,
+      phraseLocale: "ja",
+      phase: "retrying",
+      reason: "Phrase API returned HTTP 503",
+    });
+    expect(
+      results.some(({ phraseLocale, phase }) => phraseLocale === "ko" && phase === "pr-created"),
+    ).toBe(true);
+    expect(repository.pullRequests.map(({ path }) => path)).toContain("locales/ko.json");
   });
 
   it("retries only failed locales after completion while preserving successful locale PRs", async () => {
@@ -740,10 +1309,11 @@ describe("PhraseWorkflow submission", () => {
       ["fr", "pr-created"],
       ["ja", "failed"],
     ]);
-    expect(firstBatches[0]?.record.phase).toBe("completed");
+    expect(firstBatches[0]?.record.phase).toBe("ready");
     expect(firstBatches[0]?.record.locales.fr).toMatchObject({ phase: "pr-created" });
     expect(firstBatches[0]?.record.locales.ja).toMatchObject({ phase: "failed" });
     expect(repository.pullRequests.map(({ path }) => path)).toEqual(["locales/fr.json"]);
+    const frBranch = firstBatches[0]?.record.locales.fr?.pullRequestBranch;
 
     const existing = await workflow.submit(input);
     expect(existing.key).toBe(first.key);
@@ -756,11 +1326,13 @@ describe("PhraseWorkflow submission", () => {
       "job-ja-retry",
       new TextEncoder().encode('{"greeting":"こんにちは {name}"}'),
     );
+    phrase.getJobErrors.set("job-fr", new PhraseApiError("Phrase job was not found", 404));
     const retried = await workflow.submit({ ...input, retryFailed: true });
 
     expect(retried.key).not.toBe(first.key);
     expect(retried.attempt).toBe(1);
     expect(retried.jobs.map(({ uid, targetLang }) => [uid, targetLang])).toEqual([
+      ["job-fr", "fr"],
       ["job-ja-retry", "ja"],
     ]);
     expect(retried.locales.fr).toMatchObject({
@@ -774,16 +1346,195 @@ describe("PhraseWorkflow submission", () => {
     const repeated = await workflow.submit({ ...input, retryFailed: true });
 
     expect(retryResults.map(({ phraseLocale, phase }) => [phraseLocale, phase])).toEqual([
-      ["fr", "pr-created"],
+      ["fr", "retrying"],
       ["ja", "pr-created"],
     ]);
+    expect(retryResults[0]?.reason).toContain("Phrase API returned HTTP 404");
     expect(repository.pullRequests.map(({ path }) => path)).toEqual([
       "locales/fr.json",
       "locales/ja.json",
     ]);
+    expect(repository.commitCount(frBranch!)).toBe(1);
     expect(phrase.targetDownloadCalls).toBe(2);
+    expect(repository.pullRequestStateCalls).toBe(1);
     expect(repeated.key).toBe(retried.key);
     expect(phrase.createJobCalls).toBe(2);
+  });
+
+  it("re-exports a carried PR while the retry batch import is pending", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.jobParts = [
+      { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
+      { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
+    ];
+    phrase.expectedTargetLangs = ["fr", "ja"];
+    phrase.jobStatuses.set("job-fr", "COMPLETED");
+    phrase.jobStatuses.set("job-ja", "CANCELLED");
+    phrase.targetBytesByJob.set(
+      "job-fr",
+      new TextEncoder().encode('{"greeting":"Bonjour {name}"}'),
+    );
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const input = {
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config: {
+        ...config,
+        targetLocales: [
+          ...config.targetLocales,
+          { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
+        ],
+      },
+    };
+
+    await workflow.submit(input);
+    expect(
+      (await workflow.reconcile()).map(({ phraseLocale, phase }) => [phraseLocale, phase]),
+    ).toEqual([
+      ["fr", "pr-created"],
+      ["ja", "failed"],
+    ]);
+    const [parent] = await state.listBatches();
+    const frenchBranch = parent?.record.locales.fr?.pullRequestBranch;
+
+    phrase.expectedTargetLangs = ["ja"];
+    phrase.jobParts = [{ uid: "job-ja-retry", targetLang: "ja", workflowLevel: 1 }];
+    phrase.jobStatuses.set("job-ja-retry", "COMPLETED");
+    phrase.targetBytesByJob.set(
+      "job-ja-retry",
+      new TextEncoder().encode('{"greeting":"こんにちは {name}"}'),
+    );
+    phrase.getJobErrors.set(
+      "job-ja-retry",
+      new PhraseApiError("Phrase API returned HTTP 503", 503),
+    );
+    const retried = await workflow.submit({ ...input, retryFailed: true });
+
+    expect(retried.phase).toBe("importing");
+    expect(retried.locales.fr?.phase).toBe("pr-created");
+
+    phrase.targetBytesByJob.set("job-fr", new TextEncoder().encode('{"greeting":"Salut {name}"}'));
+    const results = await workflow.reconcile();
+    const updatedRetry = await state.readBatch(retried.key);
+
+    expect(results.map(({ phraseLocale, phase }) => [phraseLocale, phase])).toEqual([
+      ["fr", "pr-created"],
+      ["ja", "retrying"],
+    ]);
+    expect(results[1]?.reason).toBe("Phrase API returned HTTP 503");
+    expect(updatedRetry?.record.phase).toBe("importing");
+    expect(repository.commitCount(frenchBranch!)).toBe(2);
+    expect(
+      new TextDecoder().decode(repository.branchFiles.get(frenchBranch!)?.get("locales/fr.json")),
+    ).toContain("Salut");
+  });
+
+  it("refreshes a carried locale SHA when retry ownership transfers after import", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.jobParts = [
+      { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
+      { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
+    ];
+    phrase.expectedTargetLangs = ["fr", "ja"];
+    phrase.jobStatuses.set("job-fr", "COMPLETED");
+    phrase.jobStatuses.set("job-ja", "CANCELLED");
+    phrase.targetBytesByJob.set(
+      "job-fr",
+      new TextEncoder().encode('{"greeting":"Bonjour {name}"}'),
+    );
+    phrase.targetBytesByJob.set(
+      "job-ja",
+      new TextEncoder().encode('{"greeting":"こんにちは {name}"}'),
+    );
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const input = {
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config: {
+        ...config,
+        targetLocales: [
+          ...config.targetLocales,
+          { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
+        ],
+      },
+    };
+    await workflow.submit(input);
+    await workflow.reconcile();
+    const [parent] = await state.listBatches();
+    const branch = parent?.record.locales.fr?.pullRequestBranch;
+    const initialSha = parent?.record.locales.fr?.toolingCommitSha;
+    const handoffPendingSha = "unreferenced-pending-commit";
+    const handoffOwnedSha = "older-owned-tooling-commit";
+    const parentWithPending = structuredClone(parent!.record);
+    parentWithPending.locales.fr!.pendingToolingCommitSha = handoffPendingSha;
+    parentWithPending.locales.fr!.toolingCommitShas = [
+      ...(parentWithPending.locales.fr!.toolingCommitShas ?? []),
+      handoffOwnedSha,
+    ];
+    await state.updateBatch(parentWithPending, parent!.revision);
+
+    phrase.expectedTargetLangs = ["ja"];
+    phrase.jobParts = [{ uid: "job-ja-retry", targetLang: "ja", workflowLevel: 1 }];
+    phrase.jobStatuses.set("job-ja-retry", "NEW");
+    phrase.waitError = new PhraseWorkflowError("Timed out waiting for Phrase job imports");
+    await expect(workflow.submit({ ...input, retryFailed: true })).rejects.toThrow(
+      "Timed out waiting for Phrase job imports",
+    );
+    const retryAfterTimeout = (await state.listBatches()).find(
+      ({ record }) => record.retryParentBatchKey === parent?.record.key,
+    );
+    expect(retryAfterTimeout?.record.locales.fr).toMatchObject({
+      toolingCommitSha: initialSha,
+      pendingToolingCommitSha: handoffPendingSha,
+    });
+    expect(retryAfterTimeout?.record.locales.fr?.toolingCommitShas).toContain(handoffOwnedSha);
+
+    phrase.jobStatuses.set("job-fr", "COMPLETED");
+    phrase.targetBytesByJob.set("job-fr", new TextEncoder().encode('{"greeting":"Salut {name}"}'));
+    phrase.jobStatuses.set("job-ja-retry", "COMPLETED");
+    await workflow.reconcile();
+    const batchesAfterHandoff = await state.listBatches();
+    const updatedParent = batchesAfterHandoff.find(
+      ({ record }) => record.key === parent?.record.key,
+    );
+    const retry = batchesAfterHandoff.find(
+      ({ record }) => record.retryParentBatchKey === parent?.record.key,
+    );
+    const pushedSha = repository.branchHeads.get(branch!);
+
+    expect(pushedSha).not.toBe(initialSha);
+    expect(updatedParent?.record.locales.fr?.toolingCommitSha).toBe(pushedSha);
+    expect(updatedParent?.record.locales.fr?.toolingCommitShas).toContain(handoffOwnedSha);
+    expect(updatedParent?.record.locales.fr?.pullRequestReexportDelegated).toBe(true);
+    expect(retry?.record.locales.fr?.toolingCommitSha).toBe(pushedSha);
+    expect(retry?.record.locales.fr?.toolingCommitShas).toContain(handoffOwnedSha);
+
+    const retryResults = await workflow.reconcile();
+    const afterRetry = await state.readBatch(retry!.record.key);
+    expect(
+      retryResults.some(({ phraseLocale, phase }) => phraseLocale === "fr" && phase === "retrying"),
+    ).toBe(false);
+    expect(afterRetry?.record.locales.fr?.toolingCommitSha).toBe(pushedSha);
+    expect(afterRetry?.record.locales.fr?.pendingToolingCommitSha).toBeUndefined();
+    expect(repository.commitCount(branch!)).toBe(2);
   });
 
   it("reuses one Phrase job when the same source is submitted from a later commit", async () => {
@@ -972,16 +1723,952 @@ describe("PhraseWorkflow submission", () => {
     });
     expect(repository.pullRequests[0]?.body).not.toContain("Translation warnings");
 
-    expect((await state.listBatches())[0]?.record.phase).toBe("completed");
+    expect((await state.listBatches())[0]?.record.phase).toBe("ready");
 
     repository.baseSourceBytes = new TextEncoder().encode(
       '{"greeting":{"defaultMessage":"Welcome {name}","description":"Greeting"}}',
     );
     const repeated = await workflow.reconcile();
     expect(repeated).toEqual([]);
-    expect((await state.listBatches())[0]?.record.phase).toBe("completed");
+    expect((await state.listBatches())[0]?.record.phase).toBe("superseded");
     expect(phrase.targetDownloadCalls).toBe(1);
     expect(repository.pullRequests).toHaveLength(1);
+  });
+
+  it("re-exports corrected Phrase content to the existing open locale PR branch", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    const [created] = await state.listBatches();
+    const branch = created?.record.locales.fr?.pullRequestBranch;
+    expect(branch).toBeDefined();
+    expect(repository.commitCount(branch!)).toBe(1);
+    expect(repository.pullRequests[0]?.title).toBe(
+      "i18n(fr): Phrase translation update for locales/translation-template.json",
+    );
+    repository.pullRequests[0] = {
+      ...repository.pullRequests[0]!,
+      title: "i18n(fr): Phrase translation update",
+    };
+
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+    const results = await workflow.reconcile();
+    const [updated] = await state.listBatches();
+
+    expect(results).toEqual([
+      expect.objectContaining({
+        batchKey: created?.record.key,
+        phraseLocale: "fr",
+        phase: "pr-created",
+        pullRequestUrl: "https://github.com/example/app/pull/42",
+      }),
+    ]);
+    expect(repository.pullRequests).toHaveLength(1);
+    expect(repository.pullRequests[0]?.branch).toBe(branch);
+    expect(repository.pullRequests[0]?.title).toBe(
+      "i18n(fr): Phrase translation update for locales/translation-template.json",
+    );
+    expect(repository.commitCount(branch!)).toBe(2);
+    expect(
+      new TextDecoder().decode(repository.branchFiles.get(branch!)?.get("locales/fr.json")),
+    ).toContain("Salut {name}");
+    expect(updated?.record.phase).toBe("ready");
+    expect(updated?.record.locales.fr?.toolingCommitSha).toBe(repository.branchHeads.get(branch!));
+    expect(phrase.targetDownloadCalls).toBe(2);
+  });
+
+  it("unions owned SHAs after a concurrent state writer moves the branch", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    const created = (await state.listBatches())[0]!;
+    const branch = created.record.locales.fr!.pullRequestBranch!;
+    const initialHead = repository.branchHeads.get(branch)!;
+    const concurrentHead = "concurrent-tooling-commit";
+
+    state.beforeEveryUpdateConflict = (store, candidate) => {
+      const current = store.records.get(candidate.key)!;
+      const currentShas = current.record.locales.fr?.toolingCommitShas ?? [];
+      const candidateShas = candidate.locales.fr?.toolingCommitShas ?? [];
+      if (!candidateShas.some((sha) => !currentShas.includes(sha))) return;
+      store.beforeEveryUpdateConflict = undefined;
+      const concurrentRecord = structuredClone(current.record);
+      const locale = concurrentRecord.locales.fr!;
+      concurrentRecord.locales.fr = {
+        ...locale,
+        toolingCommitShas: [
+          ...new Set([...(locale.toolingCommitShas ?? []), concurrentHead]),
+        ].slice(-20),
+      };
+      store.records.set(candidate.key, {
+        record: concurrentRecord,
+        revision: String(Number(current.revision) + 1),
+      });
+      repository.branchHeads.set(branch, concurrentHead);
+    };
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+
+    expect((await workflow.reconcile())[0]?.phase).toBe("retrying");
+    const afterConflict = await state.readBatch(created.record.key);
+    const concurrentWriteShas = afterConflict?.record.locales.fr?.toolingCommitShas ?? [];
+    const failedWriterSha = concurrentWriteShas.find(
+      (sha) => sha !== initialHead && sha !== concurrentHead,
+    );
+    expect(concurrentWriteShas).toHaveLength(3);
+    expect(concurrentWriteShas).toContain(initialHead);
+    expect(concurrentWriteShas).toContain(concurrentHead);
+    expect(failedWriterSha).toBeDefined();
+    expect(repository.branchHeads.get(branch)).toBe(concurrentHead);
+
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    const recovered = await state.readBatch(created.record.key);
+    const recoveredHead = repository.branchHeads.get(branch)!;
+    expect(recovered?.record.locales.fr?.toolingCommitShas).toContain(concurrentHead);
+    expect(recovered?.record.locales.fr?.toolingCommitShas).toContain(failedWriterSha);
+    expect(recovered?.record.locales.fr?.toolingCommitShas).toContain(recoveredHead);
+    expect(recovered?.record.locales.fr?.toolingCommitSha).toBe(recoveredHead);
+  });
+
+  it("bounds retries when owned-SHA state writes keep conflicting", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    const created = (await state.listBatches())[0]!;
+    const branch = created.record.locales.fr!.pullRequestBranch!;
+    const initialHead = repository.branchHeads.get(branch)!;
+    let conflicts = 0;
+    state.beforeEveryUpdateConflict = (store, candidate) => {
+      const current = store.records.get(candidate.key)!;
+      const currentShas = current.record.locales.fr?.toolingCommitShas ?? [];
+      const candidateShas = candidate.locales.fr?.toolingCommitShas ?? [];
+      if (!candidateShas.some((sha) => !currentShas.includes(sha))) return;
+      conflicts += 1;
+      const concurrentRecord = structuredClone(current.record);
+      const locale = concurrentRecord.locales.fr!;
+      concurrentRecord.locales.fr = {
+        ...locale,
+        toolingCommitShas: [
+          ...new Set([...(locale.toolingCommitShas ?? []), `concurrent-${conflicts}`]),
+        ].slice(-20),
+      };
+      store.records.set(candidate.key, {
+        record: concurrentRecord,
+        revision: String(Number(current.revision) + 1),
+      });
+    };
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+
+    expect((await workflow.reconcile())[0]).toMatchObject({ phase: "retrying" });
+    expect(conflicts).toBe(3);
+    expect(repository.branchHeads.get(branch)).toBe(initialHead);
+    const latest = await state.readBatch(created.record.key);
+    expect(latest?.record.locales.fr?.toolingCommitShas).toEqual(
+      expect.arrayContaining(["concurrent-1", "concurrent-2", "concurrent-3"]),
+    );
+  });
+
+  it("keeps ownership across a failed final save and a later failed ref update", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    const created = (await state.listBatches())[0]!;
+    const branch = created.record.locales.fr!.pullRequestBranch!;
+    const initialHead = repository.branchHeads.get(branch)!;
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+    state.failUpdateMatching = (record) =>
+      record.locales.fr?.phase === "pr-created" &&
+      record.locales.fr.toolingCommitSha !== initialHead;
+
+    expect((await workflow.reconcile())[0]?.phase).toBe("retrying");
+    const afterFinalSaveFailure = await state.readBatch(created.record.key);
+    const pushedHead = repository.branchHeads.get(branch)!;
+    expect(pushedHead).not.toBe(initialHead);
+    expect(afterFinalSaveFailure?.record.locales.fr?.toolingCommitSha).toBe(initialHead);
+    expect(afterFinalSaveFailure?.record.locales.fr?.toolingCommitShas).toContain(pushedHead);
+
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Bonjour encore {name}"}');
+    repository.refUpdateError = new PhraseRepositoryError("ref update failed", 503);
+    expect((await workflow.reconcile())[0]?.phase).toBe("retrying");
+    const afterRefFailure = await state.readBatch(created.record.key);
+    const interruptedHead = afterRefFailure?.record.locales.fr?.toolingCommitShas?.find(
+      (sha) =>
+        !afterFinalSaveFailure?.record.locales.fr?.toolingCommitShas?.includes(sha) &&
+        sha !== pushedHead,
+    );
+    expect(interruptedHead).toBeDefined();
+    expect(repository.branchHeads.get(branch)).toBe(pushedHead);
+    expect(afterRefFailure?.record.locales.fr?.toolingCommitSha).toBe(initialHead);
+    expect(afterRefFailure?.record.locales.fr?.toolingCommitShas).toContain(pushedHead);
+    expect(afterRefFailure?.record.locales.fr?.toolingCommitShas).toContain(interruptedHead);
+
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    const recovered = await state.readBatch(created.record.key);
+    const recoveredHead = repository.branchHeads.get(branch)!;
+    expect(recoveredHead).not.toBe(pushedHead);
+    expect(recovered?.record.locales.fr?.toolingCommitSha).toBe(recoveredHead);
+    expect(recovered?.record.locales.fr?.toolingCommitShas).toContain(pushedHead);
+    expect(recovered?.record.locales.fr?.toolingCommitShas).toContain(interruptedHead);
+    expect(recovered?.record.locales.fr?.toolingCommitShas).toContain(recoveredHead);
+  });
+
+  it("bounds older confirmed history at 20 while keeping the current branch head", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    const created = (await state.listBatches())[0]!;
+    const branch = created.record.locales.fr!.pullRequestBranch!;
+    const initialHead = repository.branchHeads.get(branch)!;
+
+    for (let version = 1; version <= 21; version += 1) {
+      phrase.targetBytes = new TextEncoder().encode(
+        JSON.stringify({ greeting: `Salut ${version} {name}` }),
+      );
+      expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    }
+    const capped = await state.readBatch(created.record.key);
+    const currentHead = repository.branchHeads.get(branch)!;
+    expect(capped?.record.locales.fr?.toolingCommitShas).toHaveLength(20);
+    expect(capped?.record.locales.fr?.toolingCommitShas?.at(-1)).toBe(currentHead);
+    expect(capped?.record.locales.fr?.toolingCommitShas).toContain(currentHead);
+    expect(capped?.record.locales.fr?.toolingCommitShas).not.toContain(initialHead);
+
+    phrase.targetBytes = new TextEncoder().encode(JSON.stringify({ greeting: "Salut 22 {name}" }));
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    const afterNextExport = await state.readBatch(created.record.key);
+    const nextHead = repository.branchHeads.get(branch)!;
+    expect(afterNextExport?.record.locales.fr?.toolingCommitShas).toHaveLength(20);
+    expect(afterNextExport?.record.locales.fr?.toolingCommitShas).toContain(nextHead);
+    expect(afterNextExport?.record.locales.fr?.toolingCommitSha).toBe(nextHead);
+  });
+
+  it("keeps the confirmed head and all newer SHAs across 21 overlapping writers", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    const created = (await state.listBatches())[0]!;
+    const branch = created.record.locales.fr!.pullRequestBranch!;
+    const confirmedHead = repository.branchHeads.get(branch)!;
+
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut pushed {name}"}');
+    state.failUpdateMatching = (record) =>
+      record.locales.fr?.phase === "pr-created" &&
+      record.locales.fr.toolingCommitSha !== confirmedHead;
+    expect((await workflow.reconcile())[0]?.phase).toBe("retrying");
+    const afterUnconfirmedPush = await state.readBatch(created.record.key);
+    const pushedHead = repository.branchHeads.get(branch)!;
+    expect(pushedHead).not.toBe(confirmedHead);
+    expect(afterUnconfirmedPush?.record.locales.fr?.toolingCommitSha).toBe(confirmedHead);
+    expect(afterUnconfirmedPush?.record.locales.fr?.toolingCommitShas).toContain(pushedHead);
+
+    // These writers all verified the old head before the first writer advanced the ref.
+    repository.preverifiedRefUpdateHeadSha = confirmedHead;
+    for (let writer = 1; writer <= 20; writer += 1) {
+      phrase.targetBytes = new TextEncoder().encode(
+        JSON.stringify({ greeting: `Salut stale ${writer} {name}` }),
+      );
+      expect((await workflow.reconcile())[0]?.phase).toBe("retrying");
+    }
+
+    const afterOverlappingWriters = await state.readBatch(created.record.key);
+    const ownedShas = afterOverlappingWriters?.record.locales.fr?.toolingCommitShas ?? [];
+    expect(repository.branchHeads.get(branch)).toBe(pushedHead);
+    expect(afterOverlappingWriters?.record.locales.fr?.toolingCommitSha).toBe(confirmedHead);
+    expect(ownedShas).toContain(confirmedHead);
+    expect(ownedShas).toContain(pushedHead);
+    expect(ownedShas).toHaveLength(22);
+  });
+
+  it("refreshes the open PR warning list after re-export", async () => {
+    const source = new TextEncoder().encode(
+      JSON.stringify({
+        requests: {
+          defaultMessage: "{count, plural, one {# request} other {# requests}}",
+          description: "Request count",
+        },
+      }),
+    );
+    const warningConfig: PhraseWorkflowConfig = {
+      ...config,
+      targetLocales: [
+        { phraseLocale: "fr", repositoryLocale: "fr", outputPath: "locales/fr.json" },
+      ],
+    };
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.targetBytes = new TextEncoder().encode(
+      JSON.stringify({
+        requests: {
+          defaultMessage: "{count, plural, one {# élément} other {# éléments}}",
+          description: "Request count",
+        },
+      }),
+    );
+    const repository = new FakeRepository();
+    repository.baseSourceBytes = source;
+    repository.pinnedSourceBytes = source;
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes: source,
+      config: warningConfig,
+    });
+    phrase.jobStatus = "COMPLETED";
+    await workflow.reconcile();
+    expect(
+      repository.pullRequestBodies.get("https://github.com/example/app/pull/42"),
+    ).not.toContain("Translation warnings");
+
+    phrase.targetBytes = new TextEncoder().encode(
+      JSON.stringify({
+        requests: {
+          defaultMessage: "{count, plural, one {élément} other {# éléments}}",
+          description: "Request count",
+        },
+      }),
+    );
+    const results = await workflow.reconcile();
+
+    expect(results[0]?.phase).toBe("pr-created");
+    expect(repository.pullRequests).toHaveLength(1);
+    expect(repository.pullRequestBodies.get("https://github.com/example/app/pull/42")).toContain(
+      'the source "one" branch of plural {count} shows the count',
+    );
+  });
+
+  it("recovers a tooling commit when its final state save fails after the push", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    await workflow.reconcile();
+    const [created] = await state.listBatches();
+    const branch = created?.record.locales.fr?.pullRequestBranch;
+    const recordedSha = created?.record.locales.fr?.toolingCommitSha;
+    const recordedShas = created?.record.locales.fr?.toolingCommitShas ?? [];
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+    state.failUpdateMatching = (record) =>
+      record.locales.fr?.phase === "pr-created" &&
+      record.locales.fr.toolingCommitSha !== recordedSha &&
+      !recordedShas.includes(record.locales.fr.toolingCommitSha ?? "");
+
+    const failedSave = await workflow.reconcile();
+    const [afterFailedSave] = await state.listBatches();
+    const pushedSha = repository.branchHeads.get(branch!);
+
+    expect(failedSave[0]).toMatchObject({ phase: "retrying" });
+    expect(pushedSha).not.toBe(recordedSha);
+    expect(afterFailedSave?.record.locales.fr?.toolingCommitSha).toBe(recordedSha);
+    expect(afterFailedSave?.record.locales.fr?.toolingCommitShas).toContain(pushedSha);
+    expect(repository.commitCount(branch!)).toBe(2);
+
+    const retried = await workflow.reconcile();
+    const [recovered] = await state.listBatches();
+
+    expect(retried[0]?.phase).toBe("pr-created");
+    expect(repository.commitCount(branch!)).toBe(2);
+    expect(recovered?.record.locales.fr?.toolingCommitSha).toBe(pushedSha);
+    expect(recovered?.record.locales.fr?.toolingCommitShas).toContain(pushedSha);
+    expect(recovered?.record.locales.fr?.pendingToolingCommitSha).toBeUndefined();
+  });
+
+  it("isolates one Phrase job lookup failure while sibling locales still reconcile", async () => {
+    const localesConfig: PhraseWorkflowConfig = {
+      ...config,
+      targetLocales: [
+        ...config.targetLocales,
+        { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
+      ],
+    };
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.expectedTargetLangs = ["fr", "ja"];
+    phrase.jobParts = [
+      { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
+      { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
+    ];
+    phrase.jobStatuses.set("job-fr", "COMPLETED");
+    phrase.jobStatuses.set("job-ja", "COMPLETED");
+    phrase.targetBytesByJob.set(
+      "job-fr",
+      new TextEncoder().encode('{"greeting":"Bonjour {name}"}'),
+    );
+    phrase.targetBytesByJob.set(
+      "job-ja",
+      new TextEncoder().encode('{"greeting":"こんにちは {name}"}'),
+    );
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config: localesConfig,
+    });
+    await workflow.reconcile();
+    const frBranch = (await state.listBatches())[0]?.record.locales.fr?.pullRequestBranch;
+    const jaBranch = (await state.listBatches())[0]?.record.locales.ja?.pullRequestBranch;
+    phrase.getJobErrors.set("job-fr", new PhraseApiError("Phrase job was not found", 404));
+    phrase.targetBytesByJob.set(
+      "job-ja",
+      new TextEncoder().encode('{"greeting":"こんばんは {name}"}'),
+    );
+
+    const results = await workflow.reconcile();
+
+    expect(results.map(({ phraseLocale, phase }) => [phraseLocale, phase])).toEqual([
+      ["fr", "retrying"],
+      ["ja", "pr-created"],
+    ]);
+    expect(results[0]?.reason).toContain("Phrase API returned HTTP 404");
+    expect(repository.commitCount(frBranch!)).toBe(1);
+    expect(repository.commitCount(jaBranch!)).toBe(2);
+  });
+
+  it("does not write a commit or state when an open PR export is unchanged", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    await workflow.reconcile();
+    const [stored] = await state.listBatches();
+    const branch = stored?.record.locales.fr?.pullRequestBranch;
+    const writes = state.writes;
+
+    const results = await workflow.reconcile();
+
+    expect(results[0]?.phase).toBe("pr-created");
+    expect(repository.commitCount(branch!)).toBe(1);
+    expect(repository.pullRequests).toHaveLength(1);
+    expect(state.writes).toBe(writes);
+    expect(phrase.targetDownloadCalls).toBe(2);
+  });
+
+  it.each(["merged", "closed"] as const)(
+    "skips Phrase export and completes the batch when its PR is %s",
+    async (pullRequestState) => {
+      const state = new MemoryStateStore();
+      const phrase = new FakePhrase();
+      const repository = new FakeRepository();
+      const workflow = new PhraseWorkflow({
+        phrase,
+        state,
+        repository,
+        catalogAdapters: new CatalogAdapterRegistry(),
+      });
+      await workflow.submit({
+        repository: "example/app",
+        baseRef: "phrase-pilot",
+        sourceCommit: "abc123",
+        sourceBytes,
+        config,
+      });
+      phrase.jobStatus = "COMPLETED";
+      await workflow.reconcile();
+      repository.pullRequests[0] = {
+        ...repository.pullRequests[0]!,
+        title: "i18n(fr): Phrase translation update",
+      };
+      const pullRequestBeforeFinalization = structuredClone(repository.pullRequests[0]);
+      repository.pullRequestStates.set("https://github.com/example/app/pull/42", pullRequestState);
+
+      expect(await workflow.reconcile()).toEqual([]);
+      const [completed] = await state.listBatches();
+      expect(completed?.record.phase).toBe("completed");
+      expect(completed?.record.locales.fr?.phase).toBe("pr-created");
+      expect(completed?.record.locales.fr?.pullRequestFinalized).toBe(true);
+      expect(repository.pullRequests[0]).toEqual(pullRequestBeforeFinalization);
+      expect(phrase.targetDownloadCalls).toBe(1);
+      expect(repository.pullRequestStateCalls).toBe(1);
+      expect(await workflow.reconcile()).toEqual([]);
+      expect(repository.pullRequestStateCalls).toBe(1);
+    },
+  );
+
+  it("resumes a reopened PR while its batch is open, then stays complete after all PRs close", async () => {
+    const localesConfig: PhraseWorkflowConfig = {
+      ...config,
+      targetLocales: [
+        ...config.targetLocales,
+        { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
+      ],
+    };
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.expectedTargetLangs = ["fr", "ja"];
+    phrase.jobParts = [
+      { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
+      { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
+    ];
+    phrase.jobStatuses.set("job-fr", "COMPLETED");
+    phrase.jobStatuses.set("job-ja", "COMPLETED");
+    phrase.targetBytesByJob.set(
+      "job-fr",
+      new TextEncoder().encode('{"greeting":"Bonjour {name}"}'),
+    );
+    phrase.targetBytesByJob.set(
+      "job-ja",
+      new TextEncoder().encode('{"greeting":"こんにちは {name}"}'),
+    );
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config: localesConfig,
+    });
+    await workflow.reconcile();
+    const [created] = await state.listBatches();
+    const frUrl = "https://github.com/example/app/pull/42";
+    const jaUrl = "https://github.com/example/app/pull/43";
+    const frBranch = created?.record.locales.fr?.pullRequestBranch;
+    const jaBranch = created?.record.locales.ja?.pullRequestBranch;
+    repository.pullRequestStates.set(frUrl, "closed");
+
+    await workflow.reconcile();
+    const [closedLocale] = await state.listBatches();
+    expect(closedLocale?.record.phase).toBe("ready");
+    expect(closedLocale?.record.locales.fr?.pullRequestFinalized).toBe(true);
+    expect(repository.commitCount(frBranch!)).toBe(1);
+
+    repository.pullRequestStates.set(frUrl, "open");
+    phrase.targetBytesByJob.set("job-fr", new TextEncoder().encode('{"greeting":"Salut {name}"}'));
+    expect((await workflow.reconcile()).some((result) => result.phraseLocale === "fr")).toBe(true);
+    expect(repository.commitCount(frBranch!)).toBe(2);
+
+    repository.pullRequestStates.set(frUrl, "closed");
+    repository.pullRequestStates.set(jaUrl, "closed");
+    const downloadsBeforeCompletion = phrase.targetDownloadCalls;
+    expect(await workflow.reconcile()).toEqual([]);
+    const [completed] = await state.listBatches();
+    expect(completed?.record.phase).toBe("completed");
+    expect(phrase.targetDownloadCalls).toBe(downloadsBeforeCompletion);
+
+    repository.pullRequestStates.set(frUrl, "open");
+    phrase.targetBytesByJob.set(
+      "job-fr",
+      new TextEncoder().encode('{"greeting":"Bienvenue {name}"}'),
+    );
+    expect(await workflow.reconcile()).toEqual([]);
+    expect(phrase.targetDownloadCalls).toBe(downloadsBeforeCompletion);
+    expect(repository.commitCount(frBranch!)).toBe(2);
+    expect(repository.commitCount(jaBranch!)).toBe(1);
+  });
+
+  it("does not recheck a merged locale while a sibling PR keeps the batch active", async () => {
+    const localesConfig: PhraseWorkflowConfig = {
+      ...config,
+      targetLocales: [
+        ...config.targetLocales,
+        { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
+      ],
+    };
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.expectedTargetLangs = ["fr", "ja"];
+    phrase.jobParts = [
+      { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
+      { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
+    ];
+    phrase.jobStatuses.set("job-fr", "COMPLETED");
+    phrase.jobStatuses.set("job-ja", "COMPLETED");
+    phrase.targetBytesByJob.set(
+      "job-fr",
+      new TextEncoder().encode('{"greeting":"Bonjour {name}"}'),
+    );
+    phrase.targetBytesByJob.set(
+      "job-ja",
+      new TextEncoder().encode('{"greeting":"こんにちは {name}"}'),
+    );
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config: localesConfig,
+    });
+    await workflow.reconcile();
+    const frUrl = "https://github.com/example/app/pull/42";
+    repository.pullRequestStates.set(frUrl, "merged");
+
+    await workflow.reconcile();
+    const [afterMerge] = await state.listBatches();
+    expect(afterMerge?.record.locales.fr).toMatchObject({
+      pullRequestFinalized: true,
+      pullRequestMerged: true,
+    });
+    expect(repository.pullRequestStateCalls).toBe(2);
+
+    await workflow.reconcile();
+
+    expect(repository.pullRequestStateCalls).toBe(3);
+  });
+
+  it("finalizes an open PR that closes during export without writing its branch", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    await workflow.reconcile();
+    const [created] = await state.listBatches();
+    const branch = created?.record.locales.fr?.pullRequestBranch;
+    repository.closeOnNextOpenPullRequestUpdate = true;
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+
+    const results = await workflow.reconcile();
+    const [completed] = await state.listBatches();
+
+    expect(results).toEqual([]);
+    expect(repository.commitCount(branch!)).toBe(1);
+    expect(completed?.record.phase).toBe("completed");
+    expect(completed?.record.locales.fr?.pullRequestFinalized).toBe(true);
+  });
+
+  it("reports a branch conflict without pushing or stopping later re-exports", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    await workflow.reconcile();
+    const [created] = await state.listBatches();
+    const branch = created?.record.locales.fr?.pullRequestBranch;
+    repository.pushHumanCommit(branch!, ["locales/fr.json"]);
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+
+    const first = await workflow.reconcile();
+    const second = await workflow.reconcile();
+    const [stillOpen] = await state.listBatches();
+
+    expect(first[0]?.phase).toBe("retrying");
+    expect(first[0]?.reason).toContain("refusing to overwrite reviewer changes");
+    expect(second[0]?.phase).toBe("retrying");
+    expect(repository.commitCount(branch!)).toBe(2);
+    expect(repository.pullRequests).toHaveLength(1);
+    expect(stillOpen?.record.locales.fr?.phase).toBe("pr-created");
+    expect(phrase.targetDownloadCalls).toBe(3);
+  });
+
+  it("re-exports a legacy open PR when its branch is one tooling commit", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    await workflow.reconcile();
+    const [stored] = await state.listBatches();
+    const branch = stored?.record.locales.fr?.pullRequestBranch;
+    delete stored?.record.locales.fr?.toolingCommitSha;
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+
+    const results = await workflow.reconcile();
+    const [updated] = await state.listBatches();
+
+    expect(results[0]?.phase).toBe("pr-created");
+    expect(repository.commitCount(branch!)).toBe(2);
+    expect(repository.pullRequests).toHaveLength(1);
+    expect(updated?.record.locales.fr?.toolingCommitSha).toBe(repository.branchHeads.get(branch!));
+  });
+
+  it("keeps an open PR unchanged after validation fails and retries on the next run", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    await workflow.reconcile();
+    const [created] = await state.listBatches();
+    const branch = created?.record.locales.fr?.pullRequestBranch;
+    const initialCommit = repository.branchHeads.get(branch!);
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Bonjour"}');
+
+    const failed = await workflow.reconcile();
+    const [afterFailure] = await state.listBatches();
+
+    expect(failed[0]?.phase).toBe("failed");
+    expect(failed[0]?.reason).toContain("ICU argument mismatches");
+    expect(afterFailure?.record.phase).toBe("ready");
+    expect(afterFailure?.record.locales.fr?.phase).toBe("pr-created");
+    expect(afterFailure?.record.locales.fr?.toolingCommitSha).toBe(initialCommit);
+    expect(repository.commitCount(branch!)).toBe(1);
+    expect(repository.pullRequests).toHaveLength(1);
+
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    expect(repository.commitCount(branch!)).toBe(2);
+    expect(phrase.targetDownloadCalls).toBe(3);
+  });
+
+  it("does not re-export a superseded batch", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    await workflow.reconcile();
+    const [stored] = await state.listBatches();
+    stored!.record.phase = "superseded";
+    await state.updateBatch(stored!.record, stored!.revision);
+    const downloads = phrase.targetDownloadCalls;
+
+    expect(await workflow.reconcile()).toEqual([]);
+    expect(phrase.targetDownloadCalls).toBe(downloads);
+    expect(repository.pullRequestStateCalls).toBe(0);
+  });
+
+  it("fails an initial locale when the translated other branch drops the count", async () => {
+    const source = new TextEncoder().encode(
+      JSON.stringify({
+        requests: {
+          defaultMessage: "{count, plural, one {# request} other {# requests}}",
+          description: "Request count",
+        },
+      }),
+    );
+    const zhConfig: PhraseWorkflowConfig = {
+      ...config,
+      targetLocales: [
+        { phraseLocale: "zh_cn", repositoryLocale: "zh-CN", outputPath: "locales/zh-CN.json" },
+      ],
+    };
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.expectedTargetLangs = ["zh_cn"];
+    phrase.jobParts = [{ uid: "job-zh_cn", targetLang: "zh_cn", workflowLevel: 1 }];
+    phrase.targetBytes = new TextEncoder().encode(
+      JSON.stringify({
+        requests: { defaultMessage: "{count, plural, other {请求}}", description: "Request count" },
+      }),
+    );
+    const repository = new FakeRepository();
+    repository.baseSourceBytes = source;
+    repository.pinnedSourceBytes = source;
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes: source,
+      config: zhConfig,
+    });
+    phrase.jobStatus = "COMPLETED";
+
+    const results = await workflow.reconcile();
+    const [stored] = await state.listBatches();
+
+    expect(results[0]?.phase).toBe("failed");
+    expect(results[0]?.reason).toContain("Use # where the number belongs");
+    expect(stored?.record.phase).toBe("ready");
+    expect(stored?.record.locales.zh_cn?.phase).toBe("validation-failed");
+    expect(repository.pullRequests).toHaveLength(0);
   });
 
   it("adds the Frontend template to the same locale PR and blocks stale English", async () => {
@@ -1029,6 +2716,25 @@ describe("PhraseWorkflow submission", () => {
     expect(
       new TextDecoder().decode(repository.pullRequests[0]?.additionalFiles?.[0]?.content),
     ).toContain("zh-CN:\n          searchEntries.roles.title: 角色");
+    const [initialBatch] = await state.listBatches();
+    const localeBranch = initialBatch?.record.locales.zh_cn?.pullRequestBranch;
+    phrase.targetBytes = new TextEncoder().encode('{"searchEntries.roles.title":"职务"}');
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    expect(repository.commitCount(localeBranch!)).toBe(2);
+    expect(repository.branchCommits.get(localeBranch!)?.[1]?.paths).toEqual([
+      "deploy/locales/zh-CN.json",
+      "deploy/frontend.yaml",
+    ]);
+    expect(
+      new TextDecoder().decode(
+        repository.branchFiles.get(localeBranch!)?.get("deploy/locales/zh-CN.json"),
+      ),
+    ).toContain("职务");
+    expect(
+      new TextDecoder().decode(
+        repository.branchFiles.get(localeBranch!)?.get("deploy/frontend.yaml"),
+      ),
+    ).toContain("zh-CN:\n          searchEntries.roles.title: 职务");
 
     const staleRepository = new FakeRepository();
     staleRepository.onReadFile = (path) =>
@@ -1054,8 +2760,293 @@ describe("PhraseWorkflow submission", () => {
       config: zhConfig,
     });
     stalePhrase.jobStatus = "COMPLETED";
-    expect((await staleWorkflow.reconcile())[0]?.phase).toBe("failed");
+    expect((await staleWorkflow.reconcile())[0]?.phase).toBe("superseded");
     expect(staleRepository.pullRequests).toHaveLength(0);
+  });
+
+  it("refreshes FEO YAML from the locale branch head and preserves unrelated branch metadata", async () => {
+    const template =
+      "kind: Template\nmetadata:\n  name: original\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n        - id: roles\n          title: Roles\n";
+    let baseTemplate = template;
+    const source = new TextEncoder().encode(
+      '{\n  "searchEntries.roles.title": {\n    "defaultMessage": "Roles",\n    "description": "title of searchEntries.roles"\n  }\n}\n',
+    );
+    const zhConfig: PhraseWorkflowConfig = {
+      ...config,
+      sourceCatalog: {
+        ...config.sourceCatalog,
+        path: "deploy/locales/feo-en.json",
+        filename: "feo-en.json",
+      },
+      targetLocales: [
+        {
+          phraseLocale: "zh_cn",
+          repositoryLocale: "zh-CN",
+          outputPath: "deploy/locales/zh-CN.json",
+        },
+      ],
+      frontendTemplate: { path: "deploy/frontend.yaml", generateSourceCatalog: true },
+    };
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.expectedFilename = "feo-en.json";
+    phrase.expectedTargetLangs = ["zh_cn"];
+    phrase.jobParts = [{ uid: "job-zh_cn", targetLang: "zh_cn", workflowLevel: 1 }];
+    phrase.targetBytes = new TextEncoder().encode('{"searchEntries.roles.title":"角色"}');
+    const repository = new FakeRepository();
+    repository.onReadFile = (path, ref) => {
+      if (path !== "deploy/frontend.yaml") return source;
+      for (const [branch, headSha] of repository.branchHeads) {
+        if (headSha === ref) return repository.branchFiles.get(branch)?.get(path) ?? null;
+      }
+      return new TextEncoder().encode(ref === "abc123" ? template : baseTemplate);
+    };
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes: source,
+      config: zhConfig,
+    });
+    phrase.jobStatus = "COMPLETED";
+    await workflow.reconcile();
+    const [created] = await state.listBatches();
+    const branch = created?.record.locales.zh_cn?.pullRequestBranch;
+    baseTemplate = template.replace("name: original", "name: base-updated");
+    phrase.targetBytes = new TextEncoder().encode('{"searchEntries.roles.title":"职务"}');
+
+    const results = await workflow.reconcile();
+    const yaml = new TextDecoder().decode(
+      repository.branchFiles.get(branch!)?.get("deploy/frontend.yaml"),
+    );
+
+    expect(results[0]?.phase).toBe("pr-created");
+    expect(repository.branchCommits.get(branch!)?.[1]?.paths).toEqual([
+      "deploy/locales/zh-CN.json",
+      "deploy/frontend.yaml",
+    ]);
+    expect(yaml).toContain("name: original");
+    expect(yaml).not.toContain("base-updated");
+    expect(yaml).toContain("zh-CN:\n          searchEntries.roles.title: 职务");
+  });
+
+  it("supersedes an open FEO re-export when base English drifts from committed source", async () => {
+    const template =
+      "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n        - id: roles\n          title: Roles\n";
+    let baseTemplate = template;
+    const source = new TextEncoder().encode(
+      '{\n  "searchEntries.roles.title": {\n    "defaultMessage": "Roles",\n' +
+        '    "description": "title of searchEntries.roles"\n  }\n}\n',
+    );
+    const feoConfig: PhraseWorkflowConfig = {
+      ...config,
+      sourceCatalog: {
+        ...config.sourceCatalog,
+        path: "deploy/locales/feo-en.json",
+        filename: "feo-en.json",
+      },
+      targetLocales: [
+        {
+          phraseLocale: "zh_cn",
+          repositoryLocale: "zh-CN",
+          outputPath: "deploy/locales/zh-CN.json",
+        },
+      ],
+      frontendTemplate: { path: "deploy/frontend.yaml" },
+    };
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.expectedFilename = "feo-en.json";
+    phrase.expectedTargetLangs = ["zh_cn"];
+    phrase.jobParts = [{ uid: "job-zh_cn", targetLang: "zh_cn", workflowLevel: 1 }];
+    phrase.targetBytes = new TextEncoder().encode('{"searchEntries.roles.title":"角色"}');
+    const repository = new FakeRepository();
+    repository.onReadFile = (path, ref) => {
+      if (path !== "deploy/frontend.yaml") return source;
+      for (const [branch, headSha] of repository.branchHeads) {
+        if (headSha === ref) return repository.branchFiles.get(branch)?.get(path) ?? null;
+      }
+      return new TextEncoder().encode(ref === "abc123" ? template : baseTemplate);
+    };
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes: source,
+      config: feoConfig,
+    });
+    phrase.jobStatus = "COMPLETED";
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    const [created] = await state.listBatches();
+    const branch = created?.record.locales.zh_cn?.pullRequestBranch;
+    expect(repository.commitCount(branch!)).toBe(1);
+
+    baseTemplate = template.replace("title: Roles", "title: Policies");
+    phrase.targetBytes = new TextEncoder().encode('{"searchEntries.roles.title":"政策"}');
+    const results = await workflow.reconcile();
+    const [stored] = await state.listBatches();
+
+    expect(results).toEqual([
+      expect.objectContaining({
+        phraseLocale: "zh_cn",
+        phase: "superseded",
+        reason: expect.stringContaining("source catalog"),
+      }),
+    ]);
+    expect(stored?.record.phase).toBe("superseded");
+    expect(repository.commitCount(branch!)).toBe(1);
+  });
+
+  it.each(["source catalog", "Frontend template"] as const)(
+    "retries the locale when the current-base %s read returns HTTP 503",
+    async (failedRead) => {
+      const template =
+        "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n        - id: roles\n          title: Roles\n";
+      const source = new TextEncoder().encode(
+        '{\n  "searchEntries.roles.title": {\n    "defaultMessage": "Roles",\n' +
+          '    "description": "title of searchEntries.roles"\n  }\n}\n',
+      );
+      const feoConfig: PhraseWorkflowConfig = {
+        ...config,
+        sourceCatalog: {
+          ...config.sourceCatalog,
+          path: "deploy/locales/feo-en.json",
+          filename: "feo-en.json",
+        },
+        targetLocales: [
+          {
+            phraseLocale: "zh_cn",
+            repositoryLocale: "zh-CN",
+            outputPath: "deploy/locales/zh-CN.json",
+          },
+        ],
+        frontendTemplate: { path: "deploy/frontend.yaml" },
+      };
+      const state = new MemoryStateStore();
+      const phrase = new FakePhrase();
+      phrase.expectedFilename = "feo-en.json";
+      phrase.expectedTargetLangs = ["zh_cn"];
+      phrase.jobParts = [{ uid: "job-zh_cn", targetLang: "zh_cn", workflowLevel: 1 }];
+      phrase.targetBytes = new TextEncoder().encode('{"searchEntries.roles.title":"角色"}');
+      const repository = new FakeRepository();
+      repository.onReadFile = (path, ref) => {
+        if (
+          ref === repository.baseCommit &&
+          ((failedRead === "source catalog" && path === feoConfig.sourceCatalog.path) ||
+            (failedRead === "Frontend template" && path === feoConfig.frontendTemplate?.path))
+        ) {
+          throw new PhraseRepositoryError("GitHub API returned HTTP 503", 503);
+        }
+        if (path === "deploy/frontend.yaml") return new TextEncoder().encode(template);
+        return source;
+      };
+      const workflow = new PhraseWorkflow({
+        phrase,
+        state,
+        repository,
+        catalogAdapters: new CatalogAdapterRegistry(),
+      });
+      await workflow.submit({
+        repository: "example/app",
+        baseRef: "phrase-pilot",
+        sourceCommit: "abc123",
+        sourceBytes: source,
+        config: feoConfig,
+      });
+      phrase.jobStatus = "COMPLETED";
+
+      const results = await workflow.reconcile();
+      const [stored] = await state.listBatches();
+
+      expect(results).toEqual([
+        expect.objectContaining({
+          phraseLocale: "zh_cn",
+          phase: "retrying",
+          reason: "GitHub API returned HTTP 503",
+        }),
+      ]);
+      expect(stored?.record.phase).toBe("ready");
+      expect(repository.pullRequests).toHaveLength(0);
+    },
+  );
+
+  it("retitles an open PR from the batch's current generated-source template path", async () => {
+    const template =
+      "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n        - id: roles\n          title: Roles\n";
+    const source = new TextEncoder().encode(
+      '{\n  "searchEntries.roles.title": {\n    "defaultMessage": "Roles",\n    "description": "title of searchEntries.roles"\n  }\n}\n',
+    );
+    const baseConfig: PhraseWorkflowConfig = {
+      ...config,
+      sourceCatalog: {
+        ...config.sourceCatalog,
+        path: "deploy/locales/feo-en.json",
+        filename: "feo-en.json",
+      },
+      targetLocales: [
+        {
+          phraseLocale: "zh_cn",
+          repositoryLocale: "zh-CN",
+          outputPath: "deploy/locales/zh-CN.json",
+        },
+      ],
+      frontendTemplate: { path: "deploy/old-frontend.yaml", generateSourceCatalog: true },
+    };
+    const movedConfig: PhraseWorkflowConfig = {
+      ...baseConfig,
+      frontendTemplate: { path: "deploy/new-frontend.yaml", generateSourceCatalog: true },
+    };
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.expectedFilename = "feo-en.json";
+    phrase.expectedTargetLangs = ["zh_cn"];
+    phrase.jobParts = [{ uid: "job-zh_cn", targetLang: "zh_cn", workflowLevel: 1 }];
+    phrase.targetBytes = new TextEncoder().encode('{"searchEntries.roles.title":"角色"}');
+    const repository = new FakeRepository();
+    repository.onReadFile = (path) =>
+      path === "deploy/old-frontend.yaml" || path === "deploy/new-frontend.yaml"
+        ? new TextEncoder().encode(template)
+        : source;
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const input = {
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes: source,
+      config: baseConfig,
+    };
+    await workflow.submit(input);
+    phrase.jobStatus = "COMPLETED";
+    await workflow.reconcile();
+    expect(repository.pullRequests[0]?.title).toBe(
+      "i18n(zh-CN): Phrase translation update for deploy/old-frontend.yaml",
+    );
+
+    await workflow.submit({ ...input, sourceCommit: "def456", config: movedConfig });
+    phrase.targetBytes = new TextEncoder().encode('{"searchEntries.roles.title":"职务"}');
+    await workflow.reconcile();
+
+    expect(repository.pullRequests).toHaveLength(1);
+    expect(repository.pullRequests[0]?.title).toBe(
+      "i18n(zh-CN): Phrase translation update for deploy/new-frontend.yaml",
+    );
   });
 
   it("submits and reconciles zh-CN from pinned Frontend YAML without a committed source catalog", async () => {
@@ -1112,6 +3103,9 @@ describe("PhraseWorkflow submission", () => {
     expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
     expect(repository.pullRequests).toHaveLength(1);
     expect(repository.pullRequests[0]?.path).toBe("deploy/locales/zh-CN.json");
+    expect(repository.pullRequests[0]?.title).toBe(
+      "i18n(zh-CN): Phrase translation update for deploy/frontend.yaml",
+    );
     expect(
       new TextDecoder().decode(repository.pullRequests[0]?.additionalFiles?.[0]?.content),
     ).toContain("zh-CN:\n          searchEntries.roles.title: 角色");
@@ -1361,12 +3355,12 @@ describe("PhraseWorkflow submission", () => {
     expect(repository.pullRequests).toHaveLength(0);
   });
 
-  it("fails a locale permanently when its previous PR was closed without merging", async () => {
+  it("fails a locale on a permanent repository error before creating its PR", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
     const repository = new FakeRepository();
     repository.pullRequestError = new PhraseRepositoryError(
-      "A previous Phrase pull request was closed without merging",
+      "GitHub rejected locale PR creation",
       409,
       true,
     );
@@ -1390,7 +3384,7 @@ describe("PhraseWorkflow submission", () => {
     expect(results).toEqual([
       expect.objectContaining({
         phase: "failed",
-        reason: "A previous Phrase pull request was closed without merging",
+        reason: "GitHub rejected locale PR creation",
       }),
     ]);
     expect((await state.listBatches())[0]?.record.phase).toBe("completed");
@@ -1401,10 +3395,11 @@ describe("PhraseWorkflow submission", () => {
   it("reports a Phrase failure for one batch without blocking the others", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
+    const repository = new FakeRepository();
     const workflow = new PhraseWorkflow({
       phrase,
       state,
-      repository: new FakeRepository(),
+      repository,
       catalogAdapters: new CatalogAdapterRegistry(),
     });
     const input = {
@@ -1431,17 +3426,29 @@ describe("PhraseWorkflow submission", () => {
     );
 
     state.corruptKeys.clear();
+    repository.pullRequestStates.set("https://github.com/example/app/pull/42", "merged");
     phrase.getJobError = new PhraseApiError("Phrase API returned HTTP 404", 404);
     expect(await workflow.reconcile()).toEqual([
-      { batchKey: corrupt.key, phase: "retrying", reason: "Phrase API returned HTTP 404" },
+      {
+        batchKey: corrupt.key,
+        phraseLocale: "fr",
+        phase: "retrying",
+        reason: "Phrase API returned HTTP 404",
+      },
     ]);
 
     const authMessage =
       "Phrase Platform OAuth returned HTTP 401 for the service account credentials";
     phrase.getJobError = new PhraseAuthError(authMessage, 401);
     expect(await workflow.reconcile()).toEqual([
-      { batchKey: corrupt.key, phase: "retrying", reason: authMessage },
+      { batchKey: corrupt.key, phraseLocale: "fr", phase: "retrying", reason: authMessage },
     ]);
+
+    phrase.getJobError = undefined;
+    expect(await workflow.reconcile()).toContainEqual(
+      expect.objectContaining({ batchKey: corrupt.key, phraseLocale: "fr", phase: "pr-created" }),
+    );
+    expect((await state.readBatch(corrupt.key))?.record.locales.fr?.phase).toBe("pr-created");
   });
 
   it.each([
@@ -1622,6 +3629,715 @@ describe("PhraseWorkflow submission", () => {
     },
   );
 
+  it("rejects an open-PR re-export with a pinned job filename mismatch before download or commit", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const input = {
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    };
+    const pins = {
+      expectedProjectUid: "project-uid",
+      expectedSourceFilename: "translation-template.json",
+    };
+    const submitted = await workflow.submit({ ...input, ...pins });
+    phrase.jobStatus = "COMPLETED";
+    await workflow.reconcile(pins);
+
+    const stored = state.records.get(submitted.key)!;
+    const originalRecord = structuredClone(stored.record);
+    const originalRevision = stored.revision;
+    const branch = stored.record.locales.fr?.pullRequestBranch;
+    expect(branch).toBeDefined();
+    const commitsBefore = repository.commitCount(branch!);
+    const downloadsBefore = phrase.targetDownloadCalls;
+    const fileReadsBefore = repository.readFileCalls;
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+    phrase.jobFilenamesByUid.set("job-fr", "other-catalog.json");
+
+    const results = await workflow.reconcile(pins);
+
+    expect(results).toContainEqual(
+      expect.objectContaining({
+        batchKey: submitted.key,
+        phase: "failed",
+        reason: expect.stringContaining(
+          'source filename mismatch: expected "translation-template.json", actual "other-catalog.json"',
+        ),
+      }),
+    );
+    expect(phrase.targetDownloadCalls).toBe(downloadsBefore);
+    expect(phrase.targetDownloadJobUids).toEqual(["job-fr"]);
+    expect(phrase.targetFileDownloadJobUids).toEqual(["job-fr"]);
+    expect(repository.commitCount(branch!)).toBe(commitsBefore);
+    expect(repository.readFileCalls).toBe(fileReadsBefore);
+    expect(repository.pullRequests).toHaveLength(1);
+    expect(state.records.get(submitted.key)?.record).toEqual(originalRecord);
+    expect(state.records.get(submitted.key)?.revision).toBe(originalRevision);
+  });
+
+  it("fails before creating a PR when a project pin changes during an owned-SHA conflict", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.expectedTargetLangs = ["fr", "ja"];
+    phrase.jobParts = [
+      { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
+      { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
+    ];
+    phrase.jobStatus = "COMPLETED";
+    phrase.targetBytesByJob.set(
+      "job-fr",
+      new TextEncoder().encode('{"greeting":"Bonjour {name}"}'),
+    );
+    phrase.targetBytesByJob.set(
+      "job-ja",
+      new TextEncoder().encode('{"greeting":"こんにちは {name}"}'),
+    );
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const localesConfig: PhraseWorkflowConfig = {
+      ...config,
+      targetLocales: [
+        ...config.targetLocales,
+        { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
+      ],
+    };
+    const pins = {
+      expectedProjectUid: "project-uid",
+      expectedSourceFilename: "translation-template.json",
+    };
+    const submitted = await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config: localesConfig,
+      ...pins,
+    });
+    let conflicts = 0;
+    state.beforeEveryUpdateConflict = (store, candidate) => {
+      const current = store.records.get(candidate.key)!;
+      const currentShas = Object.values(current.record.locales).flatMap(
+        (locale) => locale?.toolingCommitShas ?? [],
+      );
+      const candidateShas = Object.values(candidate.locales).flatMap(
+        (locale) => locale?.toolingCommitShas ?? [],
+      );
+      if (!candidateShas.some((sha) => !currentShas.includes(sha))) return;
+      conflicts += 1;
+      store.beforeEveryUpdateConflict = undefined;
+      const concurrentRecord = structuredClone(current.record);
+      concurrentRecord.config.projectUid = "foreign-project";
+      store.records.set(candidate.key, {
+        record: concurrentRecord,
+        revision: String(Number(current.revision) + 1),
+      });
+    };
+
+    const results = await workflow.reconcile(pins);
+
+    expect(conflicts).toBe(1);
+    expect(results).toEqual([
+      expect.objectContaining({
+        batchKey: submitted.key,
+        phase: "failed",
+        reason:
+          'Batch config mismatch: project UID expected "project-uid", actual "foreign-project"',
+      }),
+    ]);
+    expect(repository.pullRequests).toHaveLength(0);
+    expect(phrase.targetDownloadJobUids).toEqual(["job-fr"]);
+    expect(phrase.targetDownloadProjectUids).toEqual(["project-uid"]);
+  });
+
+  it("fails before moving an open PR when the source filename pin changes at ref recheck", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.jobStatus = "COMPLETED";
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const pins = {
+      expectedProjectUid: "project-uid",
+      expectedSourceFilename: "translation-template.json",
+    };
+    const submitted = await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+      ...pins,
+    });
+    expect((await workflow.reconcile(pins))[0]).toMatchObject({ phase: "pr-created" });
+    const stored = state.records.get(submitted.key)!;
+    const branch = stored.record.locales.fr?.pullRequestBranch;
+    expect(branch).toBeDefined();
+    const headBefore = repository.branchHeads.get(branch!);
+    const commitsBefore = repository.commitCount(branch!);
+    const downloadsBefore = phrase.targetDownloadCalls;
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+    repository.beforeOpenPullRequestRefRecheck = () => {
+      const current = state.records.get(submitted.key)!;
+      const concurrentRecord = structuredClone(current.record);
+      concurrentRecord.config.sourceCatalog.filename = "foreign.json";
+      state.records.set(submitted.key, {
+        record: concurrentRecord,
+        revision: String(Number(current.revision) + 1),
+      });
+    };
+
+    const results = await workflow.reconcile(pins);
+
+    expect(results).toContainEqual(
+      expect.objectContaining({
+        batchKey: submitted.key,
+        phase: "failed",
+        reason: expect.stringContaining(
+          'source filename expected "translation-template.json", actual "foreign.json"',
+        ),
+      }),
+    );
+    expect(repository.branchHeads.get(branch!)).toBe(headBefore);
+    expect(repository.commitCount(branch!)).toBe(commitsBefore);
+    expect(repository.pullRequests).toHaveLength(1);
+    expect(phrase.targetDownloadCalls).toBe(downloadsBefore + 1);
+  });
+
+  it("keeps a transient pinned job lookup failure local to its locale", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.expectedTargetLangs = ["fr", "ja"];
+    phrase.jobParts = [
+      { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
+      { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
+    ];
+    phrase.jobStatus = "COMPLETED";
+    phrase.targetBytesByJob.set(
+      "job-fr",
+      new TextEncoder().encode('{"greeting":"Bonjour {name}"}'),
+    );
+    phrase.targetBytesByJob.set(
+      "job-ja",
+      new TextEncoder().encode('{"greeting":"こんにちは {name}"}'),
+    );
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const localesConfig: PhraseWorkflowConfig = {
+      ...config,
+      targetLocales: [
+        ...config.targetLocales,
+        { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
+      ],
+    };
+    const pins = {
+      expectedProjectUid: "project-uid",
+      expectedSourceFilename: "translation-template.json",
+    };
+    const input = {
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config: localesConfig,
+    };
+    phrase.getJobErrors.set("job-fr", new PhraseApiError("Phrase API returned HTTP 503", 503));
+    const submitted = await workflow.submit(input);
+    expect(submitted.phase).toBe("importing");
+
+    const results = await workflow.reconcile(pins);
+
+    expect(results.map(({ phraseLocale, phase }) => [phraseLocale, phase])).toEqual([
+      ["fr", "retrying"],
+      ["ja", "pr-created"],
+    ]);
+    expect(results[0]?.reason).toBe("Phrase API returned HTTP 503");
+    expect(repository.pullRequests.map(({ path }) => path)).toEqual(["locales/ja.json"]);
+  });
+
+  it("treats a pinned finishImport 404 as a batch failure before creating a sibling PR", async () => {
+    const scenario = makeJapaneseWorkflowScenario();
+    const submitted = await submitWithJapaneseImportRetrying(scenario);
+    expect(submitted.phase).toBe("importing");
+    scenario.phrase.getJobErrors.delete("job-ja");
+    const firstReconcileCall = scenario.phrase.getJobCalls.length + 1;
+    failJobLookupAt(
+      scenario.phrase,
+      "job-fr",
+      firstReconcileCall + 2,
+      new PhraseApiError("Phrase API returned HTTP 404", 404),
+    );
+
+    const results = await scenario.workflow.reconcile(phrasePins);
+
+    expect(results).toEqual([
+      {
+        batchKey: submitted.key,
+        phase: "failed",
+        reason: "Stored Phrase jobs could not be verified in the pinned project",
+      },
+    ]);
+    expect(scenario.phrase.targetDownloadCalls).toBe(0);
+    expect(scenario.repository.pullRequests).toHaveLength(0);
+  });
+
+  it("preserves an open locale PR when pinned verification returns a permanent error", async () => {
+    const run = async (pinned: boolean) => {
+      const scenario = makeJapaneseWorkflowScenario();
+      const submitted = await submitWithJapaneseImportRetrying(scenario);
+      const firstResults = await scenario.workflow.reconcile();
+      expect(firstResults.map(({ phraseLocale, phase }) => [phraseLocale, phase])).toEqual([
+        ["fr", "pr-created"],
+        ["ja", "retrying"],
+      ]);
+      const pullRequestUrl = scenario.state.records.get(submitted.key)?.record.locales.fr
+        ?.pullRequestUrl;
+      expect(pullRequestUrl).toBeDefined();
+      scenario.phrase.getJobErrors.delete("job-ja");
+      scenario.phrase.getJobErrors.set(
+        "job-fr",
+        new PhraseAuthError(
+          "Phrase Platform OAuth returned HTTP 401 for the service account credentials",
+          401,
+        ),
+      );
+
+      const results = await scenario.workflow.reconcile(pinned ? phrasePins : {});
+      const stored = await scenario.state.readBatch(submitted.key);
+      return {
+        results,
+        originalPullRequestUrl: pullRequestUrl,
+        locale: stored?.record.locales.fr,
+        repository: scenario.repository,
+      };
+    };
+
+    const pinned = await run(true);
+    const unpinned = await run(false);
+
+    for (const outcome of [pinned, unpinned]) {
+      expect(outcome.results.map(({ phraseLocale, phase }) => [phraseLocale, phase])).toEqual([
+        ["fr", "retrying"],
+        ["ja", "pr-created"],
+      ]);
+      expect(outcome.locale?.phase).toBe("pr-created");
+      expect(outcome.locale?.pullRequestUrl).toBe(outcome.originalPullRequestUrl);
+      expect(outcome.repository.pullRequests).toHaveLength(2);
+    }
+  });
+
+  it.each([
+    [
+      "503 then 401",
+      new PhraseApiError("Phrase API returned HTTP 503", 503),
+      new PhraseAuthError(
+        "Phrase Platform OAuth returned HTTP 401 for the service account credentials",
+        401,
+      ),
+    ],
+    [
+      "401 then 503",
+      new PhraseAuthError(
+        "Phrase Platform OAuth returned HTTP 401 for the service account credentials",
+        401,
+      ),
+      new PhraseApiError("Phrase API returned HTTP 503", 503),
+    ],
+  ] as const)(
+    "prefers a permanent pinned verification error for one locale regardless of order (%s)",
+    async (_order, firstError, secondError) => {
+      const run = async (pinned: boolean) => {
+        const state = new MemoryStateStore();
+        const phrase = new FakePhrase();
+        phrase.jobParts = [
+          { uid: "job-fr-first", targetLang: "fr", workflowLevel: 1 },
+          { uid: "job-fr-second", targetLang: "fr", workflowLevel: 2 },
+        ];
+        phrase.jobStatus = "COMPLETED";
+        phrase.getJobErrors.set(
+          "job-fr-first",
+          new PhraseApiError("Phrase API returned HTTP 503", 503),
+        );
+        const repository = new FakeRepository();
+        const workflow = new PhraseWorkflow({
+          phrase,
+          state,
+          repository,
+          catalogAdapters: new CatalogAdapterRegistry(),
+        });
+        const submitted = await workflow.submit({
+          repository: "example/app",
+          baseRef: "phrase-pilot",
+          sourceCommit: "abc123",
+          sourceBytes,
+          config,
+        });
+        expect(submitted.phase).toBe("importing");
+        phrase.getJobErrors.clear();
+        phrase.getJobErrors.set("job-fr-first", firstError);
+        phrase.getJobErrors.set("job-fr-second", secondError);
+
+        const results = await workflow.reconcile(pinned ? phrasePins : {});
+        const stored = await state.readBatch(submitted.key);
+        return { results, locale: stored?.record.locales.fr };
+      };
+
+      const pinned = await run(true);
+      const unpinned = await run(false);
+      const authMessage =
+        "Phrase Platform OAuth returned HTTP 401 for the service account credentials";
+
+      for (const outcome of [pinned, unpinned]) {
+        expect(outcome.results).toContainEqual({
+          batchKey: expect.any(String),
+          phraseLocale: "fr",
+          phase: "failed",
+          reason: authMessage,
+        });
+        expect(outcome.locale).toMatchObject({ phase: "failed", failureReason: authMessage });
+      }
+    },
+  );
+
+  it.each([
+    [
+      "503+ERROR",
+      { kind: "lookup", error: new PhraseApiError("Phrase API returned HTTP 503", 503) },
+      { kind: "import", status: "ERROR" },
+      "failed",
+      "Phrase failed to import job job-fr-second: unknown error",
+    ],
+    [
+      "ERROR+503",
+      { kind: "import", status: "ERROR" },
+      { kind: "lookup", error: new PhraseApiError("Phrase API returned HTTP 503", 503) },
+      "failed",
+      "Phrase failed to import job job-fr-first: unknown error",
+    ],
+    [
+      "503+401",
+      { kind: "lookup", error: new PhraseApiError("Phrase API returned HTTP 503", 503) },
+      {
+        kind: "lookup",
+        error: new PhraseAuthError(
+          "Phrase Platform OAuth returned HTTP 401 for the service account credentials",
+          401,
+        ),
+      },
+      "failed",
+      "Phrase Platform OAuth returned HTTP 401 for the service account credentials",
+    ],
+    [
+      "401+503",
+      {
+        kind: "lookup",
+        error: new PhraseAuthError(
+          "Phrase Platform OAuth returned HTTP 401 for the service account credentials",
+          401,
+        ),
+      },
+      { kind: "lookup", error: new PhraseApiError("Phrase API returned HTTP 503", 503) },
+      "failed",
+      "Phrase Platform OAuth returned HTTP 401 for the service account credentials",
+    ],
+    [
+      "503+COMPLETED",
+      { kind: "lookup", error: new PhraseApiError("Phrase API returned HTTP 503", 503) },
+      { kind: "job", status: "COMPLETED" },
+      "retrying",
+      "Phrase API returned HTTP 503",
+    ],
+  ] as const)(
+    "matches pinned and unpinned per-locale outcomes across mixed job parts (%s)",
+    async (_case, firstSignal, secondSignal, expectedPhase, expectedReason) => {
+      const applySignal = (
+        phrase: FakePhrase,
+        jobUid: string,
+        signal:
+          | { kind: "lookup"; error: Error }
+          | { kind: "import"; status: "ERROR" }
+          | { kind: "job"; status: "COMPLETED" },
+      ) => {
+        if (signal.kind === "lookup") phrase.getJobErrors.set(jobUid, signal.error);
+        else if (signal.kind === "import") phrase.importStatuses.set(jobUid, signal.status);
+        else phrase.jobStatuses.set(jobUid, signal.status);
+      };
+      const run = async (pinned: boolean) => {
+        const scenario = makeJapaneseWorkflowScenario();
+        scenario.phrase.jobStatus = "NEW";
+        scenario.phrase.jobParts = [
+          { uid: "job-fr-first", targetLang: "fr", workflowLevel: 1 },
+          { uid: "job-fr-second", targetLang: "fr", workflowLevel: 2 },
+          { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
+        ];
+        scenario.phrase.getJobErrors.set(
+          "job-fr-first",
+          new PhraseApiError("Phrase API returned HTTP 503", 503),
+        );
+        scenario.phrase.jobStatuses.set("job-ja", "COMPLETED");
+        const submitted = await scenario.workflow.submit(scenario.input);
+        expect(submitted.phase).toBe("importing");
+        scenario.phrase.getJobErrors.clear();
+        applySignal(scenario.phrase, "job-fr-first", firstSignal);
+        applySignal(scenario.phrase, "job-fr-second", secondSignal);
+
+        const results = await scenario.workflow.reconcile(pinned ? phrasePins : {});
+        const stored = await scenario.state.readBatch(submitted.key);
+        return {
+          results,
+          locale: stored?.record.locales.fr,
+          batchPhase: stored?.record.phase,
+          pullRequestPaths: scenario.repository.pullRequests.map(({ path }) => path),
+        };
+      };
+
+      const pinned = await run(true);
+      const unpinned = await run(false);
+      const phases = (results: typeof pinned.results) =>
+        results.map(({ phraseLocale, phase }) => [phraseLocale, phase]);
+      const resultPhase = expectedPhase === "failed" ? "failed" : "retrying";
+      const localePhase = expectedPhase === "failed" ? "failed" : "pending";
+
+      for (const outcome of [pinned, unpinned]) {
+        expect(phases(outcome.results)).toEqual([
+          ["fr", resultPhase],
+          ["ja", "pr-created"],
+        ]);
+        expect(outcome.locale?.phase).toBe(localePhase);
+        expect(outcome.results[0]?.reason).toBe(expectedReason);
+        expect(outcome.pullRequestPaths).toEqual(["locales/ja.json"]);
+        expect(outcome.batchPhase === "importing").toBe(expectedPhase === "retrying");
+      }
+      expect(phases(pinned.results)).toEqual(phases(unpinned.results));
+    },
+  );
+
+  it.each([
+    ["preverification", "503", new PhraseApiError("Phrase API returned HTTP 503", 503), "retrying"],
+    [
+      "preverification",
+      "401",
+      new PhraseAuthError(
+        "Phrase Platform OAuth returned HTTP 401 for the service account credentials",
+        401,
+      ),
+      "failed",
+    ],
+    ["preverification", "404", new PhraseApiError("Phrase API returned HTTP 404", 404), "failed"],
+    ["finishImport", "503", new PhraseApiError("Phrase API returned HTTP 503", 503), "retrying"],
+    [
+      "finishImport",
+      "401",
+      new PhraseAuthError(
+        "Phrase Platform OAuth returned HTTP 401 for the service account credentials",
+        401,
+      ),
+      "failed",
+    ],
+    ["finishImport", "404", new PhraseApiError("Phrase API returned HTTP 404", 404), "failed"],
+  ] as const)(
+    "matches unpinned outcomes for %s lookup errors with HTTP %s",
+    async (lookupPoint, _status, error, expectedLocalePhase) => {
+      const run = async (pinned: boolean) => {
+        const scenario = makeJapaneseWorkflowScenario();
+        const submitted = await submitWithJapaneseImportRetrying(scenario);
+        scenario.phrase.getJobErrors.delete("job-ja");
+        const firstReconcileCall = scenario.phrase.getJobCalls.length + 1;
+        const failedCall = firstReconcileCall + (lookupPoint === "finishImport" && pinned ? 2 : 0);
+        failJobLookupAt(scenario.phrase, "job-fr", failedCall, error);
+        const results = await scenario.workflow.reconcile(pinned ? phrasePins : {});
+        return {
+          submitted,
+          results,
+          pullRequestPaths: scenario.repository.pullRequests.map(({ path }) => path),
+        };
+      };
+
+      const pinned = await run(true);
+      const unpinned = await run(false);
+      const phases = (results: typeof pinned.results) =>
+        results.map(({ phraseLocale, phase }) => [phraseLocale ?? "batch", phase]);
+
+      if (error instanceof PhraseApiError && error.status === 404) {
+        expect(phases(pinned.results)).toEqual([["batch", "failed"]]);
+        expect(pinned.results[0]?.reason).toBe(
+          "Stored Phrase jobs could not be verified in the pinned project",
+        );
+        expect(pinned.pullRequestPaths).toEqual([]);
+        expect(phases(unpinned.results)).toEqual([
+          ["fr", "failed"],
+          ["ja", "pr-created"],
+        ]);
+        expect(unpinned.pullRequestPaths).toEqual(["locales/ja.json"]);
+      } else {
+        const expected = [
+          ["fr", expectedLocalePhase],
+          ["ja", "pr-created"],
+        ];
+        expect(phases(pinned.results)).toEqual(expected);
+        expect(phases(unpinned.results)).toEqual(expected);
+        expect(pinned.pullRequestPaths).toEqual(["locales/ja.json"]);
+        expect(unpinned.pullRequestPaths).toEqual(["locales/ja.json"]);
+      }
+    },
+  );
+
+  it.each(["job-fr", "job-ja-retry"] as const)(
+    "verifies both carried and new jobs before finishing a pinned retry (%s filename mismatch)",
+    async (mismatchedJobUid) => {
+      const state = new MemoryStateStore();
+      const phrase = new FakePhrase();
+      phrase.jobParts = [
+        { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
+        { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
+      ];
+      phrase.expectedTargetLangs = ["fr", "ja"];
+      phrase.jobStatuses.set("job-fr", "COMPLETED");
+      phrase.jobStatuses.set("job-ja", "CANCELLED");
+      const repository = new FakeRepository();
+      const workflow = new PhraseWorkflow({
+        phrase,
+        state,
+        repository,
+        catalogAdapters: new CatalogAdapterRegistry(),
+      });
+      const retryConfig: PhraseWorkflowConfig = {
+        ...config,
+        targetLocales: [
+          ...config.targetLocales,
+          { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
+        ],
+      };
+      const input = {
+        repository: "example/app",
+        baseRef: "phrase-pilot",
+        sourceCommit: "abc123",
+        sourceBytes,
+        config: retryConfig,
+      };
+      const pins = {
+        expectedProjectUid: "project-uid",
+        expectedSourceFilename: "translation-template.json",
+      };
+
+      const parent = await workflow.submit({ ...input, ...pins });
+      phrase.jobStatus = "COMPLETED";
+      const parentResults = await workflow.reconcile(pins);
+      expect(parentResults.map(({ phraseLocale, phase }) => [phraseLocale, phase])).toEqual([
+        ["fr", "pr-created"],
+        ["ja", "failed"],
+      ]);
+
+      phrase.expectedTargetLangs = ["ja"];
+      phrase.jobParts = [{ uid: "job-ja-retry", targetLang: "ja", workflowLevel: 1 }];
+      phrase.jobStatuses.set("job-ja-retry", "COMPLETED");
+      phrase.jobFilenamesByUid.set(mismatchedJobUid, "other-catalog.json");
+      phrase.getJobCalls.length = 0;
+      phrase.asyncRequestIds.length = 0;
+      const writesBeforeRetry = state.writes;
+      const downloadsBeforeRetry = phrase.targetDownloadCalls;
+
+      await expect(workflow.submit({ ...input, ...pins, retryFailed: true })).rejects.toThrow(
+        'source filename mismatch: expected "translation-template.json", actual "other-catalog.json"',
+      );
+
+      const retry = [...state.records.values()].find(
+        ({ record }) => record.retryParentBatchKey === parent.key,
+      );
+      expect(phrase.getJobCalls.map(({ jobUid }) => jobUid)).toEqual(["job-fr", "job-ja-retry"]);
+      expect(phrase.asyncRequestIds).toEqual([]);
+      expect(phrase.targetDownloadCalls).toBe(downloadsBeforeRetry);
+      expect(state.writes).toBe(writesBeforeRetry + 1);
+      expect(retry?.record.phase).toBe("creating");
+      expect(retry?.record.jobs.map(({ uid }) => uid)).toEqual(["job-fr"]);
+      expect(retry?.record.importAsyncRequestId).toBeUndefined();
+    },
+  );
+
+  it("continues a two-batch re-export when one batch fails its pinned job check", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const input = {
+      repository: "example/app",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    };
+    const pins = {
+      expectedProjectUid: "project-uid",
+      expectedSourceFilename: "translation-template.json",
+    };
+    const mismatched = await workflow.submit({ ...input, baseRef: "phrase-pilot", ...pins });
+    const healthy = await workflow.submit({ ...input, baseRef: "release", ...pins });
+    phrase.jobStatus = "COMPLETED";
+    await workflow.reconcile(pins);
+
+    const mismatchedStored = state.records.get(mismatched.key)!;
+    const healthyStored = state.records.get(healthy.key)!;
+    const mismatchedBranch = mismatchedStored.record.locales.fr?.pullRequestBranch;
+    const healthyBranch = healthyStored.record.locales.fr?.pullRequestBranch;
+    expect(mismatchedBranch).toBeDefined();
+    expect(healthyBranch).toBeDefined();
+    mismatchedStored.record.jobs[0]!.uid = "job-fr-mismatched";
+    const mismatchedRecord = structuredClone(mismatchedStored.record);
+    const mismatchedRevision = mismatchedStored.revision;
+    phrase.jobFilenamesByUid.set("job-fr-mismatched", "other-catalog.json");
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+    const mismatchedCommitsBefore = repository.commitCount(mismatchedBranch!);
+    const healthyCommitsBefore = repository.commitCount(healthyBranch!);
+    const downloadsBefore = phrase.targetDownloadJobUids.length;
+
+    const results = await workflow.reconcile(pins);
+
+    expect(results).toContainEqual(
+      expect.objectContaining({
+        batchKey: mismatched.key,
+        phase: "failed",
+        reason: expect.stringContaining("source filename mismatch"),
+      }),
+    );
+    expect(results).toContainEqual(
+      expect.objectContaining({ batchKey: healthy.key, phraseLocale: "fr", phase: "pr-created" }),
+    );
+    expect(repository.commitCount(mismatchedBranch!)).toBe(mismatchedCommitsBefore);
+    expect(repository.commitCount(healthyBranch!)).toBe(healthyCommitsBefore + 1);
+    expect(phrase.targetDownloadJobUids.slice(downloadsBefore)).toEqual(["job-fr"]);
+    expect(state.records.get(mismatched.key)?.record).toEqual(mismatchedRecord);
+    expect(state.records.get(mismatched.key)?.revision).toBe(mismatchedRevision);
+    expect(repository.pullRequests).toHaveLength(2);
+  });
+
   it("does not commit state on every run while Phrase jobs are unchanged", async () => {
     const state = new MemoryStateStore();
     const workflow = new PhraseWorkflow({
@@ -1674,6 +4390,57 @@ describe("PhraseWorkflow submission", () => {
     expect(revived.phase).toBe("ready");
     expect(phrase.createJobCalls).toBe(1);
     expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+  });
+
+  it("resumes imports when reviving a superseded batch", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const input = {
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    };
+    phrase.getJobErrors.set("job-fr", new PhraseApiError("Phrase API returned HTTP 503", 503));
+
+    const submitted = await workflow.submit(input);
+    expect(submitted.phase).toBe("importing");
+
+    repository.baseSourceBytes = new TextEncoder().encode(
+      '{"greeting":{"defaultMessage":"Welcome {name}"}}',
+    );
+    expect((await workflow.reconcile())[0]?.phase).toBe("superseded");
+    expect((await state.readBatch(submitted.key))?.record.phase).toBe("superseded");
+
+    repository.baseSourceBytes = sourceBytes;
+    const revived = await workflow.submit(input);
+
+    expect(revived.phase).toBe("importing");
+    expect(revived.locales.fr).toEqual({ phase: "pending" });
+
+    phrase.getJobErrors.set("job-fr", new PhraseApiError("Phrase API returned HTTP 404", 404));
+    const results = await workflow.reconcile();
+    const failed = await state.readBatch(submitted.key);
+
+    expect(results).toContainEqual({
+      batchKey: submitted.key,
+      phraseLocale: "fr",
+      phase: "failed",
+      reason: "Phrase API returned HTTP 404",
+    });
+    expect(failed?.record.locales.fr).toMatchObject({
+      phase: "failed",
+      failureReason: "Phrase API returned HTTP 404",
+    });
+    expect(phrase.createJobCalls).toBe(1);
   });
 
   it("starts a fresh target export after an interrupted download attempt", async () => {
@@ -1840,7 +4607,7 @@ describe("PhraseWorkflow submission", () => {
     expect(first[0]?.phase).toBe("failed");
     expect(first[0]?.reason).toContain("ICU argument mismatches");
     expect(first[0]?.reason).toContain('"greeting": source [name], target [count]');
-    expect(failed?.record.phase).toBe("completed");
+    expect(failed?.record.phase).toBe("ready");
     expect(failed?.record.locales.fr?.phase).toBe("validation-failed");
     expect(repository.pullRequests).toHaveLength(0);
 
@@ -1860,8 +4627,8 @@ describe("PhraseWorkflow submission", () => {
     expect(phrase.targetDownloadCalls).toBe(2);
     expect(repository.pullRequests).toHaveLength(1);
     expect(completed?.record.locales.fr?.phase).toBe("pr-created");
-    expect(await workflow.reconcile()).toEqual([]);
-    expect(phrase.targetDownloadCalls).toBe(2);
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    expect(phrase.targetDownloadCalls).toBe(3);
   });
 
   it.each([
@@ -2060,8 +4827,8 @@ describe("PhraseWorkflow submission", () => {
     await workflow.submit(input);
 
     const first = await workflow.reconcile();
-    expect(first.map((result) => result.phase)).toEqual(["failed"]);
-    expect((await state.listBatches())[0]?.record.phase).toBe("completed");
+    expect(first.map((result) => result.phase)).toEqual(["failed", "pending"]);
+    expect((await state.listBatches())[0]?.record.phase).toBe("ready");
     expect((await state.listBatches())[0]?.record.locales.ja?.phase).toBe("pending");
 
     phrase.jobStatuses.set("job-ja", "COMPLETED");

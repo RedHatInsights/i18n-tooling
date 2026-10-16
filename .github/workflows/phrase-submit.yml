@@ -68,9 +68,9 @@ jobs:
     timeout-minutes: 30
     environment: ${{ inputs.environment }}
     # Separate from reconciliation: one shared group lets a queued reconcile cancel a pending
-    # submission. State writes are compare-and-swap, so the two may run concurrently.
+    # submission. Keyed by config, so configs with their own state branches run in parallel.
     concurrency:
-      group: i18n-tms-submit-${{ inputs.repository || github.repository }}-${{ inputs.base-ref || github.ref }}
+      group: i18n-tms-submit-${{ inputs.repository || github.repository }}-${{ inputs.config-path }}-${{ inputs.base-ref || github.ref }}
       cancel-in-progress: false
     permissions:
       contents: write

@@ -49,7 +49,8 @@ export interface PhraseWorkflowConfig {
 }
 
 /**
- * Batch lifecycle. `completed`, `failed`, and `superseded` are terminal for reconciliation;
+ * Batch lifecycle. `failed` and `superseded` are terminal; `completed` records have no open
+ * locale PRs. A legacy completed record with an open PR is reopened during reconciliation.
  * `creating` and `unknown` need manual recovery before anything else happens.
  */
 export type PhraseBatchPhase =
@@ -73,10 +74,32 @@ export interface PhraseBatchRecord {
   warningCount: number;
   importAsyncRequestId?: string;
   failureReason?: string;
-  locales: Record<
-    string,
-    { phase: PhraseLocalePhase; pullRequestUrl?: string; failureReason?: string }
-  >;
+  retryParentBatchKey?: string;
+  retryParentDelegated?: boolean;
+  locales: Record<string, PhraseLocaleRecord>;
+}
+
+export interface PhraseLocaleRecord {
+  phase: PhraseLocalePhase;
+  pullRequestUrl?: string;
+  failureReason?: string;
+  /** Last locale branch commit recorded after its ref update succeeded. */
+  toolingCommitSha?: string;
+  /** Recent commits created by this tooling for the locale branch, oldest first (at most 20). */
+  toolingCommitShas?: string[];
+  /** Accepted when reading state written by the previous implementation. */
+  pendingToolingCommitSha?: string;
+  /** Preserved when a successful locale PR is carried into a retry batch. */
+  pullRequestBranch?: string;
+  pullRequestBatchKey?: string;
+  /** A merged or closed PR was observed; a closed PR can reopen until the batch completes. */
+  pullRequestFinalized?: boolean;
+  /** A merged PR is permanently final and is not looked up again. */
+  pullRequestMerged?: boolean;
+  /** Retry the PR title and description update if it failed after a commit. */
+  pullRequestBodyPending?: boolean;
+  /** A retry batch owns re-exporting this carried PR. */
+  pullRequestReexportDelegated?: boolean;
 }
 
 export interface StoredPhraseBatch {
@@ -96,6 +119,11 @@ export interface PhraseLocalePullRequest {
   baseRef: string;
   baseCommit: string;
   branch: string;
+  expectedToolingCommitShas?: string[];
+  expectedToolingCommitSha?: string;
+  expectedPendingToolingCommitSha?: string;
+  recordToolingCommitSha: (toolingSha: string, previousHeadSha: string | null) => Promise<void>;
+  recheckOwnedCommitEligibility?: (previousHeadSha: string | null) => Promise<void>;
   title: string;
   body: string;
   path: string;
@@ -103,10 +131,56 @@ export interface PhraseLocalePullRequest {
   additionalFiles?: { path: string; content: Uint8Array }[];
 }
 
+export type PhrasePullRequestState =
+  { state: "open"; headSha: string } | { state: "merged" | "closed" };
+
+export interface PhraseLocalePullRequestCreated {
+  pullRequestUrl: string;
+  toolingCommitSha?: string;
+  pullRequestFinalized?: boolean;
+  pullRequestMerged?: boolean;
+  bodyError?: unknown;
+}
+
+export interface PhraseLocalePullRequestUpdate {
+  repository: string;
+  baseRef: string;
+  branch: string;
+  pullRequestUrl: string;
+  headSha: string;
+  expectedToolingCommitShas?: string[];
+  expectedToolingCommitSha?: string;
+  expectedPendingToolingCommitSha?: string;
+  recordToolingCommitSha: (toolingSha: string, previousHeadSha: string | null) => Promise<void>;
+  recheckOwnedCommitEligibility?: (previousHeadSha: string | null) => Promise<void>;
+  title: string;
+  path: string;
+  content: Uint8Array;
+  body: string;
+  additionalFiles?: { path: string; content: Uint8Array }[];
+}
+
+export interface PhraseLocalePullRequestUpdateResult {
+  changed: boolean;
+  toolingCommitSha: string;
+  bodyUpdated: boolean;
+  pullRequestFinalized?: boolean;
+  pullRequestMerged?: boolean;
+  bodyError?: unknown;
+}
+
 export interface PhraseWorkflowRepository {
   resolveCommit(ref: string): Promise<string>;
   readFile(path: string, ref: string): Promise<Uint8Array | null>;
+  getPullRequestState(pullRequestUrl: string): Promise<PhrasePullRequestState>;
   createOrUpdatePullRequest(input: PhraseLocalePullRequest): Promise<string>;
+  createOrUpdatePullRequestWithCommit(
+    input: PhraseLocalePullRequest,
+  ): Promise<PhraseLocalePullRequestCreated>;
+  updateOpenPullRequest(
+    input: PhraseLocalePullRequestUpdate,
+  ): Promise<PhraseLocalePullRequestUpdateResult>;
+  updatePullRequestBody(pullRequestUrl: string, body: string, title?: string): Promise<boolean>;
 }
 
 export interface PhraseWorkflowDependencies {
@@ -211,13 +285,48 @@ export class PhraseRepositoryError extends Error {
 
 const MAX_SUBMISSION_ATTEMPTS = 10;
 const RECONCILABLE_PHASES: ReadonlySet<PhraseBatchPhase> = new Set(["importing", "ready"]);
-const FINAL_LOCALE_PHASES: ReadonlySet<PhraseLocalePhase> = new Set(["pr-created", "failed"]);
+const DELIVERY_FINAL_LOCALE_PHASES: ReadonlySet<PhraseLocalePhase> = new Set([
+  "pr-created",
+  "failed",
+]);
 const FAILED_JOB_STATUSES = new Set(["CANCELLED", "CANCELED", "DECLINED", "REJECTED"]);
 
 type LocaleReadiness =
   | { phase: "ready"; finalJob: PhraseJobPart }
   | { phase: "pending" }
   | { phase: "failed"; reason: string };
+
+interface ImportJobPartObservation {
+  requestedJob: PhraseJobPart;
+  job?: PhraseJobPart;
+  error?: unknown;
+}
+
+type ImportLocaleClassification =
+  | { phase: "failed"; reason: string }
+  | { phase: "retrying"; error: unknown }
+  | { phase: "pending"; jobs: PhraseJobPart[] }
+  | { phase: "complete" };
+
+interface PhraseReconcileContext {
+  pins: PhrasePinOptions;
+  verifiedJobs: Map<string, PhraseJobPart[]>;
+  jobVerificationFailures: Map<string, Map<string, unknown>>;
+  verifiedJobSnapshots: Map<string, { projectUid: string; jobUids: string[] }>;
+  pullRequestOwners: Map<string, string>;
+  pullRequestStateCache: Map<string, Promise<PhrasePullRequestState>>;
+  exportedPullRequestUrls: Set<string>;
+  reportedPullRequestStateErrors: Set<string>;
+  storedBatches: Map<string, StoredPhraseBatch>;
+}
+
+interface FinishImportOptions {
+  pins?: PhrasePinOptions;
+  verifiedJobs?: PhraseJobPart[];
+  jobVerificationFailures?: Map<string, unknown>;
+  asyncRequestIsFresh?: boolean;
+  retryableImportFailures?: Map<string, unknown>;
+}
 
 interface SourceCatalogReadResult {
   bytes: Uint8Array | null;
@@ -249,6 +358,150 @@ function stableJson(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+const TOOLING_COMMIT_SHA_HISTORY_LIMIT = 20;
+const TOOLING_COMMIT_STATE_WRITE_ATTEMPTS = 3;
+
+function mergeToolingCommitShas(...lists: (readonly string[] | undefined)[]): string[] {
+  const merged: string[] = [];
+  const seen = new Set<string>();
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const sha of list) {
+      if (typeof sha !== "string" || !sha.trim() || seen.has(sha)) continue;
+      seen.add(sha);
+      merged.push(sha);
+    }
+  }
+  return merged;
+}
+
+function trimToolingCommitShas(shas: readonly string[], confirmedHeadSha?: string): string[] {
+  const ordered = mergeToolingCommitShas(shas);
+  if (!confirmedHeadSha) return ordered.slice(-TOOLING_COMMIT_SHA_HISTORY_LIMIT);
+
+  // Keep the confirmed head and every newer candidate; only older history can be trimmed.
+  let confirmedIndex = ordered.indexOf(confirmedHeadSha);
+  if (confirmedIndex < 0) {
+    ordered.unshift(confirmedHeadSha);
+    confirmedIndex = 0;
+  }
+  const confirmedAndNewer = ordered.slice(confirmedIndex);
+  const olderHistoryCapacity = Math.max(
+    0,
+    TOOLING_COMMIT_SHA_HISTORY_LIMIT - confirmedAndNewer.length,
+  );
+  const olderHistory = ordered.slice(
+    Math.max(0, confirmedIndex - olderHistoryCapacity),
+    confirmedIndex,
+  );
+  return [...olderHistory, ...confirmedAndNewer];
+}
+
+function appendToolingCommitSha(
+  previousLists: (readonly string[] | undefined)[],
+  previousHeadSha: string | null,
+  toolingSha: string,
+  confirmedHeadSha?: string,
+): string[] {
+  const ordered = mergeToolingCommitShas(...previousLists);
+  if (confirmedHeadSha && !ordered.includes(confirmedHeadSha)) ordered.unshift(confirmedHeadSha);
+  if (previousHeadSha && !ordered.includes(previousHeadSha)) ordered.push(previousHeadSha);
+  // The branch may already include a candidate whose confirmation was not saved.
+  if (
+    confirmedHeadSha &&
+    previousHeadSha &&
+    previousHeadSha !== confirmedHeadSha &&
+    ordered.indexOf(previousHeadSha) < ordered.indexOf(confirmedHeadSha)
+  ) {
+    ordered.splice(ordered.indexOf(previousHeadSha), 1);
+    ordered.splice(ordered.indexOf(confirmedHeadSha) + 1, 0, previousHeadSha);
+  }
+  if (toolingSha !== confirmedHeadSha) {
+    const existingToolingIndex = ordered.indexOf(toolingSha);
+    if (existingToolingIndex >= 0) ordered.splice(existingToolingIndex, 1);
+    ordered.push(toolingSha);
+  }
+  return trimToolingCommitShas(ordered, confirmedHeadSha ?? previousHeadSha ?? undefined);
+}
+
+const OWNED_COMMIT_DELIVERY_LOCALE_PHASES: ReadonlySet<PhraseLocalePhase> = new Set([
+  "exporting",
+  "pr-created",
+]);
+
+function ownedCommitEligibilityFailureReason(
+  record: PhraseBatchRecord,
+  phraseLocale: string,
+  loadedLocale: PhraseLocaleRecord,
+  currentLocale: PhraseLocaleRecord | undefined,
+  previousHeadSha: string | null,
+): string | undefined {
+  if (record.phase !== "ready" && record.phase !== "importing") {
+    return `batch is no longer delivering (phase ${record.phase})`;
+  }
+  if (!currentLocale) return `locale ${phraseLocale} state is missing`;
+  if (currentLocale.pullRequestReexportDelegated) {
+    return `locale ${phraseLocale} was handed off to a retry batch`;
+  }
+  if (
+    currentLocale.phase === "failed" &&
+    currentLocale.failureReason?.startsWith("Retried in Phrase batch ")
+  ) {
+    return `locale ${phraseLocale} was handed off to a retry batch (${currentLocale.failureReason})`;
+  }
+  if (!OWNED_COMMIT_DELIVERY_LOCALE_PHASES.has(currentLocale.phase)) {
+    return `locale ${phraseLocale} is no longer deliverable (phase ${currentLocale.phase})`;
+  }
+  if (currentLocale.pullRequestFinalized || currentLocale.pullRequestMerged) {
+    return `locale ${phraseLocale} pull request is recorded as final or merged`;
+  }
+  if (loadedLocale.pullRequestUrl && currentLocale.pullRequestUrl !== loadedLocale.pullRequestUrl) {
+    return `locale ${phraseLocale} pull request ownership changed while this writer was active`;
+  }
+  if (
+    loadedLocale.pullRequestBranch &&
+    currentLocale.pullRequestBranch !== loadedLocale.pullRequestBranch
+  ) {
+    return `locale ${phraseLocale} branch ownership changed while this writer was active`;
+  }
+  if (
+    loadedLocale.pullRequestBatchKey &&
+    currentLocale.pullRequestBatchKey !== loadedLocale.pullRequestBatchKey
+  ) {
+    return `locale ${phraseLocale} batch ownership changed while this writer was active`;
+  }
+  const recordedOwnedShas = mergeToolingCommitShas(
+    currentLocale.toolingCommitShas,
+    currentLocale.toolingCommitSha ? [currentLocale.toolingCommitSha] : undefined,
+    currentLocale.pendingToolingCommitSha ? [currentLocale.pendingToolingCommitSha] : undefined,
+  );
+  if (
+    previousHeadSha &&
+    recordedOwnedShas.length > 0 &&
+    !recordedOwnedShas.includes(previousHeadSha)
+  ) {
+    return `verified branch head ${previousHeadSha} is no longer in locale ${phraseLocale}'s owned commit set`;
+  }
+  return undefined;
+}
+
+function feoTemplateMatchesSourceCatalog(template: string, sourceCatalog: Catalog): boolean {
+  const templateMessages = extractFeoCatalog(template);
+  const sourcePatterns = Object.fromEntries(
+    Object.entries(sourceCatalog.messages).map(([id, message]) => [id, message.pattern]),
+  );
+  const templatePatterns = Object.fromEntries(
+    Object.entries(templateMessages).map(([id, message]) => [id, message.defaultMessage]),
+  );
+  return stableJson(sourcePatterns) === stableJson(templatePatterns);
+}
+
+function sourceInputPath(config: PhraseWorkflowConfig): string {
+  return config.frontendTemplate?.generateSourceCatalog
+    ? config.frontendTemplate.path
+    : config.sourceCatalog.path;
 }
 
 function digest(bytes: Uint8Array): string {
@@ -320,14 +573,42 @@ function makeBatchRecord(
   previousRecord?: PhraseBatchRecord,
 ): PhraseBatchRecord {
   const locales = Object.fromEntries(
-    input.config.targetLocales.map(({ phraseLocale }) => {
+    input.config.targetLocales.map((target) => {
+      const { phraseLocale } = target;
       const previousLocale = previousRecord?.locales[phraseLocale];
-      return [
-        phraseLocale,
+      const previousBranch =
         previousLocale?.phase === "pr-created"
-          ? { ...previousLocale }
-          : { phase: "pending" as const },
-      ];
+          ? (previousLocale.pullRequestBranch ??
+            (previousRecord
+              ? localePullRequestBranch(previousRecord.key, target.repositoryLocale)
+              : undefined))
+          : undefined;
+      if (previousLocale?.phase !== "pr-created") {
+        return [phraseLocale, { phase: "pending" as const }];
+      }
+      const carriedLocale: PhraseLocaleRecord = {
+        ...previousLocale,
+        ...(previousBranch ? { pullRequestBranch: previousBranch } : {}),
+        ...(previousLocale.pullRequestBatchKey || !previousRecord
+          ? {}
+          : { pullRequestBatchKey: previousRecord.key }),
+      };
+      const toolingCommitShas = trimToolingCommitShas(
+        mergeToolingCommitShas(
+          previousLocale.toolingCommitShas,
+          previousLocale.pendingToolingCommitSha
+            ? [previousLocale.pendingToolingCommitSha]
+            : undefined,
+        ),
+        previousLocale.toolingCommitSha,
+      );
+      if (toolingCommitShas.length) {
+        carriedLocale.toolingCommitShas = toolingCommitShas;
+      } else {
+        delete carriedLocale.toolingCommitShas;
+      }
+      delete carriedLocale.pullRequestReexportDelegated;
+      return [phraseLocale, carriedLocale];
     }),
   );
   return {
@@ -341,8 +622,12 @@ function makeBatchRecord(
     sourceDigest,
     config: input.config,
     createdAt: new Date(now).toISOString(),
-    jobs: [],
+    jobs:
+      previousRecord?.jobs.filter(
+        (job) => previousRecord.locales[job.targetLang]?.phase === "pr-created",
+      ) ?? [],
     warningCount: 0,
+    ...(previousRecord ? { retryParentBatchKey: previousRecord.key } : {}),
     locales,
   };
 }
@@ -356,14 +641,20 @@ function localePolicy(record: PhraseBatchRecord, phraseLocale: string): LocaleCo
 
 function unresolvedTargets(record: PhraseBatchRecord): PhraseTargetLocale[] {
   return record.config.targetLocales.filter(
-    (target) => !FINAL_LOCALE_PHASES.has(record.locales[target.phraseLocale]?.phase ?? "pending"),
+    (target) =>
+      !DELIVERY_FINAL_LOCALE_PHASES.has(record.locales[target.phraseLocale]?.phase ?? "pending"),
   );
+}
+
+function localePullRequestBranch(batchKey: string, repositoryLocale: string): string {
+  const localeSlug = repositoryLocale.replace(/[^A-Za-z0-9._-]+/g, "-");
+  return `i18n/phrase-${batchKey.slice(0, 16)}-${localeSlug}`;
 }
 
 function hasRetryableFailures(record: PhraseBatchRecord): boolean {
   return (
     record.phase === "failed" ||
-    (record.phase === "completed" &&
+    ((record.phase === "completed" || record.phase === "ready") &&
       Object.values(record.locales).some(
         (locale) => locale.phase === "failed" || locale.phase === "validation-failed",
       ))
@@ -374,7 +665,11 @@ function needsReconciliation(record: PhraseBatchRecord): boolean {
   return (
     RECONCILABLE_PHASES.has(record.phase) ||
     (record.phase === "completed" &&
-      Object.values(record.locales).some((locale) => locale.phase === "validation-failed"))
+      Object.values(record.locales).some(
+        (locale) =>
+          locale.phase === "validation-failed" ||
+          (locale.phase === "pr-created" && !locale.pullRequestFinalized),
+      ))
   );
 }
 
@@ -404,6 +699,55 @@ function assessReadiness(jobs: PhraseJobPart[]): LocaleReadiness {
     return { phase: "failed", reason: `Final Phrase job ended with status ${finalJob.status}` };
   }
   return finalJob.status === "COMPLETED" ? { phase: "ready", finalJob } : { phase: "pending" };
+}
+
+function classifyImportJobParts(
+  observations: readonly ImportJobPartObservation[],
+): Map<string, ImportLocaleClassification> {
+  const partsByLocale = new Map<
+    string,
+    { permanentFailure?: string; retryableError?: unknown; pendingJobs: PhraseJobPart[] }
+  >();
+  for (const observation of observations) {
+    const phraseLocale = observation.requestedJob.targetLang;
+    let parts = partsByLocale.get(phraseLocale);
+    if (!parts) {
+      parts = { pendingJobs: [] };
+      partsByLocale.set(phraseLocale, parts);
+    }
+    if (observation.error !== undefined) {
+      if (retryableImportFailure(observation.error)) {
+        parts.retryableError ??= observation.error;
+      } else {
+        parts.permanentFailure ??= safeFailureReason(observation.error);
+      }
+      continue;
+    }
+    const job = observation.job;
+    if (!job) {
+      parts.pendingJobs.push(observation.requestedJob);
+      continue;
+    }
+    if (job.importStatus?.status === "ERROR") {
+      parts.permanentFailure ??= `Phrase failed to import job ${job.uid}: ${job.importStatus.errorMessage ?? "unknown error"}`;
+    } else if (job.importStatus?.status !== "OK" && job.imported !== true) {
+      parts.pendingJobs.push(observation.requestedJob);
+    }
+  }
+
+  const classifications = new Map<string, ImportLocaleClassification>();
+  for (const [phraseLocale, parts] of partsByLocale) {
+    if (parts.permanentFailure) {
+      classifications.set(phraseLocale, { phase: "failed", reason: parts.permanentFailure });
+    } else if (parts.retryableError !== undefined) {
+      classifications.set(phraseLocale, { phase: "retrying", error: parts.retryableError });
+    } else if (parts.pendingJobs.length) {
+      classifications.set(phraseLocale, { phase: "pending", jobs: parts.pendingJobs });
+    } else {
+      classifications.set(phraseLocale, { phase: "complete" });
+    }
+  }
+  return classifications;
 }
 
 export class PhraseWorkflow {
@@ -536,16 +880,113 @@ export class PhraseWorkflow {
       );
     }
     const results: PhraseReconcileResult[] = [];
+    const storedBatches: StoredPhraseBatch[] = [];
     for (const key of await this.dependencies.state.listBatchKeys()) {
       try {
         const stored = await this.dependencies.state.readBatch(key);
-        if (!stored) continue;
-        if (!needsReconciliation(stored.record)) continue;
-        assertExpectedBatchConfig(stored.record, options);
-        await this.reconcileBatch(stored, results, options);
+        if (stored) storedBatches.push(stored);
       } catch (error) {
         results.push({
           batchKey: key,
+          phase: error instanceof PhrasePinMismatchError ? "failed" : "retrying",
+          reason: safeFailureReason(error),
+        });
+      }
+    }
+
+    const context: PhraseReconcileContext = {
+      pins: options,
+      verifiedJobs: new Map(),
+      jobVerificationFailures: new Map(),
+      verifiedJobSnapshots: new Map(),
+      pullRequestOwners: new Map(),
+      pullRequestStateCache: new Map(),
+      exportedPullRequestUrls: new Set(),
+      reportedPullRequestStateErrors: new Set(),
+      storedBatches: new Map(storedBatches.map((stored) => [stored.record.key, stored])),
+    };
+    const rejectedBatchKeys = new Set<string>();
+    for (const stored of storedBatches) {
+      const { record } = stored;
+      if (!needsReconciliation(record)) continue;
+      try {
+        assertExpectedBatchConfig(record, context.pins);
+        if (hasPhrasePins(context.pins) && record.jobs.length) {
+          const failures = new Map<string, unknown>();
+          const jobs = await this.verifyPinnedJobs(
+            record.config.projectUid,
+            record.jobs,
+            context.pins.expectedSourceFilename,
+            failures,
+          );
+          context.verifiedJobs.set(record.key, jobs);
+          context.jobVerificationFailures.set(record.key, failures);
+          context.verifiedJobSnapshots.set(record.key, {
+            projectUid: record.config.projectUid,
+            jobUids: record.jobs.map((job) => job.uid),
+          });
+        }
+      } catch (error) {
+        rejectedBatchKeys.add(record.key);
+        results.push({
+          batchKey: record.key,
+          phase: error instanceof PhrasePinMismatchError ? "failed" : "retrying",
+          reason: safeFailureReason(error),
+        });
+      }
+    }
+
+    const latestPullRequestRecords = new Map<string, PhraseBatchRecord>();
+    const recordsByKey = new Map(storedBatches.map(({ record }) => [record.key, record]));
+    for (const { record } of storedBatches) {
+      if (!needsReconciliation(record) || rejectedBatchKeys.has(record.key)) continue;
+      for (const [phraseLocale, locale] of Object.entries(record.locales)) {
+        if (
+          locale.phase !== "pr-created" ||
+          locale.pullRequestReexportDelegated ||
+          !locale.pullRequestUrl
+        ) {
+          continue;
+        }
+        const retryParent = record.retryParentBatchKey
+          ? recordsByKey.get(record.retryParentBatchKey)
+          : undefined;
+        const retryParentLocale = retryParent?.locales[phraseLocale];
+        // The retry child owns this PR only after its carried commit state is handed off.
+        const retryParentStillOwnsPullRequest =
+          record.phase === "importing" &&
+          !record.retryParentDelegated &&
+          retryParent !== undefined &&
+          !rejectedBatchKeys.has(retryParent.key) &&
+          needsReconciliation(retryParent) &&
+          retryParentLocale?.phase === "pr-created" &&
+          retryParentLocale.pullRequestUrl === locale.pullRequestUrl &&
+          !retryParentLocale.pullRequestReexportDelegated;
+        if (retryParentStillOwnsPullRequest) continue;
+
+        const currentOwner = latestPullRequestRecords.get(locale.pullRequestUrl);
+        if (
+          !currentOwner ||
+          (record.attempt ?? 0) > (currentOwner.attempt ?? 0) ||
+          ((record.attempt ?? 0) === (currentOwner.attempt ?? 0) &&
+            (record.createdAt > currentOwner.createdAt ||
+              (record.createdAt === currentOwner.createdAt && record.key > currentOwner.key)))
+        ) {
+          latestPullRequestRecords.set(locale.pullRequestUrl, record);
+        }
+      }
+    }
+    context.pullRequestOwners = new Map(
+      [...latestPullRequestRecords].map(([url, record]) => [url, record.key]),
+    );
+
+    for (const stored of storedBatches) {
+      if (!needsReconciliation(stored.record) || rejectedBatchKeys.has(stored.record.key)) continue;
+      try {
+        await this.reconcileBatch(stored, results, context);
+      } catch (error) {
+        results.push({
+          batchKey: stored.record.key,
           phase: error instanceof PhrasePinMismatchError ? "failed" : "retrying",
           reason: safeFailureReason(error),
         });
@@ -562,6 +1003,9 @@ export class PhraseWorkflow {
     previousRecord?: PhraseBatchRecord,
     pins: PhrasePinOptions = {},
   ): Promise<PhraseBatchRecord> {
+    if (previousRecord && hasPhrasePins(pins)) {
+      assertExpectedBatchConfig(previousRecord, pins);
+    }
     const record = makeBatchRecord(input, key, attempt, sourceDigest, this.now(), previousRecord);
     const targetLangs = input.config.targetLocales
       .filter(({ phraseLocale }) => record.locales[phraseLocale]?.phase === "pending")
@@ -603,14 +1047,15 @@ export class PhraseWorkflow {
       throw error;
     }
 
+    const combinedJobs = [...record.jobs, ...created.jobs];
     const jobs =
-      hasPhrasePins(pins) && created.jobs.length
+      hasPhrasePins(pins) && combinedJobs.length
         ? await this.verifyPinnedJobs(
             input.config.projectUid,
-            created.jobs.map((job) => job.uid),
+            combinedJobs,
             pins.expectedSourceFilename,
           )
-        : created.jobs;
+        : combinedJobs;
     record.importAsyncRequestId = created.asyncRequest.id;
     record.jobs = jobs;
     record.warningCount = created.warnings.length;
@@ -630,8 +1075,15 @@ export class PhraseWorkflow {
       throw new PhraseWorkflowError(record.failureReason, key);
     }
 
-    // This request ID came from this Phrase response, after its jobs were verified above.
-    return (await this.finishImport(record, revision, pins, jobs, true)).record;
+    const retryableImportFailures = new Map<string, unknown>();
+    const finished = await this.finishImport(record, revision, {
+      pins,
+      verifiedJobs: jobs,
+      asyncRequestIsFresh: true,
+      retryableImportFailures,
+    });
+    await this.delegateRetryParent(finished.record, finished.revision, pins);
+    return finished.record;
   }
 
   private async resumeSubmission(
@@ -665,7 +1117,7 @@ export class PhraseWorkflow {
       if (record.jobs.length) {
         verifiedJobs = await this.verifyPinnedJobs(
           record.config.projectUid,
-          record.jobs.map((job) => job.uid),
+          record.jobs,
           pins.expectedSourceFilename,
         );
         record.jobs = verifiedJobs;
@@ -683,28 +1135,52 @@ export class PhraseWorkflow {
       revision = await this.dependencies.state.updateBatch(record, revision);
     }
     if (record.phase === "superseded") {
-      // Only ready batches are superseded, so the Phrase jobs still translate these exact bytes.
-      // Reconciliation rechecks the base ref before any PR is opened.
-      record.phase = "ready";
+      // Superseded batches may still have imports waiting; resume those through finishImport.
+      const hasPendingImport = record.jobs.some(
+        (job) =>
+          record.locales[job.targetLang]?.phase !== "failed" &&
+          record.locales[job.targetLang]?.phase !== "pr-created" &&
+          job.importStatus?.status !== "OK" &&
+          job.imported !== true,
+      );
+      record.phase = hasPendingImport ? "importing" : "ready";
       record.failureReason = undefined;
       await this.dependencies.state.updateBatch(record, revision);
       return record;
     }
     if (record.phase === "importing")
-      return (await this.finishImport(record, revision, pins, verifiedJobs)).record;
+      return (await this.finishImport(record, revision, { pins, verifiedJobs })).record;
     return record;
   }
 
   private async reconcileBatch(
     stored: StoredPhraseBatch,
     results: PhraseReconcileResult[],
-    pins: PhrasePinOptions = {},
+    context: PhraseReconcileContext,
   ): Promise<void> {
     let { record, revision } = stored;
-    let pinnedJobs: PhraseJobPart[] | undefined;
+    const pins = context.pins;
+    let pinnedJobs = context.verifiedJobs.get(record.key);
+    let jobVerificationFailures = context.jobVerificationFailures.get(record.key) ?? new Map();
+    if (hasPhrasePins(pins)) {
+      pinnedJobs = await this.ensurePinnedReconcileJobs(record, pins, context);
+      jobVerificationFailures = context.jobVerificationFailures.get(record.key) ?? new Map();
+    }
+    const retryableImportFailures =
+      record.phase === "importing" ? new Map<string, unknown>() : new Map(jobVerificationFailures);
     if (record.phase === "importing") {
+      const failedBeforeImport = new Set(
+        Object.entries(record.locales)
+          .filter(([, locale]) => locale.phase === "failed")
+          .map(([phraseLocale]) => phraseLocale),
+      );
       try {
-        ({ record, revision } = await this.finishImport(record, revision, pins));
+        ({ record, revision } = await this.finishImport(record, revision, {
+          pins,
+          verifiedJobs: pinnedJobs,
+          jobVerificationFailures,
+          retryableImportFailures,
+        }));
         if (hasPhrasePins(pins)) pinnedJobs = record.jobs;
       } catch (error) {
         if (record.phase !== "failed") throw error;
@@ -718,21 +1194,162 @@ export class PhraseWorkflow {
         }
         return;
       }
+      for (const target of record.config.targetLocales) {
+        const locale = record.locales[target.phraseLocale];
+        if (
+          locale?.phase === "failed" &&
+          !failedBeforeImport.has(target.phraseLocale) &&
+          locale.failureReason
+        ) {
+          results.push({
+            batchKey: record.key,
+            phraseLocale: target.phraseLocale,
+            phase: "failed",
+            reason: locale.failureReason,
+          });
+        }
+      }
     }
-    if (hasPhrasePins(pins) && !pinnedJobs && record.jobs.length) {
-      pinnedJobs = await this.verifyPinnedJobs(
-        record.config.projectUid,
-        record.jobs.map((job) => job.uid),
-        pins.expectedSourceFilename,
-      );
-      record.jobs = pinnedJobs;
+    if (
+      record.retryParentBatchKey &&
+      !record.retryParentDelegated &&
+      (record.phase === "ready" || record.phase === "completed")
+    ) {
+      revision = await this.delegateRetryParent(record, revision, pins, context);
     }
 
+    const pullRequestStates = new Map<string, PhrasePullRequestState>();
+    const pullRequestStateErrors = new Map<string, unknown>();
+    let stateChanged = false;
+    for (const target of record.config.targetLocales) {
+      const locale = record.locales[target.phraseLocale];
+      if (locale?.phase !== "pr-created") continue;
+      if (locale.pullRequestMerged) {
+        if (!locale.pullRequestFinalized) {
+          locale.pullRequestFinalized = true;
+          stateChanged = true;
+        }
+        continue;
+      }
+      if (!locale.pullRequestUrl) {
+        pullRequestStateErrors.set(
+          target.phraseLocale,
+          new PhraseRepositoryError("Phrase locale record is missing its pull request URL", 0),
+        );
+        continue;
+      }
+      try {
+        let stateRequest = context.pullRequestStateCache.get(locale.pullRequestUrl);
+        if (!stateRequest) {
+          stateRequest = this.dependencies.repository.getPullRequestState(locale.pullRequestUrl);
+          context.pullRequestStateCache.set(locale.pullRequestUrl, stateRequest);
+        }
+        const pullRequestState = await stateRequest;
+        pullRequestStates.set(target.phraseLocale, pullRequestState);
+        if (pullRequestState.state === "merged") {
+          if (!locale.pullRequestFinalized || !locale.pullRequestMerged) {
+            locale.pullRequestFinalized = true;
+            locale.pullRequestMerged = true;
+            stateChanged = true;
+          }
+        } else if (pullRequestState.state === "closed") {
+          if (!locale.pullRequestFinalized || locale.pullRequestMerged) {
+            locale.pullRequestFinalized = true;
+            delete locale.pullRequestMerged;
+            stateChanged = true;
+          }
+        } else if (locale.pullRequestFinalized || locale.pullRequestMerged) {
+          delete locale.pullRequestFinalized;
+          delete locale.pullRequestMerged;
+          stateChanged = true;
+        }
+      } catch (error) {
+        pullRequestStateErrors.set(target.phraseLocale, error);
+      }
+    }
+
+    const allLocalesFinal = record.config.targetLocales.every((target) => {
+      const locale = record.locales[target.phraseLocale];
+      return (
+        locale?.phase === "failed" ||
+        (locale?.phase === "pr-created" && locale.pullRequestFinalized === true)
+      );
+    });
+    const hasOpenPullRequest = [...pullRequestStates.values()].some(
+      (pullRequestState) => pullRequestState.state === "open",
+    );
+    const needsMoreWork =
+      hasValidationFailure(record) || pullRequestStateErrors.size > 0 || hasOpenPullRequest;
+    if (record.phase === "completed" && needsMoreWork) {
+      record.phase = "ready";
+      stateChanged = true;
+    }
+    if (allLocalesFinal && pullRequestStateErrors.size === 0 && !hasOpenPullRequest) {
+      if (record.phase !== "completed") {
+        record.phase = "completed";
+        stateChanged = true;
+      }
+      if (stateChanged) await this.dependencies.state.updateBatch(record, revision);
+      return;
+    }
+    if (stateChanged) revision = await this.dependencies.state.updateBatch(record, revision);
+
+    for (const [phraseLocale, error] of pullRequestStateErrors) {
+      const pullRequestUrl = record.locales[phraseLocale]?.pullRequestUrl;
+      if (
+        pullRequestUrl &&
+        (context.pullRequestOwners.get(pullRequestUrl) !== record.key ||
+          context.reportedPullRequestStateErrors.has(pullRequestUrl))
+      ) {
+        continue;
+      }
+      if (pullRequestUrl) context.reportedPullRequestStateErrors.add(pullRequestUrl);
+      results.push({
+        batchKey: record.key,
+        phraseLocale,
+        phase: "retrying",
+        reason: safeFailureReason(error),
+      });
+    }
+
+    const targetsToReconcile = record.config.targetLocales.filter((target) => {
+      const locale = record.locales[target.phraseLocale];
+      if (locale?.phase === "pr-created") {
+        return (
+          pullRequestStates.get(target.phraseLocale)?.state === "open" &&
+          !locale.pullRequestReexportDelegated &&
+          Boolean(locale.pullRequestUrl) &&
+          context.pullRequestOwners.get(locale.pullRequestUrl!) === record.key &&
+          !context.exportedPullRequestUrls.has(locale.pullRequestUrl!)
+        );
+      }
+      return locale?.phase !== "failed";
+    });
+    if (!targetsToReconcile.length) return;
+
+    const pushRetryingForTargets = (error: unknown) => {
+      const reason = safeFailureReason(error);
+      for (const target of targetsToReconcile) {
+        results.push({
+          batchKey: record.key,
+          phraseLocale: target.phraseLocale,
+          phase: "retrying",
+          reason,
+        });
+      }
+    };
     const baseCommit = await this.dependencies.repository.resolveCommit(record.baseRef);
-    const [pinnedSource, currentSource] = await Promise.all([
-      this.readSourceCatalog(record.config, record.sourceCommit),
-      this.readSourceCatalog(record.config, baseCommit),
-    ]);
+    let pinnedSource: SourceCatalogReadResult;
+    let currentSource: SourceCatalogReadResult;
+    try {
+      [pinnedSource, currentSource] = await Promise.all([
+        this.readSourceCatalog(record.config, record.sourceCommit),
+        this.readSourceCatalog(record.config, baseCommit),
+      ]);
+    } catch (error) {
+      pushRetryingForTargets(error);
+      return;
+    }
     const invalidTemplateRead = pinnedSource.formatError
       ? { ref: record.sourceCommit, error: pinnedSource.formatError }
       : currentSource.formatError
@@ -760,7 +1377,16 @@ export class PhraseWorkflow {
       );
       return;
     }
-    if (!currentSourceBytes || digest(currentSourceBytes) !== record.sourceDigest) {
+    if (!currentSourceBytes) {
+      pushRetryingForTargets(
+        new PhraseRepositoryError(
+          `Could not read source input ${sourceInputPath(record.config)} on ${baseCommit}`,
+          404,
+        ),
+      );
+      return;
+    }
+    if (digest(currentSourceBytes) !== record.sourceDigest) {
       await this.closeBatch(
         record,
         revision,
@@ -770,7 +1396,6 @@ export class PhraseWorkflow {
       );
       return;
     }
-
     const sourceAdapter = this.dependencies.catalogAdapters.get(
       record.config.sourceCatalog.adapter,
     );
@@ -796,10 +1421,59 @@ export class PhraseWorkflow {
       );
       return;
     }
+    if (record.config.frontendTemplate && !record.config.frontendTemplate.generateSourceCatalog) {
+      let templateBytes: Uint8Array | null;
+      try {
+        templateBytes = await this.dependencies.repository.readFile(
+          record.config.frontendTemplate.path,
+          baseCommit,
+        );
+      } catch (error) {
+        pushRetryingForTargets(error);
+        return;
+      }
+      if (!templateBytes) {
+        pushRetryingForTargets(
+          new PhraseRepositoryError(
+            `Could not read Frontend template ${record.config.frontendTemplate.path} on ${baseCommit}`,
+            404,
+          ),
+        );
+        return;
+      }
+      let matchesSource: boolean;
+      try {
+        matchesSource = feoTemplateMatchesSourceCatalog(
+          new TextDecoder().decode(templateBytes),
+          sourceCatalog,
+        );
+      } catch (error) {
+        pushRetryingForTargets(error);
+        return;
+      }
+      if (!matchesSource) {
+        const reason =
+          `Frontend source catalog is stale on ${baseCommit}: ` +
+          "template English does not match the committed FEO source catalog";
+        await this.closeBatch(record, revision, "superseded", reason, results);
+        for (const target of targetsToReconcile) {
+          if (record.locales[target.phraseLocale]?.phase !== "pr-created") continue;
+          results.push({
+            batchKey: record.key,
+            phraseLocale: target.phraseLocale,
+            phase: "superseded",
+            reason,
+          });
+        }
+        return;
+      }
+    }
 
     const readiness = new Map<string, LocaleReadiness>();
+    const jobRefreshFailures = new Map<string, unknown>(retryableImportFailures);
     const refreshedJobs: PhraseJobPart[] = [];
-    for (const target of unresolvedTargets(record)) {
+    for (const target of targetsToReconcile) {
+      if (jobRefreshFailures.has(target.phraseLocale)) continue;
       const targetJobs = (pinnedJobs ?? record.jobs).filter(
         (job) => job.targetLang === target.phraseLocale,
       );
@@ -810,19 +1484,26 @@ export class PhraseWorkflow {
         });
         continue;
       }
-      const jobs = pinnedJobs
-        ? pinnedJobs.filter((job) => job.targetLang === target.phraseLocale)
-        : await Promise.all(
-            targetJobs.map((job) =>
-              this.dependencies.phrase.getJob(record.config.projectUid, job.uid),
-            ),
-          );
-      for (const [index, job] of jobs.entries()) {
-        assertExpectedJobUid(job, targetJobs[index]!.uid);
-        assertExpectedJobFilename(job, pins.expectedSourceFilename);
+      try {
+        const jobs = pinnedJobs
+          ? pinnedJobs.filter((job) => job.targetLang === target.phraseLocale)
+          : await Promise.all(
+              targetJobs.map((job) =>
+                hasPhrasePins(pins)
+                  ? this.getPinnedJob(record.config.projectUid, job, pins.expectedSourceFilename)
+                  : this.dependencies.phrase.getJob(record.config.projectUid, job.uid),
+              ),
+            );
+        for (const [index, job] of jobs.entries()) {
+          assertExpectedJobUid(job, targetJobs[index]!.uid);
+          assertExpectedJobFilename(job, pins.expectedSourceFilename);
+        }
+        refreshedJobs.push(...jobs);
+        readiness.set(target.phraseLocale, assessReadiness(jobs));
+      } catch (error) {
+        if (error instanceof PhrasePinMismatchError) throw error;
+        jobRefreshFailures.set(target.phraseLocale, error);
       }
-      refreshedJobs.push(...jobs);
-      readiness.set(target.phraseLocale, assessReadiness(jobs));
     }
     if (refreshedJobs.length) {
       const refreshedByUid = new Map(refreshedJobs.map((job) => [job.uid, job]));
@@ -839,13 +1520,16 @@ export class PhraseWorkflow {
         record.locales[target.phraseLocale]?.phase === "pr-created" ||
         readiness.get(target.phraseLocale)?.phase === "ready",
     );
-    const wasValidationRetry = hasValidationFailure(record);
-    if (wasValidationRetry) record.phase = "ready";
     for (const target of record.config.targetLocales) {
       // closeBatch may have run for an earlier locale even if persisting it then failed.
-      if (record.phase !== "ready" && !(wasValidationRetry && record.phase === "completed")) return;
+      if (record.phase !== "ready" && record.phase !== "importing") return;
       const push = (result: Omit<PhraseReconcileResult, "batchKey" | "phraseLocale">) =>
         results.push({ batchKey: record.key, phraseLocale: target.phraseLocale, ...result });
+      const jobRefreshFailure = jobRefreshFailures.get(target.phraseLocale);
+      if (jobRefreshFailures.has(target.phraseLocale)) {
+        push({ phase: "retrying", reason: safeFailureReason(jobRefreshFailure) });
+        continue;
+      }
       const failLocale = async (reason: string) => {
         record.locales[target.phraseLocale] = { phase: "failed", failureReason: reason };
         revision = await this.dependencies.state.updateBatch(record, revision);
@@ -853,15 +1537,15 @@ export class PhraseWorkflow {
       };
 
       const existingLocale = record.locales[target.phraseLocale];
-      if (existingLocale?.phase === "pr-created") {
-        if (!wasValidationRetry) {
-          push({
-            phase: "pr-created",
-            ...(existingLocale.pullRequestUrl
-              ? { pullRequestUrl: existingLocale.pullRequestUrl }
-              : {}),
-          });
-        }
+      const existingPullRequestState = pullRequestStates.get(target.phraseLocale);
+      const reexportingOpenPullRequest =
+        existingLocale?.phase === "pr-created" &&
+        existingPullRequestState?.state === "open" &&
+        !existingLocale.pullRequestReexportDelegated &&
+        Boolean(existingLocale.pullRequestUrl) &&
+        context.pullRequestOwners.get(existingLocale.pullRequestUrl!) === record.key &&
+        !context.exportedPullRequestUrls.has(existingLocale.pullRequestUrl!);
+      if (existingLocale?.phase === "pr-created" && !reexportingOpenPullRequest) {
         continue;
       }
       // Failed locales were reported by the run that failed them; do not fail every later run.
@@ -873,11 +1557,14 @@ export class PhraseWorkflow {
 
       const ready = readiness.get(target.phraseLocale);
       if (ready?.phase === "failed") {
-        await failLocale(ready.reason);
-        if (wasValidationRetry) record.phase = "completed";
+        if (reexportingOpenPullRequest) push({ phase: "failed", reason: ready.reason });
+        else await failLocale(ready.reason);
         continue;
       }
-      if (localePolicy(record, target.phraseLocale) === "all-locales") {
+      if (
+        !reexportingOpenPullRequest &&
+        localePolicy(record, target.phraseLocale) === "all-locales"
+      ) {
         const validationFailedLocale = Object.entries(record.locales).find(
           ([, locale]) => locale.phase === "validation-failed",
         )?.[0];
@@ -890,7 +1577,6 @@ export class PhraseWorkflow {
         )?.[0];
         if (failedLocale) {
           await failLocale(`Blocked: locale ${failedLocale} failed in this all-locales batch`);
-          if (wasValidationRetry) record.phase = "completed";
           continue;
         }
         if (!allLocalesReady) {
@@ -903,9 +1589,16 @@ export class PhraseWorkflow {
         continue;
       }
 
-      record.locales[target.phraseLocale] = { phase: "exporting" };
-      revision = await this.dependencies.state.updateBatch(record, revision);
+      if (!reexportingOpenPullRequest) {
+        record.locales[target.phraseLocale] = existingLocale
+          ? { ...existingLocale, phase: "exporting" }
+          : { phase: "exporting" };
+        revision = await this.dependencies.state.updateBatch(record, revision);
+      }
       try {
+        if (reexportingOpenPullRequest && existingLocale?.pullRequestUrl) {
+          context.exportedPullRequestUrls.add(existingLocale.pullRequestUrl);
+        }
         const { content, warnings } = await this.exportTarget(
           record,
           target,
@@ -925,7 +1618,14 @@ export class PhraseWorkflow {
           return;
         }
         const latestSourceBytes = latestSource.bytes;
-        if (!latestSourceBytes || digest(latestSourceBytes) !== record.sourceDigest) {
+        if (!latestSourceBytes) {
+          push({
+            phase: "retrying",
+            reason: `Could not read source input ${sourceInputPath(record.config)} on ${baseCommit}`,
+          });
+          continue;
+        }
+        if (digest(latestSourceBytes) !== record.sourceDigest) {
           await this.closeBatch(
             record,
             revision,
@@ -945,7 +1645,11 @@ export class PhraseWorkflow {
           | undefined;
         if (record.config.frontendTemplate) {
           const path = record.config.frontendTemplate.path;
-          const templateBytes = await this.dependencies.repository.readFile(path, baseCommit);
+          const templateRef =
+            reexportingOpenPullRequest && existingPullRequestState?.state === "open"
+              ? existingPullRequestState.headSha
+              : baseCommit;
+          const templateBytes = await this.dependencies.repository.readFile(path, templateRef);
           if (!templateBytes)
             throw new PhraseCatalogValidationError(`Missing Frontend template: ${path}`);
           try {
@@ -1000,18 +1704,29 @@ export class PhraseWorkflow {
               latestBaseCommit,
             );
             if (!latestTemplateBytes) {
+              push({
+                phase: "retrying",
+                reason: `Could not read Frontend template ${frontendTemplateData.path} on ${latestBaseCommit}`,
+              });
+              continue;
+            }
+            const latestTemplate = new TextDecoder().decode(latestTemplateBytes);
+            if (
+              !record.config.frontendTemplate?.generateSourceCatalog &&
+              !feoTemplateMatchesSourceCatalog(latestTemplate, sourceCatalog)
+            ) {
               await this.closeBatch(
                 record,
                 revision,
                 "superseded",
-                "Frontend template changed on the recorded PR base ref",
+                `Frontend source catalog is stale on ${latestBaseCommit}: template English does not match the committed FEO source catalog`,
                 results,
               );
               return;
             }
             try {
               inlineFeoLocale(
-                new TextDecoder().decode(latestTemplateBytes),
+                latestTemplate,
                 frontendTemplateData.descriptors,
                 frontendTemplateData.translated,
                 target.repositoryLocale,
@@ -1028,40 +1743,284 @@ export class PhraseWorkflow {
             }
           }
         }
-        const localeSlug = target.repositoryLocale.replace(/[^A-Za-z0-9._-]+/g, "-");
-        const pullRequestUrl = await this.dependencies.repository.createOrUpdatePullRequest({
+        const branch =
+          existingLocale?.pullRequestBranch ??
+          localePullRequestBranch(record.key, target.repositoryLocale);
+        const pullRequestBatchKey = existingLocale?.pullRequestBatchKey ?? record.key;
+        const body =
+          `Phrase project: ${record.config.projectUid}\n` +
+          `Batch: ${pullRequestBatchKey}\n` +
+          `Source commit: ${record.sourceCommit}\n` +
+          `Source SHA-256: ${record.sourceDigest}\n` +
+          `Final job: ${ready.finalJob.uid}\n` +
+          translationWarningsSection(warnings);
+        const sourcePath = sourceInputPath(record.config);
+        // Resubmission can adopt a moved generated-source template path within this batch.
+        const title = `i18n(${target.repositoryLocale}): Phrase translation update for ${sourcePath}`;
+        // Persist ownership before the ref update so an interrupted final save can still recover.
+        const loadedLocale = structuredClone(
+          record.locales[target.phraseLocale] ?? { phase: "exporting" as const },
+        );
+        const assertOwnedCommitEligibility = async (
+          candidateRecord: PhraseBatchRecord,
+          previousHeadSha: string | null,
+        ): Promise<void> => {
+          if (hasPhrasePins(pins)) {
+            await this.ensurePinnedReconcileJobs(candidateRecord, pins, context);
+          }
+          const reason = ownedCommitEligibilityFailureReason(
+            candidateRecord,
+            target.phraseLocale,
+            loadedLocale,
+            candidateRecord.locales[target.phraseLocale],
+            previousHeadSha,
+          );
+          if (reason) {
+            throw new PhraseRepositoryError(
+              `Locale ${target.phraseLocale} commit was skipped and is retryable: ${reason}`,
+              409,
+            );
+          }
+        };
+        const recheckOwnedCommitEligibility = async (previousHeadSha: string | null) => {
+          const latest = await this.dependencies.state.readBatch(record.key);
+          if (!latest) {
+            throw new PhraseRepositoryError(
+              `Locale ${target.phraseLocale} commit was skipped and is retryable because its batch record disappeared`,
+              409,
+            );
+          }
+          record = latest.record;
+          revision = latest.revision;
+          await assertOwnedCommitEligibility(record, previousHeadSha);
+          const cached = context.storedBatches.get(record.key);
+          if (cached) {
+            cached.record = record;
+            cached.revision = revision;
+          }
+        };
+        const recordToolingCommitSha = async (
+          toolingSha: string,
+          previousHeadSha: string | null,
+        ) => {
+          const locale = record.locales[target.phraseLocale];
+          let ownershipShas = mergeToolingCommitShas(
+            locale?.toolingCommitShas,
+            locale?.toolingCommitSha ? [locale.toolingCommitSha] : undefined,
+            locale?.pendingToolingCommitSha ? [locale.pendingToolingCommitSha] : undefined,
+          );
+          for (let attempt = 1; attempt <= TOOLING_COMMIT_STATE_WRITE_ATTEMPTS; attempt += 1) {
+            await assertOwnedCommitEligibility(record, previousHeadSha);
+            const localeRecord: PhraseLocaleRecord = record.locales[target.phraseLocale] ?? {
+              phase: "exporting",
+            };
+            const toolingCommitShas = appendToolingCommitSha(
+              [ownershipShas, localeRecord.toolingCommitShas],
+              previousHeadSha,
+              toolingSha,
+              localeRecord.toolingCommitSha,
+            );
+            const updatedRecord: PhraseBatchRecord = {
+              ...record,
+              locales: {
+                ...record.locales,
+                [target.phraseLocale]: { ...localeRecord, toolingCommitShas },
+              },
+            };
+            try {
+              revision = await this.dependencies.state.updateBatch(updatedRecord, revision);
+              record = updatedRecord;
+              const cached = context.storedBatches.get(record.key);
+              if (cached) {
+                cached.record = record;
+                cached.revision = revision;
+              }
+              return;
+            } catch (error) {
+              if (
+                !(error instanceof PhraseBatchStateConflictError) ||
+                attempt === TOOLING_COMMIT_STATE_WRITE_ATTEMPTS
+              ) {
+                throw error;
+              }
+              // A concurrent reconcile may have added another owned SHA at this revision.
+              const latest = await this.dependencies.state.readBatch(record.key);
+              if (!latest) {
+                throw new PhraseRepositoryError(
+                  `Locale ${target.phraseLocale} commit was skipped and is retryable because its batch record disappeared`,
+                  409,
+                );
+              }
+              record = latest.record;
+              revision = latest.revision;
+              await assertOwnedCommitEligibility(record, previousHeadSha);
+              const latestLocale = latest.record.locales[target.phraseLocale];
+              ownershipShas = mergeToolingCommitShas(
+                toolingCommitShas,
+                latestLocale?.toolingCommitShas,
+                latestLocale?.toolingCommitSha ? [latestLocale.toolingCommitSha] : undefined,
+                latestLocale?.pendingToolingCommitSha
+                  ? [latestLocale.pendingToolingCommitSha]
+                  : undefined,
+              );
+            }
+          }
+        };
+        const pullRequestInput: PhraseLocalePullRequest = {
           ...(additionalFiles.length ? { additionalFiles } : {}),
           repository: record.repository,
           baseRef: record.baseRef,
           baseCommit,
-          branch: `i18n/phrase-${record.key.slice(0, 16)}-${localeSlug}`,
-          title: `i18n(${target.repositoryLocale}): Phrase translation update`,
-          body:
-            `Phrase project: ${record.config.projectUid}\n` +
-            `Batch: ${record.key}\n` +
-            `Source commit: ${record.sourceCommit}\n` +
-            `Source SHA-256: ${record.sourceDigest}\n` +
-            `Final job: ${ready.finalJob.uid}\n` +
-            translationWarningsSection(warnings),
+          branch,
+          ...(existingLocale?.toolingCommitShas !== undefined
+            ? { expectedToolingCommitShas: existingLocale.toolingCommitShas }
+            : {}),
+          ...(existingLocale?.toolingCommitSha !== undefined
+            ? { expectedToolingCommitSha: existingLocale.toolingCommitSha }
+            : {}),
+          ...(existingLocale?.pendingToolingCommitSha !== undefined
+            ? { expectedPendingToolingCommitSha: existingLocale.pendingToolingCommitSha }
+            : {}),
+          recordToolingCommitSha,
+          recheckOwnedCommitEligibility,
+          title,
+          body,
           path: target.outputPath,
           content,
-        });
-        record.locales[target.phraseLocale] = { phase: "pr-created", pullRequestUrl };
-        revision = await this.dependencies.state.updateBatch(record, revision);
-        push({ phase: "pr-created", pullRequestUrl });
+        };
+        if (reexportingOpenPullRequest && existingPullRequestState?.state === "open") {
+          if (existingLocale?.phase !== "pr-created" || !existingLocale.pullRequestUrl) {
+            throw new PhraseRepositoryError(
+              "Open Phrase pull request is missing its locale record",
+              0,
+            );
+          }
+          const update = await this.dependencies.repository.updateOpenPullRequest({
+            repository: record.repository,
+            baseRef: record.baseRef,
+            branch,
+            pullRequestUrl: existingLocale.pullRequestUrl,
+            headSha: existingPullRequestState.headSha,
+            title,
+            ...(existingLocale.toolingCommitShas !== undefined
+              ? { expectedToolingCommitShas: existingLocale.toolingCommitShas }
+              : {}),
+            ...(existingLocale.toolingCommitSha !== undefined
+              ? { expectedToolingCommitSha: existingLocale.toolingCommitSha }
+              : {}),
+            ...(existingLocale.pendingToolingCommitSha !== undefined
+              ? { expectedPendingToolingCommitSha: existingLocale.pendingToolingCommitSha }
+              : {}),
+            recordToolingCommitSha,
+            recheckOwnedCommitEligibility,
+            ...(additionalFiles.length ? { additionalFiles } : {}),
+            path: target.outputPath,
+            content,
+            body,
+          });
+          const updatedLocale: PhraseLocaleRecord = {
+            ...(record.locales[target.phraseLocale] ?? existingLocale),
+            toolingCommitSha: update.toolingCommitSha,
+            pullRequestBranch: branch,
+            pullRequestBatchKey,
+          };
+          delete updatedLocale.pendingToolingCommitSha;
+          if (update.pullRequestFinalized) {
+            updatedLocale.pullRequestFinalized = true;
+            if (update.pullRequestMerged) updatedLocale.pullRequestMerged = true;
+            else delete updatedLocale.pullRequestMerged;
+            updatedLocale.pullRequestBodyPending = true;
+            record.locales[target.phraseLocale] = updatedLocale;
+            revision = await this.dependencies.state.updateBatch(record, revision);
+          } else if (update.changed) {
+            if (update.bodyUpdated) delete updatedLocale.pullRequestBodyPending;
+            else updatedLocale.pullRequestBodyPending = true;
+            record.locales[target.phraseLocale] = updatedLocale;
+            revision = await this.dependencies.state.updateBatch(record, revision);
+            if (update.bodyError) {
+              push({ phase: "retrying", reason: safeFailureReason(update.bodyError) });
+            } else if (!update.bodyUpdated) {
+              push({
+                phase: "retrying",
+                reason: "GitHub did not confirm the updated locale pull request description",
+              });
+            } else {
+              push({ phase: "pr-created", pullRequestUrl: existingLocale.pullRequestUrl });
+            }
+          } else if (existingLocale.pullRequestBodyPending) {
+            const bodyUpdated = await this.dependencies.repository.updatePullRequestBody(
+              existingLocale.pullRequestUrl,
+              body,
+              title,
+            );
+            if (bodyUpdated) delete updatedLocale.pullRequestBodyPending;
+            else updatedLocale.pullRequestFinalized = true;
+            record.locales[target.phraseLocale] = updatedLocale;
+            revision = await this.dependencies.state.updateBatch(record, revision);
+            if (bodyUpdated)
+              push({ phase: "pr-created", pullRequestUrl: existingLocale.pullRequestUrl });
+          } else if (
+            existingLocale.toolingCommitSha !== update.toolingCommitSha ||
+            existingLocale.pendingToolingCommitSha !== undefined
+          ) {
+            record.locales[target.phraseLocale] = updatedLocale;
+            revision = await this.dependencies.state.updateBatch(record, revision);
+            push({ phase: "pr-created", pullRequestUrl: existingLocale.pullRequestUrl });
+          } else {
+            push({ phase: "pr-created", pullRequestUrl: existingLocale.pullRequestUrl });
+          }
+        } else {
+          const created =
+            await this.dependencies.repository.createOrUpdatePullRequestWithCommit(
+              pullRequestInput,
+            );
+          if (!created.toolingCommitSha && !created.pullRequestFinalized) {
+            throw new PhraseRepositoryError(
+              "GitHub did not return the commit written for the locale pull request",
+              500,
+            );
+          }
+          const localeRecord: PhraseLocaleRecord = {
+            ...(record.locales[target.phraseLocale] ?? { phase: "exporting" }),
+            phase: "pr-created",
+            pullRequestUrl: created.pullRequestUrl,
+            pullRequestBranch: branch,
+            pullRequestBatchKey,
+            ...(created.toolingCommitSha ? { toolingCommitSha: created.toolingCommitSha } : {}),
+            ...(created.pullRequestFinalized ? { pullRequestFinalized: true } : {}),
+            ...(created.pullRequestMerged ? { pullRequestMerged: true } : {}),
+            ...(created.bodyError || created.pullRequestFinalized
+              ? { pullRequestBodyPending: true }
+              : {}),
+          };
+          delete localeRecord.pendingToolingCommitSha;
+          record.locales[target.phraseLocale] = localeRecord;
+          revision = await this.dependencies.state.updateBatch(record, revision);
+          if (created.bodyError) {
+            push({ phase: "retrying", reason: safeFailureReason(created.bodyError) });
+          } else {
+            push({ phase: "pr-created", pullRequestUrl: created.pullRequestUrl });
+          }
+        }
       } catch (error) {
         // A stale revision would make every later write in this batch fail; stop here.
-        if (error instanceof PhraseBatchStateConflictError) throw error;
+        if (
+          error instanceof PhraseBatchStateConflictError ||
+          error instanceof PhrasePinMismatchError
+        ) {
+          throw error;
+        }
         const permanent =
           error instanceof PhraseCatalogValidationError ||
           (error instanceof PhraseRepositoryError && error.permanent);
         if (error instanceof PhraseCatalogValidationError) {
-          record.locales[target.phraseLocale] = {
-            phase: "validation-failed",
-            failureReason: error.message,
-          };
-          record.phase = "completed";
-          revision = await this.dependencies.state.updateBatch(record, revision);
+          if (!reexportingOpenPullRequest) {
+            record.locales[target.phraseLocale] = {
+              phase: "validation-failed",
+              failureReason: error.message,
+            };
+            revision = await this.dependencies.state.updateBatch(record, revision);
+          }
           push({ phase: "failed", reason: error.message });
         } else if (permanent) await failLocale(error.message);
         else push({ phase: "retrying", reason: safeFailureReason(error) });
@@ -1071,13 +2030,178 @@ export class PhraseWorkflow {
     if (
       !hasValidationFailure(record) &&
       record.config.targetLocales.every((target) => {
-        const phase = record.locales[target.phraseLocale]?.phase;
-        return phase === "pr-created" || phase === "failed";
+        const locale = record.locales[target.phraseLocale];
+        return (
+          locale?.phase === "failed" ||
+          (locale?.phase === "pr-created" && locale.pullRequestFinalized === true)
+        );
       })
     ) {
       record.phase = "completed";
       await this.dependencies.state.updateBatch(record, revision);
     }
+  }
+
+  private async ensurePinnedReconcileJobs(
+    record: PhraseBatchRecord,
+    pins: PhrasePinOptions,
+    context: PhraseReconcileContext,
+  ): Promise<PhraseJobPart[]> {
+    assertExpectedBatchConfig(record, pins);
+    const snapshot = context.verifiedJobSnapshots.get(record.key);
+    const jobUids = record.jobs.map((job) => job.uid);
+    if (
+      snapshot &&
+      snapshot.projectUid === record.config.projectUid &&
+      snapshot.jobUids.length === jobUids.length &&
+      snapshot.jobUids.every((jobUid, index) => jobUid === jobUids[index])
+    ) {
+      return context.verifiedJobs.get(record.key) ?? [];
+    }
+
+    const failures = new Map<string, unknown>();
+    const jobs = record.jobs.length
+      ? await this.verifyPinnedJobs(
+          record.config.projectUid,
+          record.jobs,
+          pins.expectedSourceFilename,
+          failures,
+        )
+      : [];
+    context.verifiedJobs.set(record.key, jobs);
+    context.jobVerificationFailures.set(record.key, failures);
+    context.verifiedJobSnapshots.set(record.key, {
+      projectUid: record.config.projectUid,
+      jobUids,
+    });
+    if (snapshot) {
+      throw new PhraseBatchStateConflictError(
+        "Phrase batch jobs changed while reconciliation was in progress",
+      );
+    }
+    return jobs;
+  }
+
+  private async delegateRetryParent(
+    record: PhraseBatchRecord,
+    revision: string,
+    pins: PhrasePinOptions = {},
+    context?: PhraseReconcileContext,
+  ): Promise<string> {
+    if (hasPhrasePins(pins)) {
+      if (context) await this.ensurePinnedReconcileJobs(record, pins, context);
+      else assertExpectedBatchConfig(record, pins);
+    }
+    const parentKey = record.retryParentBatchKey;
+    if (!parentKey || record.retryParentDelegated) return revision;
+
+    const parentStored = await this.dependencies.state.readBatch(parentKey);
+    if (parentStored && hasPhrasePins(pins)) {
+      if (context && !["failed", "superseded"].includes(parentStored.record.phase)) {
+        await this.ensurePinnedReconcileJobs(parentStored.record, pins, context);
+      } else {
+        assertExpectedBatchConfig(parentStored.record, pins);
+      }
+    }
+    if (parentStored && !["failed", "superseded"].includes(parentStored.record.phase)) {
+      const parent = parentStored.record;
+      const retryLocales = new Set(
+        record.config.targetLocales.map(({ phraseLocale }) => phraseLocale),
+      );
+      for (const target of parent.config.targetLocales) {
+        if (!retryLocales.has(target.phraseLocale)) continue;
+        const locale = parent.locales[target.phraseLocale];
+        if (!locale) continue;
+        if (locale.phase === "pr-created") {
+          const carriedLocale = record.locales[target.phraseLocale];
+          if (
+            carriedLocale?.phase === "pr-created" &&
+            carriedLocale.pullRequestUrl === locale.pullRequestUrl
+          ) {
+            const carriedLocaleUpdate: PhraseLocaleRecord = { ...carriedLocale };
+            if (locale.toolingCommitSha) {
+              carriedLocaleUpdate.toolingCommitSha = locale.toolingCommitSha;
+            }
+            if (locale.pendingToolingCommitSha) {
+              carriedLocaleUpdate.pendingToolingCommitSha = locale.pendingToolingCommitSha;
+            } else {
+              delete carriedLocaleUpdate.pendingToolingCommitSha;
+            }
+            const toolingCommitShas = trimToolingCommitShas(
+              mergeToolingCommitShas(
+                carriedLocaleUpdate.toolingCommitShas,
+                locale.toolingCommitShas,
+                carriedLocaleUpdate.pendingToolingCommitSha
+                  ? [carriedLocaleUpdate.pendingToolingCommitSha]
+                  : undefined,
+              ),
+              carriedLocaleUpdate.toolingCommitSha,
+            );
+            if (toolingCommitShas.length) {
+              carriedLocaleUpdate.toolingCommitShas = toolingCommitShas;
+            } else {
+              delete carriedLocaleUpdate.toolingCommitShas;
+            }
+            const ownershipChanged =
+              JSON.stringify(carriedLocaleUpdate.toolingCommitShas ?? []) !==
+              JSON.stringify(carriedLocale.toolingCommitShas ?? []);
+            if (
+              carriedLocaleUpdate.toolingCommitSha !== carriedLocale.toolingCommitSha ||
+              carriedLocaleUpdate.pendingToolingCommitSha !==
+                carriedLocale.pendingToolingCommitSha ||
+              ownershipChanged
+            ) {
+              record.locales[target.phraseLocale] = carriedLocaleUpdate;
+            }
+            if (!locale.pullRequestReexportDelegated) {
+              locale.pullRequestReexportDelegated = true;
+            }
+          }
+        } else if (locale.phase !== "failed") {
+          parent.locales[target.phraseLocale] = {
+            phase: "failed",
+            failureReason: `Retried in Phrase batch ${record.key}`,
+          };
+        }
+      }
+
+      const parentHasOpenPullRequest = parent.config.targetLocales.some((target) => {
+        const locale = parent.locales[target.phraseLocale];
+        return locale?.phase === "pr-created" && !locale.pullRequestFinalized;
+      });
+      if (parentHasOpenPullRequest && parent.phase === "completed") {
+        parent.phase = "ready";
+      }
+
+      // Fence the child's ownership snapshot against the exact parent revision it copied.
+      // Even if the handoff marker is already present, a concurrent parent SHA write must
+      // conflict before the child record can be saved with a stale owned set.
+      const parentRevision = await this.dependencies.state.updateBatch(
+        parent,
+        parentStored.revision,
+      );
+      const cachedParent = context?.storedBatches.get(parentKey);
+      if (cachedParent) {
+        cachedParent.record = parent;
+        cachedParent.revision = parentRevision;
+      }
+    }
+
+    record.retryParentDelegated = true;
+    const nextRevision = await this.dependencies.state.updateBatch(record, revision);
+    const cachedRecord = context?.storedBatches.get(record.key);
+    if (cachedRecord) {
+      cachedRecord.record = record;
+      cachedRecord.revision = nextRevision;
+    }
+    if (context) {
+      for (const locale of Object.values(record.locales)) {
+        if (locale.phase === "pr-created" && locale.pullRequestUrl) {
+          context.pullRequestOwners.set(locale.pullRequestUrl, record.key);
+        }
+      }
+    }
+    return nextRevision;
   }
 
   private async exportTarget(
@@ -1162,10 +2286,13 @@ export class PhraseWorkflow {
   private async finishImport(
     record: PhraseBatchRecord,
     revision: string,
-    pins: PhrasePinOptions = {},
-    verifiedJobs?: PhraseJobPart[],
-    asyncRequestIsFresh = false,
+    options: FinishImportOptions = {},
   ): Promise<StoredPhraseBatch> {
+    const pins = options.pins ?? {};
+    let verifiedJobs = options.verifiedJobs;
+    const jobVerificationFailures = options.jobVerificationFailures ?? new Map<string, unknown>();
+    const asyncRequestIsFresh = options.asyncRequestIsFresh ?? false;
+    const retryableImportFailures = options.retryableImportFailures ?? new Map<string, unknown>();
     if (hasPhrasePins(pins)) {
       assertExpectedBatchConfig(record, pins);
       if (!record.jobs.length) {
@@ -1175,10 +2302,12 @@ export class PhraseWorkflow {
       }
       verifiedJobs ??= await this.verifyPinnedJobs(
         record.config.projectUid,
-        record.jobs.map((job) => job.uid),
+        record.jobs,
         pins.expectedSourceFilename,
+        jobVerificationFailures,
       );
-      record.jobs = verifiedJobs;
+      const verifiedByUid = new Map(verifiedJobs.map((job) => [job.uid, job]));
+      record.jobs = record.jobs.map((job) => verifiedByUid.get(job.uid) ?? job);
     }
     try {
       const shouldPollAsyncRequest = !hasPhrasePins(pins) || asyncRequestIsFresh;
@@ -1196,31 +2325,115 @@ export class PhraseWorkflow {
         });
       }
       const deadline = this.now() + this.importTimeoutMs;
-      while (true) {
-        const jobs = await Promise.all(
-          record.jobs.map((job) =>
-            this.dependencies.phrase.getJob(record.config.projectUid, job.uid),
+      const failedLocales = new Map<string, string>();
+      const verifiedByUid = new Map((verifiedJobs ?? []).map((job) => [job.uid, job]));
+      const initialObservations = record.jobs.map((requestedJob) => {
+        const job = verifiedByUid.get(requestedJob.uid);
+        if (job) return { requestedJob, job };
+        const error = jobVerificationFailures.get(requestedJob.targetLang);
+        return error === undefined ? { requestedJob } : { requestedJob, error };
+      });
+      const initialClassifications = classifyImportJobParts(initialObservations);
+      for (const [phraseLocale, classification] of initialClassifications) {
+        if (record.locales[phraseLocale]?.phase === "pr-created") {
+          const error = jobVerificationFailures.get(phraseLocale);
+          if (error !== undefined) retryableImportFailures.set(phraseLocale, error);
+          continue;
+        }
+        if (classification.phase === "failed") {
+          retryableImportFailures.delete(phraseLocale);
+          failedLocales.set(phraseLocale, classification.reason);
+        } else if (classification.phase === "retrying") {
+          retryableImportFailures.set(phraseLocale, classification.error);
+        }
+      }
+      for (const [phraseLocale, failureReason] of failedLocales) {
+        record.locales[phraseLocale] = {
+          ...record.locales[phraseLocale],
+          phase: "failed",
+          failureReason,
+        };
+      }
+      let pendingJobs = record.jobs.filter(
+        (job) =>
+          record.locales[job.targetLang]?.phase !== "pr-created" &&
+          record.locales[job.targetLang]?.phase !== "failed" &&
+          !retryableImportFailures.has(job.targetLang),
+      );
+      while (pendingJobs.length) {
+        const settled = await Promise.allSettled(
+          pendingJobs.map((job) =>
+            hasPhrasePins(pins)
+              ? this.getPinnedJob(record.config.projectUid, job, pins.expectedSourceFilename)
+              : this.dependencies.phrase.getJob(record.config.projectUid, job.uid),
           ),
         );
-        for (const [index, job] of jobs.entries()) {
-          assertExpectedJobUid(job, record.jobs[index]!.uid);
+        const refreshedByUid = new Map<string, PhraseJobPart>();
+        const observations: ImportJobPartObservation[] = [];
+        for (const [index, result] of settled.entries()) {
+          const requestedJob = pendingJobs[index]!;
+          if (result.status === "rejected") {
+            if (result.reason instanceof PhrasePinMismatchError) throw result.reason;
+            observations.push({ requestedJob, error: result.reason });
+            continue;
+          }
+          const job = result.value;
+          assertExpectedJobUid(job, requestedJob.uid);
           assertExpectedJobFilename(job, pins.expectedSourceFilename);
+          refreshedByUid.set(job.uid, job);
+          observations.push({ requestedJob, job });
         }
-        record.jobs = jobs;
-        const failed = jobs.find((job) => job.importStatus?.status === "ERROR");
-        if (failed) {
-          throw new PhraseWorkflowError(
-            `Phrase failed to import job ${failed.uid}: ${failed.importStatus?.errorMessage ?? "unknown error"}`,
+        const classifications = classifyImportJobParts(observations);
+        const nextPendingJobs: PhraseJobPart[] = [];
+        for (const [phraseLocale, classification] of classifications) {
+          if (classification.phase === "failed") {
+            retryableImportFailures.delete(phraseLocale);
+            failedLocales.set(phraseLocale, classification.reason);
+          } else if (classification.phase === "retrying") {
+            if (!failedLocales.has(phraseLocale)) {
+              retryableImportFailures.set(phraseLocale, classification.error);
+            }
+          } else if (classification.phase === "pending") {
+            nextPendingJobs.push(...classification.jobs);
+          }
+        }
+        record.jobs = record.jobs.map((job) => refreshedByUid.get(job.uid) ?? job);
+        for (const [phraseLocale, failureReason] of failedLocales) {
+          record.locales[phraseLocale] = {
+            ...record.locales[phraseLocale],
+            phase: "failed",
+            failureReason,
+          };
+        }
+        pendingJobs = nextPendingJobs.filter(
+          (job) =>
+            !failedLocales.has(job.targetLang) && !retryableImportFailures.has(job.targetLang),
+        );
+        if (!pendingJobs.length) break;
+        if (this.now() >= deadline) {
+          const timeoutError = new PhraseWorkflowError(
+            "Timed out waiting for Phrase job imports",
             record.key,
           );
-        }
-        if (jobs.every((job) => job.importStatus?.status === "OK" || job.imported === true)) break;
-        if (this.now() >= deadline) {
-          throw new PhraseWorkflowError("Timed out waiting for Phrase job imports", record.key);
+          for (const job of pendingJobs) {
+            if (retryableImportFailure(timeoutError)) {
+              retryableImportFailures.set(job.targetLang, timeoutError);
+            } else {
+              failedLocales.set(job.targetLang, safeFailureReason(timeoutError));
+            }
+          }
+          for (const [phraseLocale, failureReason] of failedLocales) {
+            record.locales[phraseLocale] = {
+              ...record.locales[phraseLocale],
+              phase: "failed",
+              failureReason,
+            };
+          }
+          break;
         }
         await this.sleep(this.pollIntervalMs);
       }
-      record.phase = "ready";
+      record.phase = retryableImportFailures.size ? "importing" : "ready";
       record.failureReason = undefined;
       return { record, revision: await this.dependencies.state.updateBatch(record, revision) };
     } catch (error) {
@@ -1234,32 +2447,63 @@ export class PhraseWorkflow {
     }
   }
 
+  private async getPinnedJob(
+    projectUid: string,
+    requestedJob: PhraseJobPart,
+    expectedSourceFilename?: string,
+  ): Promise<PhraseJobPart> {
+    try {
+      const job = await this.dependencies.phrase.getJob(projectUid, requestedJob.uid);
+      assertExpectedJobUid(job, requestedJob.uid);
+      assertExpectedJobFilename(job, expectedSourceFilename);
+      return job;
+    } catch (error) {
+      if (error instanceof PhraseApiError && error.status === 404) {
+        throw new PhrasePinMismatchError(
+          "Stored Phrase jobs could not be verified in the pinned project",
+        );
+      }
+      throw error;
+    }
+  }
+
   private async verifyPinnedJobs(
     projectUid: string,
-    jobUids: readonly string[],
+    requestedJobs: readonly PhraseJobPart[],
     expectedSourceFilename?: string,
+    failuresByLocale?: Map<string, unknown>,
   ): Promise<PhraseJobPart[]> {
-    if (jobUids.some((jobUid) => typeof jobUid !== "string" || !jobUid.trim())) {
+    if (requestedJobs.some(({ uid }) => typeof uid !== "string" || !uid.trim())) {
       throw new PhrasePinMismatchError("Pinned Phrase batch contains an invalid job UID");
     }
-    return Promise.all(
-      jobUids.map(async (jobUid) => {
-        let job: PhraseJobPart;
-        try {
-          job = await this.dependencies.phrase.getJob(projectUid, jobUid);
-        } catch (error) {
-          if (error instanceof PhraseApiError && error.status === 404) {
-            throw new PhrasePinMismatchError(
-              "Stored Phrase jobs could not be verified in the pinned project",
-            );
-          }
-          throw error;
-        }
-        assertExpectedJobUid(job, jobUid);
-        assertExpectedJobFilename(job, expectedSourceFilename);
-        return job;
-      }),
+    const settled = await Promise.allSettled(
+      requestedJobs.map((requestedJob) =>
+        this.getPinnedJob(projectUid, requestedJob, expectedSourceFilename),
+      ),
     );
+    const verifiedJobs: PhraseJobPart[] = [];
+    const failures = failuresByLocale ?? new Map<string, unknown>();
+    let firstFailureLocale: string | undefined;
+    for (const [index, result] of settled.entries()) {
+      if (result.status === "fulfilled") {
+        verifiedJobs.push(result.value);
+        continue;
+      }
+      if (result.reason instanceof PhrasePinMismatchError) throw result.reason;
+      const phraseLocale = requestedJobs[index]!.targetLang;
+      if (!failures.has(phraseLocale)) {
+        failures.set(phraseLocale, result.reason);
+        firstFailureLocale ??= phraseLocale;
+      } else if (
+        retryableImportFailure(failures.get(phraseLocale)) &&
+        !retryableImportFailure(result.reason)
+      ) {
+        failures.set(phraseLocale, result.reason);
+      }
+    }
+    if (!failuresByLocale && firstFailureLocale !== undefined)
+      throw failures.get(firstFailureLocale);
+    return verifiedJobs;
   }
 }
 
