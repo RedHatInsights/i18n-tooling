@@ -1,6 +1,6 @@
 # Phrase through the i18n-hub
 
-Use this reference when the Phrase mode is **Hub**. [RedHatInsights/i18n-hub](https://github.com/RedHatInsights/i18n-hub) runs `sync.yml` on weekdays at 06:17 and 14:17 UTC. Hub maintainers can also dispatch it for one consumer. For each registered consumer, it runs the shared submit and reconcile workflows with a short-lived i18n GitHub App token scoped to that consumer. Batch state on `i18n-tms-state` and locale PRs stay in the consumer repository, and the App's bot authors those PRs.
+Use this reference when the Phrase mode is **Hub**. [RedHatInsights/i18n-hub](https://github.com/RedHatInsights/i18n-hub) runs `sync.yml` on weekdays at 06:17 and 14:17 UTC. Hub maintainers can also dispatch it for one consumer. For each registered consumer, it runs the shared submit and reconcile workflows with a short-lived i18n GitHub App token scoped to that consumer. Batch state on each config's state branch and locale PRs stay in the consumer repository, and the App's bot authors those PRs.
 
 ## Consumer change
 
@@ -8,7 +8,7 @@ The consumer change contains the Phrase config and the source catalog. The local
 
 ## Registry entry
 
-Work out one `consumers.json` entry:
+Work out one `consumers.json` entry per Phrase config: one for the app catalog and, with FEO, one for `i18n/phrase-tms-feo.json`.
 
 ```json
 {
@@ -20,9 +20,9 @@ Work out one `consumers.json` entry:
 }
 ```
 
-- `name` is the repository name. `repository` is `RedHatInsights/<name>`, in lowercase letters, digits, and hyphens.
+- `name` is the repository name for the app catalog and `<repository-name>-feo` for FEO. `repository` is `RedHatInsights/<name>`, in lowercase letters, digits, and hyphens.
 - `baseRef` is the branch the hub syncs and bases locale PRs on, normally the default branch.
-- `configPath` is the repository-relative path of `phrase-tms.json`.
+- `configPath` is the repository-relative path of that Phrase config.
 - `phraseFile` equals `sourceCatalog.filename` from the Phrase config exactly, `<name>.<catalog>.en.json` (`ui` or `feo`). The hub requires it to start with `<name>.` and to be unique across entries; check the current `consumers.json` (see [phrase.md](phrase.md#choose-the-mode)). The repository's source catalog path stays unchanged.
 
 The hub reads the config from `baseRef`, so an entry is ready only once the consumer change has merged there.
@@ -49,7 +49,7 @@ In every other case, print the entry in the final report and put "Register in i1
 Add these items to the consumer PR checklist:
 
 - Install the i18n GitHub App on this repository with `contents: write` and `pull-requests: write`. The i18n-hub README names the App and its owners.
-- If a ruleset restricts branch creation, exclude `i18n-tms-state` and `i18n/phrase-*`.
+- If a ruleset restricts branch creation, exclude each config's `state.branch` and `i18n/phrase-*`.
 - Get the hub registration PR reviewed by the hub's Code Owners, and merge it after the consumer PR.
 
 ## Migrate from standalone
@@ -57,11 +57,11 @@ Add these items to the consumer PR checklist:
 Run this upgrade only after the developer selects it. As one unit:
 
 - Delete the consumer's `phrase-submit.yml` and `phrase-reconcile.yml` callers.
-- Keep `phrase-tms.json`, the source catalog, the locale validation caller, and the `i18n-tms-state` branch. The hub continues from the same batch state.
+- Keep `phrase-tms.json`, the source catalog, the locale validation caller, and every state branch. The hub continues from the same batch state.
 - Add the registry entry as above.
 
 Add these items to the consumer PR checklist:
 
 - Merge the consumer PR before the hub PR, so no run comes from both.
 - After the first successful hub run, remove the consumer's Phrase and App secrets, and its Phrase environment if nothing else uses it.
-- Never delete `i18n-tms-state`.
+- Never delete a state branch.

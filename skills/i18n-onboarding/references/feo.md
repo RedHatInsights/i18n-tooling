@@ -17,11 +17,11 @@ Give each translated FEO item a stable ID before extracting. IDs for navigation 
 Run `i18n-pipeline feo extract --template deploy/frontend.yaml --output deploy/locales/translation-template.json` and review the extracted English and generated FormatJS descriptor `description` context. Include the source catalog in the repository change; stage or commit it only if the selected autonomy allows that. The extractor makes context from the field name and stable item key. It includes:
 
 - `bundleSegments.<bundleId>.<segmentId>.navItems.<id>[.routes.<id>...].title` and `.product`;
-- `searchEntries.<id>.title`, `.description`, and `.alt_title`;
+- `searchEntries.<id>.title`, `.description`, and `.alt_title.<slug>`;
 - `serviceTiles.<section>.<group>.<id>.title` and `.description`;
 - `module.defaultDocumentTitle`.
 
-Search `alt_title` values are joined with `|`; no individual English alias may contain `|`. With multiple Frontend objects, keys gain `objects.<metadata.name>.spec.` and the names must be unique. Adding a second Frontend changes catalog IDs, so migrate translations when that happens.
+Each search `alt_title` alias is its own message. Its slug is the English alias lowercased, with each run of characters outside `[a-z0-9]` replaced by `-` and the ends trimmed; an empty or duplicate slug fails extraction. The app rebuilds the alias list in English order, using each alias's translation when present. With multiple Frontend objects, keys gain `objects.<metadata.name>.spec.` and the names must be unique. Adding a second Frontend changes catalog IDs, so migrate translations when that happens.
 
 Add a `feo` entry such as:
 
@@ -31,17 +31,33 @@ Add a `feo` entry such as:
     {
       "template": "deploy/frontend.yaml",
       "source": "deploy/locales/translation-template.json",
-      "locales": {}
+      "locales": {
+        "fr": "deploy/locales/fr.json",
+        "ja": "deploy/locales/ja.json",
+        "ko": "deploy/locales/ko.json",
+        "zh-CN": "deploy/locales/zh-CN.json"
+      }
     }
   ],
   "catalogDirectories": [{ "path": "deploy/locales" }]
 }
 ```
 
-`locales` maps each delivered non-English locale tag to its repository-relative flat JSON file. Start with an empty map when Phrase translations have not arrived; never create locale files by hand. Phrase reconciliation is authoritative for these locale files and overwrites manual edits on the next reconcile.
+`locales` lists every target locale from the wizard up front, each mapped to its repository-relative flat JSON file. Until a locale's file or a `spec.locales` block for it exists, validation skips it with a warning, so the config is complete on first write. Leave the locale files to Phrase; never create them by hand. Phrase reconciliation is authoritative for these locale files and overwrites manual edits on the next reconcile.
 
 ## Translation ownership and inlining
 
-English in `deploy/frontend.yaml` is the source of truth; `translation-template.json` is generated from it and is never edited by hand. Phrase is authoritative for translations and overwrites hand edits to `deploy/locales/<locale>.json` on the next reconcile. `i18n-pipeline feo inline --template deploy/frontend.yaml --source deploy/locales/translation-template.json --target deploy/locales/<locale>.json --locale <locale>` generates only `spec.locales.<locale>` from that file. `feo inline --check` verifies output without writing. The `feo` config flags hand-edited or stale embedded output; it never rewrites the template. Re-running inlining from the Phrase locale file replaces manual edits to that locale's `spec.locales` values. The current reusable Phrase workflow does not run FEO inlining, so document and run `feo inline` after each reconciliation; do not expect Phrase reconciliation to update `spec.locales` itself.
+English in `deploy/frontend.yaml` is the source of truth; `translation-template.json` is generated from it and is never edited by hand. Phrase is authoritative for translations and overwrites hand edits to `deploy/locales/<locale>.json` on the next reconcile. `i18n-pipeline feo inline --template deploy/frontend.yaml --source deploy/locales/translation-template.json --target deploy/locales/<locale>.json --locale <locale>` generates only `spec.locales.<locale>` from that file. `feo inline --check` verifies output without writing. The `feo` config flags hand-edited or stale embedded output; it never rewrites the template. Re-running inlining from the Phrase locale file replaces manual edits to that locale's `spec.locales` values. With the Phrase track, reconciliation writes both the locale file and `spec.locales.<locale>` in one locale PR (see below). Without it, run `feo inline` after each delivery.
 
 If English changes, re-run `feo extract`, resubmit the source through the normal Phrase process, then inline the delivered locale files. Never hand-edit a generated locale JSON file or a `spec.locales` translation.
+
+## Phrase for FEO
+
+When the Phrase track is also selected, the FEO catalog gets its own Phrase config, `i18n/phrase-tms-feo.json`, next to the app's. It follows [phrase.md](phrase.md#config-both-modes), with these differences:
+
+- `state.branch` is `i18n-tms-state-feo`. Every config in a repository needs its own state branch.
+- `sourceCatalog.path` is `deploy/locales/translation-template.json`, and `sourceCatalog.filename` is `<repository-name>.feo.en.json`.
+- `"frontendTemplate": { "path": "deploy/frontend.yaml", "generateSourceCatalog": true }` makes submission extract the source from the YAML and makes reconciliation add `spec.locales.<locale>` to the same PR as the locale file.
+- `targetLocales` uses the same locales as `feo.locales`, with `outputPath` `deploy/locales/<locale>.json`.
+
+Validation keeps `tmsConfig` on the app's config; the `feo` entry already checks the FEO locales. In hub mode, register this config as its own `consumers.json` entry (see [phrase-hub.md](phrase-hub.md#registry-entry)). In standalone mode, add a second pair of callers with this config path. Until the installed FEC schema accepts `spec.locales`, keep this config out of the change and list it as blocked by the FEC upgrade, because its locale PRs would fail that schema.
