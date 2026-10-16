@@ -153,7 +153,7 @@
           },
           "locales": {
             "type": "object",
-            "description": "Map of non-English locale tags to repository-relative flat locale JSON files; this may be empty. Every locale with a spec.locales block in the template must be listed.",
+            "description": "Map of non-English locale tags to repository-relative flat locale JSON files; this may be empty. Every locale with a spec.locales block in the template must be listed. If neither a locale file nor a spec.locales block exists, validation reports the locale as undelivered and skips it with a warning.",
             "propertyNames": {
               "pattern": "^(?!en$)[a-z]{2,3}(?:-[A-Za-z0-9]+)*$",
               "description": "Non-English locale tag accepted by FEO inline."

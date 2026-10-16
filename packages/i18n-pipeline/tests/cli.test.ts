@@ -517,7 +517,7 @@ objects:
     );
   });
 
-  it("shows TMS command help and requires the protected Phrase secret for submission", async () => {
+  it("shows TMS command help and marks the user token as required for submission", async () => {
     const help: string[] = [];
     expect(
       await runCli(["tms", "submit", "--help"], {
@@ -543,6 +543,9 @@ objects:
       }),
     ).toBe(0);
     expect(help[2]).toContain("PHRASE_SERVICE_ACCOUNT_CLIENT_ID");
+    expect(help[2]).toContain("PHRASE_PLATFORM_API_TOKEN");
+    expect(help[2]).toContain("required for submit");
+    expect(help[2]).toContain("reconciliation support remains unverified");
 
     projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-"));
     await mkdir(join(projectRoot, "locales"));

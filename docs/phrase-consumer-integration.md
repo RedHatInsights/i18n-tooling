@@ -1,6 +1,6 @@
 # Phrase consumer integration example
 
-This example shows the consumer-owned boundary around the reusable Phrase workflows. It uses synthetic `fr` data and placeholders only; it does not call Phrase or GitHub. Replace the sample locale and paths to match each application.
+This example shows the consumer-owned boundary around the reusable Phrase workflows. It uses synthetic `fr` data and placeholders only; it does not call Phrase or GitHub. Replace the sample locale and paths to match each application. For hub-owned automation, follow the [hub route in consumer onboarding](consumer-onboarding.md#hub-owned-phrase-automation).
 
 ## Catalog handoff
 
@@ -30,11 +30,15 @@ Without `prebuild` (or an equivalent consumer build step), the Phrase PR changes
 
 The sample aggregation script models the important contract in rbac-ui's existing `translations:datafile` flow: compiled `translations.json` becomes `en`, per-locale files remain separate, and the generated `data.json` contains both without overwriting English. Keep an existing consumer aggregator instead of copying this script if it already provides the same behavior.
 
+## Tracked aggregates
+
+The shared Phrase workflow does not run consumer aggregation scripts. Keep the aggregate current by running the consumer's generator. If the aggregate must be committed on a locale PR, commit it only when accepting that locale as final: a reviewer commit makes the branch ineligible for Phrase re-export, so later corrections are refused and the commit is preserved. Keep aggregate generation in the consumer build while the PR needs re-export.
+
 ## GitHub setup
 
 1. Copy the caller workflows and config into the consumer repository. Replace `<reviewed-commit-sha>` with the reviewed `i18n-tooling` commit SHA and update the Phrase UID, region, language mapping, and output path.
 2. Run the first pilot round trip from a branch as in [consumer onboarding step 6](consumer-onboarding.md#6-pilot-phrase-from-a-feature-branch), then land the caller files on the consumer's default branch with the merge and schedule triggers as in [step 8](consumer-onboarding.md#8-turn-on-the-merge-and-schedule-triggers).
-3. Add the Phrase credential to the named protected environment: `PHRASE_PLATFORM_API_TOKEN`, a Platform API token of a dedicated technical user (a person's token is fine for a pilot). Phrase Service Accounts (`PHRASE_SERVICE_ACCOUNT_CLIENT_ID` and `PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET`) [cannot create jobs](https://support.phrase.com/hc/en-us/articles/29488404284316-Service-Accounts), so submit cannot use them. The CLI chooses by which secret names are set, not by inspecting values; setting both kinds fails the run before any request. Check the `Phrase auth:` line in the job log to confirm which kind was used. Place it in the environment (sample: `phrase-pilot`) and restrict its allowed deployment refs to the default branch. Do not put Phrase credentials in the config.
+3. Add the Phrase credential to the named protected environment: `PHRASE_PLATFORM_API_TOKEN`, a user's Platform API token. A person's token may serve until a dedicated technical user exists; then replace it with the scoped technical-user token. Phrase Service Accounts (`PHRASE_SERVICE_ACCOUNT_CLIENT_ID` and `PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET`) [cannot create jobs](https://support.phrase.com/hc/en-us/articles/29488404284316-Service-Accounts), so submit cannot use them. The CLI chooses by which secret names are set, not by inspecting values; setting both kinds fails the run before any request. Check the `Phrase auth:` line in the job log to confirm which kind was used. Place it in the environment (sample: `phrase-pilot`) and restrict its allowed deployment refs to the default branch. Do not put Phrase credentials in the config.
    Unmapped workflow-call secret names arrive empty, so every caller must map each name it uses in `secrets:`, even when its value is in the protected environment passed as `environment`. The called job's environment secret takes precedence over the mapped caller value. For example:
 
    ```yaml
@@ -42,9 +46,9 @@ The sample aggregation script models the important contract in rbac-ui's existin
      PHRASE_PLATFORM_API_TOKEN: ${{ secrets.PHRASE_PLATFORM_API_TOKEN }}
    ```
 
-   Map any selected service-account or App secret names the same way; never use `secrets: inherit`.
+   Map any App secret names the same way. Service Account reconciliation support remains unverified; never use those secrets for submit. Never use `secrets: inherit`.
 
-4. For App mode, add `APP_CLIENT_ID` and `APP_PRIVATE_KEY` as secrets in the same protected environment and map both names in the caller; GitHub secret names cannot start with `GITHUB_`. Use an App owned by this consumer, never the shared hub App's key. See the [README's full guidance on authentication modes and permissions](../README.md#phrase-tms-round-trip).
+4. For App mode, add `APP_CLIENT_ID` and `APP_PRIVATE_KEY` as secrets in the same protected environment and map both names in the caller; GitHub secret names cannot start with `GITHUB_`. Consumer-owned callers use a consumer-owned App; hub callers use the hub App installed on each target consumer. See the [README's full guidance on authentication modes and permissions](../README.md#phrase-tms-round-trip).
 5. For central-hub repository targeting, pass `repository: owner/name`. The `base-ref` input is used only when `repository` targets another repository; same-repository runs check out the triggering commit. Cross-repository submit requires `base-ref`, while reconcile uses it when supplied and otherwise checks out the target repository's default branch. See the [Phrase workflow guidance](../README.md#phrase-tms-round-trip).
 
 For rbac-ui, the existing source path and `translations:datafile` aggregation fit this shape. The repository currently has no target locale JSON files, `src/locales/data.json` contains only `en`, and `src/locales/locale.ts` is hard-coded to `en`. A Phrase PR can add a locale catalog and the aggregate can include it, but users will not see that locale until rbac-ui wires its runtime locale selection. Keep that runtime change separate if the first pilot only tests catalog delivery.
