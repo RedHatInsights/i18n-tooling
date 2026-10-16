@@ -97,7 +97,16 @@ GitHubPhraseRepository
 
 The state record is keyed by repository, base ref, exact source bytes, and the Phrase-facing settings; the source commit is recorded but not keyed, so unchanged source is never submitted twice. Terminal batches (`completed`, `failed`, `superseded`) leave reconciliation, and each batch is reconciled in isolation. The exact job-create request is never replayed after an ambiguous outcome. Reconciliation verifies the source at its pinned commit and current PR base, validates every downloaded target against the pinned source, and opens one PR per locale. Reconciliation downloads afresh after an interrupted export rather than reusing a possibly consumed one-time request ID.
 
-The reusable submit and reconcile workflows use protected environment secrets for Phrase credentials (a user's Platform API token, preferably a dedicated technical user's; Phrase Service Accounts cannot create jobs, so submit cannot use them) and either the run-scoped `GITHUB_TOKEN` for the calling repository or an optional GitHub App token scoped to the target repository for GitHub operations. App mode reads `APP_CLIENT_ID` and `APP_PRIVATE_KEY` from the bound environment, using credentials for the consumer's own App. They do not auto-merge or add consumer-specific schedules/configuration. In `GITHUB_TOKEN` mode, GitHub may hold `pull_request` checks from a bot-created PR for maintainer approval; generated PRs must not be assumed to have immediately running checks.
+The reusable submit and reconcile workflows use protected environment secrets for Phrase credentials (a user's Platform API token, preferably a dedicated technical user's; Phrase Service Accounts cannot create jobs, so submit cannot use them) and either the run-scoped `GITHUB_TOKEN` for the calling repository or an optional GitHub App token scoped to the target repository for GitHub operations. App mode uses `APP_CLIENT_ID` and `APP_PRIVATE_KEY` for the consumer's own App. They do not auto-merge or add consumer-specific schedules/configuration. In `GITHUB_TOKEN` mode, GitHub may hold `pull_request` checks from a bot-created PR for maintainer approval; generated PRs must not be assumed to have immediately running checks.
+
+An unmapped workflow-call secret name arrives empty, so every caller must map each name it uses, even when its value is in the protected environment passed as `environment`. The called job's environment secret takes precedence over the mapped caller value. For example:
+
+```yaml
+secrets:
+  PHRASE_PLATFORM_API_TOKEN: ${{ secrets.PHRASE_PLATFORM_API_TOKEN }}
+```
+
+Map any selected service-account or `APP_*` names the same way. Never use `secrets: inherit`.
 
 ## Reusable workflow
 

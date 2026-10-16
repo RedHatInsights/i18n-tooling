@@ -27,24 +27,23 @@ on:
         type: string
         default: ""
     secrets:
-      # Secret names are case-insensitive, so this single name covers both an environment
-      # secret in `inputs.environment` and an explicitly mapped repository/organization secret.
+      # The caller must map each name, even when its value is in the protected environment.
       PHRASE_PLATFORM_API_TOKEN:
-        description: A user's Phrase Platform API token; prefer an environment secret over explicit mapping
+        description: The caller must map this name; store the Phrase Platform API token in the protected environment named by the `environment` input
         required: false
       # A Phrase Platform Service Account. Its bot user cannot create jobs, so submit cannot use it.
       # Set both of these instead of PHRASE_PLATFORM_API_TOKEN, never alongside it.
       PHRASE_SERVICE_ACCOUNT_CLIENT_ID:
-        description: Phrase Platform Service Account client ID
+        description: The caller must map this name; store the Service Account client ID in the protected environment named by the `environment` input
         required: false
       PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET:
-        description: Phrase Platform Service Account client secret
+        description: The caller must map this name; store the Service Account client secret in the protected environment named by the `environment` input
         required: false
       APP_CLIENT_ID:
-        description: Normally supplied by the bound environment; set with APP_PRIVATE_KEY for App mode, or leave both unset for GITHUB_TOKEN mode
+        description: The caller must map this name; store the App client ID in the protected environment named by the `environment` input; set both APP_CLIENT_ID and APP_PRIVATE_KEY for App mode or leave both unset for GITHUB_TOKEN mode
         required: false
       APP_PRIVATE_KEY:
-        description: Normally supplied by the bound environment; set with APP_CLIENT_ID for App mode, or leave both unset for GITHUB_TOKEN mode
+        description: The caller must map this name; store the App private key in the protected environment named by the `environment` input; set both APP_CLIENT_ID and APP_PRIVATE_KEY for App mode or leave both unset for GITHUB_TOKEN mode
         required: false
 
 jobs:

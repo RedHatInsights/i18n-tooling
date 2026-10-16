@@ -49,6 +49,15 @@ Create `.github/i18n/catalog-validation.json`:
 
 Copy the callers from [`examples/phrase-consumer`](../examples/phrase-consumer/.github/workflows/).
 
+Unmapped workflow-call secret names arrive empty, so each caller must map every name it uses, even when its value is stored in the protected environment passed as `environment`. Keep credential values in that environment. For example:
+
+```yaml
+secrets:
+  PHRASE_PLATFORM_API_TOKEN: ${{ secrets.PHRASE_PLATFORM_API_TOKEN }}
+```
+
+Map both `APP_*` names for App mode. Never use `secrets: inherit`.
+
 - Pin every `uses:` to a reviewed `i18n-tooling` commit SHA. `validation-config` needs a tooling commit that contains `validate-project`; bump the SHA whenever the plan uses a newer feature.
 - Set top-level `permissions: {}` and grant permissions per job.
 - **Trap: source lint scope.** The default `source-glob` scans all sources. Existing code with imported, dynamic, or inline descriptors fails immediately. Scope `source-glob` to the files that declare messages (rbac-ui: `src/Messages.js`), and track migrating the rest as separate work.
