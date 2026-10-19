@@ -49,6 +49,8 @@ export interface PhraseJobPart {
   targetLang: string;
   workflowLevel: number;
   filename?: string;
+  dateCreated?: string;
+  sourceFileUid?: string;
   lastWorkflowLevel?: number;
   imported?: boolean;
   status?: string;
@@ -56,6 +58,17 @@ export interface PhraseJobPart {
     status: "RUNNING" | "ERROR" | "OK";
     errorMessage?: string | null;
   };
+}
+
+/** A project job-list item may be incomplete; recovery decides whether it is safe to bind. */
+export interface PhraseJobListPart extends Partial<PhraseJobPart> {
+  listingEntry: string;
+}
+
+export interface ListPhraseJobsOptions {
+  filename: string;
+  workflowLevel?: number;
+  pageSize?: number;
 }
 
 export interface PhraseJobCreation {
@@ -304,10 +317,88 @@ export class PhraseClient {
       true,
     );
     const value: unknown = await response.json();
+    if (!isRecord(value) || !nonEmptyString(value.uid)) {
+      throw new PhraseApiError("Phrase returned an invalid job UID", response.status);
+    }
     if (!isPhraseJobPart(value)) {
       throw new PhraseApiError("Phrase returned an invalid job response", response.status);
     }
     return value;
+  }
+
+  async listJobs(projectUid: string, options: ListPhraseJobsOptions): Promise<PhraseJobListPart[]> {
+    if (!nonEmptyString(projectUid)) throw new TypeError("Phrase project UID is required");
+    if (!nonEmptyString(options.filename)) throw new TypeError("Source filename is required");
+    const workflowLevel = options.workflowLevel ?? 1;
+    if (!Number.isInteger(workflowLevel) || workflowLevel < 1 || workflowLevel > 15) {
+      throw new TypeError("Phrase workflow level must be an integer between 1 and 15");
+    }
+    const pageSize = options.pageSize ?? 50;
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 50) {
+      throw new TypeError("Phrase jobs page size must be an integer between 1 and 50");
+    }
+
+    const jobsByUid = new Map<string, PhraseJobListPart>();
+    const jobsWithoutUid: PhraseJobListPart[] = [];
+    for (const notReady of [false, true]) {
+      let pageNumber = 0;
+      let totalPages = 1;
+      while (pageNumber < totalPages) {
+        const query = new URLSearchParams({
+          pageNumber: String(pageNumber),
+          pageSize: String(pageSize),
+          workflowLevel: String(workflowLevel),
+          filename: options.filename,
+        });
+        if (notReady) query.set("notReady", "true");
+        const response = await this.apiRequest(
+          `/api2/v2/projects/${encodeURIComponent(projectUid)}/jobs?${query}`,
+          { method: "GET", headers: { Accept: "application/json" } },
+          true,
+        );
+        let value: unknown;
+        try {
+          value = await response.json();
+        } catch {
+          throw new PhraseApiError(
+            "Phrase returned an unreadable jobs-list response",
+            response.status,
+          );
+        }
+        if (
+          !isRecord(value) ||
+          !Array.isArray(value.content) ||
+          typeof value.totalPages !== "number" ||
+          !Number.isInteger(value.totalPages) ||
+          value.totalPages < 0
+        ) {
+          throw new PhraseApiError(
+            "Phrase returned an invalid jobs-list response",
+            response.status,
+          );
+        }
+        totalPages = value.totalPages;
+        for (const [itemIndex, item] of value.content.entries()) {
+          const job = mapListedJobPart(
+            item,
+            `page ${pageNumber + 1}, item ${itemIndex + 1}`,
+            workflowLevel,
+          );
+          if (typeof job.uid === "string" && job.uid.trim()) {
+            const existing = jobsByUid.get(job.uid);
+            jobsByUid.set(job.uid, {
+              ...existing,
+              ...job,
+              listingEntry: existing?.listingEntry ?? job.listingEntry,
+            });
+          } else {
+            jobsWithoutUid.push(job);
+          }
+        }
+        pageNumber += 1;
+      }
+    }
+    return [...jobsByUid.values(), ...jobsWithoutUid];
   }
 
   async startTargetDownload(projectUid: string, jobUid: string): Promise<string> {
@@ -513,6 +604,8 @@ function isPhraseJobPart(value: unknown): value is PhraseJobPart {
   if (value.lastWorkflowLevel !== undefined && typeof value.lastWorkflowLevel !== "number")
     return false;
   if (value.filename !== undefined && typeof value.filename !== "string") return false;
+  if (value.dateCreated !== undefined && typeof value.dateCreated !== "string") return false;
+  if (value.sourceFileUid !== undefined && typeof value.sourceFileUid !== "string") return false;
   if (value.imported !== undefined && typeof value.imported !== "boolean") return false;
   if (value.status !== undefined && typeof value.status !== "string") return false;
   if (value.importStatus !== undefined) {
@@ -527,4 +620,43 @@ function isPhraseJobPart(value: unknown): value is PhraseJobPart {
     }
   }
   return true;
+}
+
+function mapListedJobPart(
+  value: unknown,
+  listingEntry: string,
+  defaultWorkflowLevel: number,
+): PhraseJobListPart {
+  const job: PhraseJobListPart = { listingEntry, workflowLevel: defaultWorkflowLevel };
+  if (!isRecord(value)) return job;
+
+  if (typeof value.uid === "string") job.uid = value.uid;
+  if (typeof value.targetLang === "string") job.targetLang = value.targetLang;
+  if (typeof value.filename === "string") job.filename = value.filename;
+  if (typeof value.dateCreated === "string") job.dateCreated = value.dateCreated;
+  if (typeof value.sourceFileUid === "string") job.sourceFileUid = value.sourceFileUid;
+  if (typeof value.lastWorkflowLevel === "number") {
+    job.lastWorkflowLevel = value.lastWorkflowLevel;
+  }
+  if (isRecord(value.workflowStep) && typeof value.workflowStep.workflowLevel === "number") {
+    job.workflowLevel = value.workflowStep.workflowLevel;
+  }
+  if (typeof value.imported === "boolean") job.imported = value.imported;
+  if (typeof value.status === "string") job.status = value.status;
+  if (
+    isRecord(value.importStatus) &&
+    ["RUNNING", "ERROR", "OK"].includes(String(value.importStatus.status)) &&
+    (value.importStatus.errorMessage === undefined ||
+      value.importStatus.errorMessage === null ||
+      typeof value.importStatus.errorMessage === "string")
+  ) {
+    job.importStatus = {
+      status: value.importStatus.status as "RUNNING" | "ERROR" | "OK",
+      ...(typeof value.importStatus.errorMessage === "string" ||
+      value.importStatus.errorMessage === null
+        ? { errorMessage: value.importStatus.errorMessage }
+        : {}),
+    };
+  }
+  return job;
 }
