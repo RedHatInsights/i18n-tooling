@@ -107,6 +107,9 @@ describe("Phrase consumer example", () => {
           importStatus: { status: "OK", errorMessage: null },
         };
       },
+      async listJobs() {
+        return [];
+      },
       async startTargetDownload() {
         return "export-1";
       },
@@ -288,6 +291,9 @@ describe("Phrase consumer example", () => {
           imported: true,
           importStatus: { status: "OK", errorMessage: null },
         };
+      },
+      async listJobs() {
+        return [];
       },
       async startTargetDownload() {
         return "export-1";

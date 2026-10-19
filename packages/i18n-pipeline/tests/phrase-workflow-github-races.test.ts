@@ -138,6 +138,10 @@ class FakePhrase implements PhraseClient {
     };
   }
 
+  async listJobs() {
+    return [];
+  }
+
   async startTargetDownload(_projectUid: string, jobUid: string) {
     return `export-${jobUid}`;
   }

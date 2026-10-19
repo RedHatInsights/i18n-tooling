@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CatalogAdapterRegistry } from "../src/index.js";
-import { PhraseApiError, PhraseAuthError } from "../src/phrase-client.js";
+import { PhraseApiError, PhraseAuthError, type PhraseJobListPart } from "../src/phrase-client.js";
 import {
   PhraseBatchStateConflictError,
   PhraseRepositoryError,
@@ -96,6 +96,8 @@ class FakePhrase {
   readonly events: string[];
   readonly callOrder: string[] = [];
   readonly getJobCalls: Array<{ projectUid: string; jobUid: string }> = [];
+  readonly listJobCalls: Array<{ projectUid: string; filename: string; workflowLevel?: number }> =
+    [];
   readonly asyncRequestIds: string[] = [];
   readonly inaccessibleJobUids = new Set<string>();
   readonly targetDownloadJobUids: string[] = [];
@@ -136,6 +138,7 @@ class FakePhrase {
     filename?: string;
     lastWorkflowLevel?: number;
   }> = [{ uid: "job-fr", targetLang: "fr", workflowLevel: 1 }];
+  listedJobs: PhraseJobListPart[] = [];
   targetBytes = new TextEncoder().encode('{"greeting":"Bonjour {name}"}');
   readonly targetBytesByJob = new Map<string, Uint8Array>();
 
@@ -146,7 +149,11 @@ class FakePhrase {
   async createJob(input: { targetLangs: string[]; filename: string }) {
     this.createJobCalls += 1;
     this.events.push("phrase:create");
-    if (this.createError) throw this.createError;
+    if (this.createError) {
+      const error = this.createError;
+      this.createError = undefined;
+      throw error;
+    }
     expect(input.filename).toBe(this.expectedFilename);
     expect(input.targetLangs).toEqual(this.expectedTargetLangs);
     for (const job of this.jobParts) this.knownJobParts.set(job.uid, job);
@@ -199,6 +206,29 @@ class FakePhrase {
       status: this.jobStatuses.get(uid) ?? this.jobStatus,
       importStatus: { status: this.importStatuses.get(uid) ?? this.importStatus },
     };
+  }
+
+  async listJobs(
+    projectUid: string,
+    options: { filename: string; workflowLevel?: number },
+  ): Promise<PhraseJobListPart[]> {
+    this.listJobCalls.push({ projectUid, ...options });
+    for (const job of this.listedJobs) {
+      if (typeof job.uid === "string" && typeof job.targetLang === "string") {
+        this.knownJobParts.set(job.uid, {
+          uid: job.uid,
+          targetLang: job.targetLang,
+          workflowLevel: job.workflowLevel ?? 1,
+          ...(job.filename === undefined ? {} : { filename: job.filename }),
+          ...(job.lastWorkflowLevel === undefined
+            ? {}
+            : { lastWorkflowLevel: job.lastWorkflowLevel }),
+        });
+      }
+    }
+    return structuredClone(
+      this.listedJobs.filter((job) => (job.workflowLevel ?? 1) === (options.workflowLevel ?? 1)),
+    );
   }
 
   async startTargetDownload(projectUid: string, jobUid: string) {
@@ -454,8 +484,14 @@ const phrasePins = {
   expectedProjectUid: "project-uid",
   expectedSourceFilename: "translation-template.json",
 };
+const phraseRepairScope = {
+  projectUid: "project-uid",
+  sourceFilename: "translation-template.json",
+};
 
-function makeJapaneseWorkflowScenario() {
+function makeJapaneseWorkflowScenario(
+  timing: { now?: () => number; sleep?: (milliseconds: number) => Promise<void> } = {},
+) {
   const state = new MemoryStateStore();
   const phrase = new FakePhrase();
   phrase.expectedTargetLangs = ["fr", "ja"];
@@ -474,6 +510,7 @@ function makeJapaneseWorkflowScenario() {
     state,
     repository,
     catalogAdapters: new CatalogAdapterRegistry(),
+    ...timing,
   });
   const input = {
     repository: "example/app",
@@ -484,6 +521,456 @@ function makeJapaneseWorkflowScenario() {
   };
   return { state, phrase, repository, workflow, input };
 }
+
+const PHRASE_JOB_VISIBILITY_GRACE_TEST_MS = 15 * 60 * 1000;
+
+function listedPhraseJob(
+  uid: string,
+  targetLang: string,
+  sourceFileUid: string | undefined,
+  dateCreated: string,
+  workflowLevel = 1,
+): PhraseJobListPart {
+  return {
+    uid,
+    targetLang,
+    workflowLevel,
+    filename: "translation-template.json",
+    dateCreated,
+    listingEntry: `job ${uid}`,
+    ...(sourceFileUid === undefined ? {} : { sourceFileUid }),
+  };
+}
+
+async function storeStuckBatch(
+  scenario: ReturnType<typeof makeJapaneseWorkflowScenario>,
+  phase: "creating" | "unknown",
+  createdAt?: string,
+): Promise<PhraseBatchRecord> {
+  scenario.phrase.createError = new PhraseApiError("Phrase API returned HTTP 500", 500, true);
+  await scenario.workflow.submit(scenario.input).catch(() => undefined);
+  const [stored] = await scenario.state.listBatches();
+  if (!stored) throw new Error("Expected the interrupted submission to store a batch");
+  const record = structuredClone(stored.record);
+  record.phase = phase;
+  record.jobs = [];
+  record.importAsyncRequestId = undefined;
+  record.failureReason = "submission outcome was not saved";
+  if (createdAt) record.createdAt = createdAt;
+  scenario.state.records.set(record.key, { record, revision: stored.revision });
+  return record;
+}
+
+describe("Phrase stuck batch recovery", () => {
+  it.each([
+    ["creating", true],
+    ["unknown", false],
+  ] as const)(
+    "binds a matching creation-time group with different source file UIDs for a %s batch",
+    async (phase, pinned) => {
+      const clock = Date.parse("2026-10-19T10:00:00Z");
+      const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+      scenario.input.config = {
+        ...scenario.input.config,
+        targetLocales: [
+          { phraseLocale: "fr", repositoryLocale: "fr-CA", outputPath: "locales/fr-CA.json" },
+          { phraseLocale: "ja", repositoryLocale: "ja-JP", outputPath: "locales/ja-JP.json" },
+        ],
+      };
+      const stuck = await storeStuckBatch(scenario, phase, new Date(clock).toISOString());
+      const createdAt = new Date(clock - 30_000).toISOString();
+      scenario.phrase.listedJobs = [
+        listedPhraseJob("recovered-fr", "fr", "source-file-a", createdAt),
+        listedPhraseJob("recovered-ja", "ja", "source-file-b", "2026-10-19T11:59:30+02:00"),
+      ];
+      scenario.phrase.jobStatus = "COMPLETED";
+
+      const recovered = await scenario.workflow.submit(
+        pinned ? { ...scenario.input, ...phrasePins } : scenario.input,
+      );
+      const stored = await scenario.state.readBatch(stuck.key);
+
+      expect(recovered.key).toBe(stuck.key);
+      expect(recovered.phase).toBe("ready");
+      expect(recovered.jobs.map(({ uid, targetLang }) => [uid, targetLang])).toEqual([
+        ["recovered-fr", "fr"],
+        ["recovered-ja", "ja"],
+      ]);
+      expect(recovered.importAsyncRequestId).toBeUndefined();
+      expect(recovered.failureReason).toBeUndefined();
+      expect(stored?.record.phase).toBe("ready");
+      expect(scenario.phrase.asyncRequestIds).toEqual([]);
+      expect(scenario.phrase.listJobCalls).toEqual([
+        {
+          projectUid: "project-uid",
+          filename: "translation-template.json",
+          workflowLevel: 1,
+        },
+        {
+          projectUid: "project-uid",
+          filename: "translation-template.json",
+          workflowLevel: 2,
+        },
+      ]);
+      expect(scenario.phrase.getJobCalls.map(({ jobUid }) => jobUid)).toEqual(
+        expect.arrayContaining(["recovered-fr", "recovered-ja"]),
+      );
+    },
+  );
+
+  it("binds a creation-time group when sourceFileUid is absent", async () => {
+    const clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+    const stuck = await storeStuckBatch(scenario, "unknown", new Date(clock).toISOString());
+    const createdAt = new Date(clock - 30_000).toISOString();
+    scenario.phrase.listedJobs = [
+      listedPhraseJob("recovered-fr", "fr", undefined, createdAt),
+      listedPhraseJob("recovered-ja", "ja", undefined, createdAt),
+    ];
+
+    const recovered = await scenario.workflow.submit({ ...scenario.input, ...phrasePins });
+
+    expect(recovered.key).toBe(stuck.key);
+    expect(recovered.phase).toBe("ready");
+    expect(recovered.jobs.map(({ uid }) => uid)).toEqual(["recovered-fr", "recovered-ja"]);
+  });
+
+  it("binds all workflow levels and reconciles from the final-step job parts", async () => {
+    const clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+    const stuck = await storeStuckBatch(scenario, "creating", new Date(clock).toISOString());
+    const createdAt = new Date(clock).toISOString();
+    scenario.phrase.listedJobs = [
+      listedPhraseJob("step-one-fr", "fr", "source-a", createdAt),
+      listedPhraseJob("step-one-ja", "ja", "source-b", createdAt),
+      listedPhraseJob("step-two-fr", "fr", "source-c", createdAt, 2),
+      listedPhraseJob("step-two-ja", "ja", "source-d", createdAt, 2),
+    ];
+    scenario.phrase.jobStatus = "COMPLETED";
+
+    const results = await scenario.workflow.reconcile({ repairScope: phraseRepairScope });
+    const repaired = await scenario.state.readBatch(stuck.key);
+
+    expect(results.map(({ phraseLocale, phase }) => [phraseLocale, phase])).toEqual([
+      ["fr", "pr-created"],
+      ["ja", "pr-created"],
+    ]);
+    expect(repaired?.record.phase).toBe("ready");
+    expect(repaired?.record.jobs.map(({ uid, workflowLevel }) => [uid, workflowLevel])).toEqual([
+      ["step-one-fr", 1],
+      ["step-one-ja", 1],
+      ["step-two-fr", 2],
+      ["step-two-ja", 2],
+    ]);
+    expect(scenario.phrase.listJobCalls.map(({ workflowLevel }) => workflowLevel)).toEqual([
+      1, 2, 3,
+    ]);
+    expect(scenario.phrase.targetDownloadJobUids).toEqual(["step-two-fr", "step-two-ja"]);
+  });
+
+  it("fails closed when a creation-time group has inconsistent locale sets across levels", async () => {
+    const clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+    const stuck = await storeStuckBatch(scenario, "unknown", new Date(clock).toISOString());
+    const createdAt = new Date(clock).toISOString();
+    scenario.phrase.listedJobs = [
+      listedPhraseJob("step-one-fr", "fr", "source-a", createdAt),
+      listedPhraseJob("step-one-ja", "ja", "source-b", createdAt),
+      listedPhraseJob("step-two-fr", "fr", "source-c", createdAt, 2),
+    ];
+    const before = await scenario.state.readBatch(stuck.key);
+
+    const results = await scenario.workflow.reconcile({ repairScope: phraseRepairScope });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      batchKey: stuck.key,
+      phase: "failed",
+      reason: expect.stringContaining("no creation-time group matches its pending locales"),
+    });
+    expect(await scenario.state.readBatch(stuck.key)).toEqual(before);
+    expect(scenario.phrase.createJobCalls).toBe(1);
+  });
+
+  it("reports a young empty batch as retrying without changing its record", async () => {
+    const clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+    const stuck = await storeStuckBatch(scenario, "unknown", new Date(clock).toISOString());
+    const before = await scenario.state.readBatch(stuck.key);
+
+    const results = await scenario.workflow.reconcile({
+      ...phrasePins,
+      repairScope: phraseRepairScope,
+    });
+
+    expect(results).toEqual([
+      {
+        batchKey: stuck.key,
+        phase: "retrying",
+        reason: "Phrase job may still be appearing in Phrase; the next run will check again",
+      },
+    ]);
+    expect(await scenario.state.readBatch(stuck.key)).toEqual(before);
+  });
+
+  it("does not query Phrase for a stuck batch without an explicit repair scope", async () => {
+    const clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+    const stuck = await storeStuckBatch(scenario, "unknown", new Date(clock).toISOString());
+    scenario.phrase.listedJobs = [
+      listedPhraseJob("recovered-fr", "fr", "source-file-a", new Date(clock).toISOString()),
+      listedPhraseJob("recovered-ja", "ja", "source-file-a", new Date(clock).toISOString()),
+    ];
+    const before = await scenario.state.readBatch(stuck.key);
+
+    const results = await scenario.workflow.reconcile();
+
+    expect(results).toEqual([]);
+    expect(scenario.phrase.listJobCalls).toEqual([]);
+    expect(await scenario.state.readBatch(stuck.key)).toEqual(before);
+  });
+
+  it("voids only when there are zero candidate jobs and submits the next attempt", async () => {
+    const clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+    const stuck = await storeStuckBatch(
+      scenario,
+      "unknown",
+      new Date(clock - PHRASE_JOB_VISIBILITY_GRACE_TEST_MS - 1).toISOString(),
+    );
+    scenario.phrase.jobStatus = "COMPLETED";
+
+    const submitted = await scenario.workflow.submit(scenario.input);
+    const voided = await scenario.state.readBatch(stuck.key);
+
+    expect(submitted.key).not.toBe(stuck.key);
+    expect(submitted.attempt).toBe(1);
+    expect(submitted.phase).toBe("ready");
+    expect(voided?.record).toMatchObject({
+      phase: "failed",
+      failureReason: "No Phrase job was created for this batch; voided after 15 minutes",
+      voidedEmptySubmission: true,
+    });
+    expect(scenario.phrase.createJobCalls).toBe(2);
+  });
+
+  it("does not auto-advance on the void reason when real jobs have no void marker", async () => {
+    const scenario = makeJapaneseWorkflowScenario();
+    const submitted = await scenario.workflow.submit(scenario.input);
+    const stored = scenario.state.records.get(submitted.key)!;
+    stored.record.phase = "failed";
+    stored.record.failureReason =
+      "No Phrase job was created for this batch; voided after 15 minutes";
+    delete stored.record.voidedEmptySubmission;
+
+    const error = await scenario.workflow.submit(scenario.input).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      name: "PhraseWorkflowError",
+      message: expect.stringContaining("rerun with --retry-failed"),
+    });
+    expect(stored.record.jobs.map(({ uid }) => uid)).toEqual(["job-fr", "job-ja"]);
+    expect(scenario.phrase.createJobCalls).toBe(1);
+  });
+
+  it("marks an old empty batch failed during reconcile", async () => {
+    const clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+    const stuck = await storeStuckBatch(
+      scenario,
+      "creating",
+      new Date(clock - PHRASE_JOB_VISIBILITY_GRACE_TEST_MS - 1).toISOString(),
+    );
+
+    const results = await scenario.workflow.reconcile({
+      ...phrasePins,
+      repairScope: phraseRepairScope,
+    });
+    const stored = await scenario.state.readBatch(stuck.key);
+
+    expect(results).toHaveLength(2);
+    expect(results.every((result) => result.phase === "failed")).toBe(true);
+    expect(results.every((result) => result.reason === stored?.record.failureReason)).toBe(true);
+    expect(stored?.record).toMatchObject({
+      phase: "failed",
+      failureReason: "No Phrase job was created for this batch; voided after 15 minutes",
+      voidedEmptySubmission: true,
+    });
+    expect(scenario.phrase.createJobCalls).toBe(1);
+
+    const submitted = await scenario.workflow.submit(scenario.input);
+
+    expect(submitted.key).not.toBe(stuck.key);
+    expect(submitted.attempt).toBe(1);
+    expect(scenario.phrase.createJobCalls).toBe(2);
+  });
+
+  it("fails closed on multiple creation-time groups and lists every candidate", async () => {
+    const clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+    const stuck = await storeStuckBatch(scenario, "unknown", new Date(clock).toISOString());
+    const firstCreatedAt = new Date(clock).toISOString();
+    const secondCreatedAt = new Date(clock + 1000).toISOString();
+    scenario.phrase.listedJobs = [
+      listedPhraseJob("fr-a", "fr", "source-a", firstCreatedAt),
+      listedPhraseJob("ja-a", "ja", "source-b", firstCreatedAt),
+      listedPhraseJob("fr-b", "fr", "source-a", secondCreatedAt),
+      listedPhraseJob("ja-b", "ja", "source-b", secondCreatedAt),
+    ];
+    const before = await scenario.state.readBatch(stuck.key);
+
+    const error = await scenario.workflow.submit(scenario.input).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      name: "PhraseAmbiguousRecoveryError",
+      message: expect.stringContaining(
+        `creation time ${firstCreatedAt}: uid fr-a, targetLang fr, dateCreated ${firstCreatedAt}`,
+      ),
+    });
+    expect(error).toMatchObject({
+      message: expect.stringContaining(`uid ja-a, targetLang ja, dateCreated ${firstCreatedAt}`),
+    });
+    expect(error).toMatchObject({
+      message: expect.stringContaining(
+        `creation time ${secondCreatedAt}: uid fr-b, targetLang fr, dateCreated ${secondCreatedAt}`,
+      ),
+    });
+    expect(error).toMatchObject({
+      message: expect.stringContaining(`uid ja-b, targetLang ja, dateCreated ${secondCreatedAt}`),
+    });
+    expect(error).toMatchObject({
+      message: expect.stringContaining(
+        "Move the jobs that do not belong to this batch to the Phrase recycle bin, then rerun.",
+      ),
+    });
+    expect(await scenario.state.readBatch(stuck.key)).toEqual(before);
+    expect(scenario.phrase.createJobCalls).toBe(1);
+  });
+
+  it("excludes a creation-time group whose UIDs are claimed by another stored batch", async () => {
+    const clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+    const stuck = await storeStuckBatch(scenario, "unknown", new Date(clock).toISOString());
+    const createdAt = new Date(clock).toISOString();
+    scenario.phrase.listedJobs = [
+      listedPhraseJob("claimed-fr", "fr", "source-file-a", createdAt),
+      listedPhraseJob("claimed-ja", "ja", "source-file-b", createdAt),
+    ];
+    const other = structuredClone(stuck);
+    other.key = "other-batch";
+    other.phase = "failed";
+    other.jobs = [
+      { uid: "claimed-fr", targetLang: "fr", workflowLevel: 1 },
+      { uid: "claimed-ja", targetLang: "ja", workflowLevel: 1 },
+    ];
+    scenario.state.records.set(other.key, { record: other, revision: "1" });
+    const before = await scenario.state.readBatch(stuck.key);
+
+    const results = await scenario.workflow.reconcile({
+      ...phrasePins,
+      repairScope: phraseRepairScope,
+    });
+
+    expect(results).toContainEqual(
+      expect.objectContaining({ batchKey: stuck.key, phase: "retrying" }),
+    );
+    expect(await scenario.state.readBatch(stuck.key)).toEqual(before);
+  });
+
+  it.each([
+    ["partial locale group", ["fr"]],
+    ["extra-locale group", ["fr", "ja", "es"]],
+  ] as const)("does not void an old batch with %s candidates", async (_caseName, targetLangs) => {
+    const clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+    const stuck = await storeStuckBatch(
+      scenario,
+      "creating",
+      new Date(clock - PHRASE_JOB_VISIBILITY_GRACE_TEST_MS - 1).toISOString(),
+    );
+    const createdAt = new Date(clock).toISOString();
+    scenario.phrase.listedJobs = targetLangs.map((targetLang, index) =>
+      listedPhraseJob(
+        `candidate-${targetLang}-${index}`,
+        targetLang,
+        `source-file-${index}`,
+        createdAt,
+      ),
+    );
+    const before = await scenario.state.readBatch(stuck.key);
+
+    const results = await scenario.workflow.reconcile({
+      ...phrasePins,
+      repairScope: phraseRepairScope,
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      batchKey: stuck.key,
+      phase: "failed",
+      reason: expect.stringContaining("Phrase jobs exist for this batch"),
+    });
+    expect(await scenario.state.readBatch(stuck.key)).toEqual(before);
+    expect(scenario.phrase.createJobCalls).toBe(1);
+  });
+
+  it("leaves a young batch retrying when all listed jobs predate the clock-skew window", async () => {
+    const clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+    const stuck = await storeStuckBatch(scenario, "creating", new Date(clock).toISOString());
+    const createdAt = new Date(clock - 2 * 60 * 1000 - 1).toISOString();
+    scenario.phrase.listedJobs = [
+      listedPhraseJob("candidate-fr", "fr", "source-file-a", createdAt),
+      listedPhraseJob("candidate-ja", "ja", "source-file-b", createdAt),
+    ];
+    const before = await scenario.state.readBatch(stuck.key);
+
+    const results = await scenario.workflow.reconcile({
+      ...phrasePins,
+      repairScope: phraseRepairScope,
+    });
+
+    expect(results).toContainEqual(
+      expect.objectContaining({ batchKey: stuck.key, phase: "retrying" }),
+    );
+    expect(await scenario.state.readBatch(stuck.key)).toEqual(before);
+  });
+
+  it.each([
+    ["uid", (job: PhraseJobListPart) => ({ ...job, uid: undefined })],
+    ["targetLang", (job: PhraseJobListPart) => ({ ...job, targetLang: undefined })],
+    ["dateCreated", (job: PhraseJobListPart) => ({ ...job, dateCreated: "not-a-timestamp" })],
+  ] as const)(
+    "fails closed when a candidate has missing or invalid %s metadata",
+    async (field, edit) => {
+      const clock = Date.parse("2026-10-19T10:00:00Z");
+      const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+      const stuck = await storeStuckBatch(scenario, "unknown", new Date(clock).toISOString());
+      scenario.phrase.listedJobs = [
+        edit(listedPhraseJob("candidate-fr", "fr", undefined, new Date(clock).toISOString())),
+      ];
+      const before = await scenario.state.readBatch(stuck.key);
+
+      const error = await scenario.workflow
+        .submit(scenario.input)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ name: "PhraseAmbiguousRecoveryError" });
+      expect(error).toMatchObject({ message: expect.stringContaining("job candidate-fr") });
+      expect(error).toMatchObject({
+        message: expect.stringContaining(
+          field === "uid"
+            ? "uid <missing>"
+            : field === "targetLang"
+              ? "targetLang <missing>"
+              : "dateCreated not-a-timestamp",
+        ),
+      });
+      expect(await scenario.state.readBatch(stuck.key)).toEqual(before);
+      expect(scenario.phrase.createJobCalls).toBe(1);
+    },
+  );
+});
 
 async function submitWithJapaneseImportRetrying(
   scenario: ReturnType<typeof makeJapaneseWorkflowScenario>,
@@ -546,7 +1033,7 @@ describe("PhraseWorkflow submission", () => {
     expect(phrase.createJobCalls).toBe(1);
   });
 
-  it("verifies created jobs against pins before persisting their metadata", async () => {
+  it("saves created jobs before rejecting an immediate pinned filename mismatch", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
     phrase.jobFilenamesByUid.set("job-fr", "other-consumer.json");
@@ -570,15 +1057,171 @@ describe("PhraseWorkflow submission", () => {
     ).rejects.toThrow('expected "translation-template.json", actual "other-consumer.json"');
 
     const [stored] = await state.listBatches();
-    expect(stored?.record.phase).toBe("creating");
-    expect(stored?.record.jobs).toEqual([]);
-    expect(stored?.record.importAsyncRequestId).toBeUndefined();
-    expect(state.writes).toBe(1);
+    expect(stored?.record.phase).toBe("importing");
+    expect(stored?.record.jobs).toMatchObject([{ uid: "job-fr", targetLang: "fr" }]);
+    expect(stored?.record.importAsyncRequestId).toBe("import-1");
+    expect(state.writes).toBe(2);
     expect(phrase.callOrder).toEqual(["get:project-uid:job-fr"]);
     expect(phrase.asyncRequestIds).toEqual([]);
   });
 
-  it("refuses a pinned submit resume with another project's job UIDs without writing state", async () => {
+  it("treats an invalid returned pinned job UID as an immediate pin mismatch", async () => {
+    const scenario = makeJapaneseWorkflowScenario();
+    scenario.phrase.getJobErrors.set(
+      "job-fr",
+      new PhraseApiError("Phrase returned an invalid job UID", 200),
+    );
+
+    const error = await scenario.workflow
+      .submit({ ...scenario.input, ...phrasePins })
+      .catch((caught: unknown) => caught);
+    const [stored] = await scenario.state.listBatches();
+
+    expect(error).toMatchObject({ name: "PhrasePinMismatchError" });
+    expect(scenario.phrase.getJobCalls.filter(({ jobUid }) => jobUid === "job-fr")).toHaveLength(1);
+    expect(stored?.record).toMatchObject({
+      phase: "importing",
+      jobs: [{ uid: "job-fr" }, { uid: "job-ja" }],
+      importAsyncRequestId: "import-1",
+    });
+  });
+
+  it("retries a fresh pinned job lookup after a brief 404", async () => {
+    let clock = Date.parse("2026-10-19T10:00:00Z");
+    const delays: number[] = [];
+    const scenario = makeJapaneseWorkflowScenario({
+      now: () => clock,
+      sleep: async (milliseconds) => {
+        delays.push(milliseconds);
+        clock += milliseconds;
+      },
+    });
+    scenario.phrase.jobStatus = "COMPLETED";
+    scenario.phrase.getJobErrorOnCall = (_projectUid, jobUid, callNumber) =>
+      jobUid === "job-fr" && callNumber === 1
+        ? new PhraseApiError("Phrase API returned HTTP 404", 404)
+        : undefined;
+
+    const submitted = await scenario.workflow.submit({ ...scenario.input, ...phrasePins });
+
+    expect(submitted.phase).toBe("ready");
+    expect(submitted.jobs.map(({ uid }) => uid)).toEqual(["job-fr", "job-ja"]);
+    expect(delays).toEqual([15_000]);
+    expect(scenario.phrase.createJobCalls).toBe(1);
+  });
+
+  it("saves jobs after repeated fresh 404s and resumes within the visibility grace period", async () => {
+    let clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({
+      now: () => clock,
+      sleep: async (milliseconds) => {
+        clock += milliseconds;
+      },
+    });
+    scenario.phrase.inaccessibleJobUids.add("job-fr");
+
+    const error = await scenario.workflow
+      .submit({ ...scenario.input, ...phrasePins })
+      .catch((caught: unknown) => caught);
+    const [stored] = await scenario.state.listBatches();
+
+    expect(error).toBeInstanceOf(PhraseWorkflowError);
+    expect(error).toMatchObject({
+      name: "PhraseJobVisibilityError",
+      message: "Phrase has not yet exposed the new jobs; the next run continues this batch",
+    });
+    expect(stored?.record).toMatchObject({
+      phase: "importing",
+      jobs: [{ uid: "job-fr" }, { uid: "job-ja" }],
+      importAsyncRequestId: "import-1",
+    });
+    expect(scenario.phrase.getJobCalls.filter(({ jobUid }) => jobUid === "job-fr")).toHaveLength(5);
+
+    scenario.phrase.inaccessibleJobUids.delete("job-fr");
+    const resumed = await scenario.workflow.submit({ ...scenario.input, ...phrasePins });
+
+    expect(resumed.key).toBe(stored?.record.key);
+    expect(resumed.phase).toBe("ready");
+    expect(scenario.phrase.createJobCalls).toBe(1);
+  });
+
+  it("returns the same retryable visibility error for pinned and unpinned fresh 404s", async () => {
+    const errors: unknown[] = [];
+    for (const pinned of [true, false]) {
+      let clock = Date.parse("2026-10-19T10:00:00Z");
+      const scenario = makeJapaneseWorkflowScenario({
+        now: () => clock,
+        sleep: async (milliseconds) => {
+          clock += milliseconds;
+        },
+      });
+      scenario.phrase.inaccessibleJobUids.add("job-fr");
+
+      const error = await scenario.workflow
+        .submit(pinned ? { ...scenario.input, ...phrasePins } : scenario.input)
+        .catch((caught: unknown) => caught);
+      const [stored] = await scenario.state.listBatches();
+      errors.push(error);
+
+      expect(error).toMatchObject({
+        name: "PhraseJobVisibilityError",
+        message: "Phrase has not yet exposed the new jobs; the next run continues this batch",
+      });
+      expect(stored?.record).toMatchObject({
+        phase: "importing",
+        jobs: [{ uid: "job-fr" }, { uid: "job-ja" }],
+      });
+    }
+
+    expect(errors.map((error) => (error instanceof Error ? error.message : String(error)))).toEqual(
+      [
+        "Phrase has not yet exposed the new jobs; the next run continues this batch",
+        "Phrase has not yet exposed the new jobs; the next run continues this batch",
+      ],
+    );
+  });
+
+  it("keeps a stored pinned 404 as a mismatch after the visibility grace period", async () => {
+    let clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+    const submitted = await submitWithJapaneseImportRetrying(scenario);
+    expect(submitted.phase).toBe("importing");
+    scenario.phrase.getJobErrors.delete("job-ja");
+    clock += PHRASE_JOB_VISIBILITY_GRACE_TEST_MS + 1;
+    scenario.phrase.inaccessibleJobUids.add("job-fr");
+
+    const results = await scenario.workflow.reconcile(phrasePins);
+
+    expect(results).toEqual([
+      {
+        batchKey: submitted.key,
+        phase: "failed",
+        reason: "Stored Phrase jobs could not be verified in the pinned project",
+      },
+    ]);
+  });
+
+  it("reports a young ready batch's pinned 404 as retrying", async () => {
+    const clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+    const submitted = await scenario.workflow.submit({ ...scenario.input, ...phrasePins });
+    expect(submitted.phase).toBe("ready");
+    scenario.phrase.inaccessibleJobUids.add("job-fr");
+
+    const results = await scenario.workflow.reconcile(phrasePins);
+
+    expect(results).toContainEqual({
+      batchKey: submitted.key,
+      phraseLocale: "fr",
+      phase: "retrying",
+      reason: "Phrase has not yet exposed the new jobs; the next run continues this batch",
+    });
+    expect(results).toContainEqual(
+      expect.objectContaining({ batchKey: submitted.key, phraseLocale: "ja", phase: "pr-created" }),
+    );
+  });
+
+  it("treats a young pinned submit-resume 404 as retryable within the pinned project", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
     const workflow = new PhraseWorkflow({
@@ -613,7 +1256,7 @@ describe("PhraseWorkflow submission", () => {
         expectedProjectUid: "project-uid",
         expectedSourceFilename: "translation-template.json",
       }),
-    ).rejects.toThrow("Stored Phrase jobs could not be verified in the pinned project");
+    ).rejects.toThrow("Phrase has not yet exposed the new jobs; the next run continues this batch");
 
     expect(phrase.getJobCalls).toEqual([
       { projectUid: "project-uid", jobUid: "other-consumer-job" },
@@ -1076,7 +1719,7 @@ describe("PhraseWorkflow submission", () => {
     ).toContain("ようこそ");
   });
 
-  it("fails a permanent import lookup after a transient failure without affecting siblings", async () => {
+  it("keeps a young 404 import lookup retrying without affecting siblings", async () => {
     const localesConfig: PhraseWorkflowConfig = {
       ...config,
       targetLocales: [
@@ -1119,15 +1762,14 @@ describe("PhraseWorkflow submission", () => {
     expect(submitted.phase).toBe("importing");
     expect(submitted.locales.fr).toEqual({ phase: "pending" });
     expect(results.map(({ phraseLocale, phase }) => [phraseLocale, phase])).toEqual([
-      ["fr", "failed"],
+      ["fr", "retrying"],
       ["ja", "pr-created"],
     ]);
-    expect(results[0]?.reason).toBe("Phrase API returned HTTP 404");
-    expect(stored?.record.phase).toBe("ready");
-    expect(stored?.record.locales.fr).toMatchObject({
-      phase: "failed",
-      failureReason: "Phrase API returned HTTP 404",
-    });
+    expect(results[0]?.reason).toBe(
+      "Phrase has not yet exposed the new jobs; the next run continues this batch",
+    );
+    expect(stored?.record.phase).toBe("importing");
+    expect(stored?.record.locales.fr).toEqual({ phase: "pending" });
     expect(repository.pullRequests.map(({ path }) => path)).toEqual(["locales/ja.json"]);
   });
 
@@ -1351,7 +1993,9 @@ describe("PhraseWorkflow submission", () => {
       ["fr", "retrying"],
       ["ja", "pr-created"],
     ]);
-    expect(retryResults[0]?.reason).toContain("Phrase API returned HTTP 404");
+    expect(retryResults[0]?.reason).toBe(
+      "Phrase has not yet exposed the new jobs; the next run continues this batch",
+    );
     expect(repository.pullRequests.map(({ path }) => path)).toEqual([
       "locales/fr.json",
       "locales/ja.json",
@@ -1646,7 +2290,9 @@ describe("PhraseWorkflow submission", () => {
     await expect(workflow.submit(input)).rejects.toThrow("connection reset");
     const [stored] = await state.listBatches();
     expect(stored?.record.phase).toBe("unknown");
-    await expect(workflow.submit(input)).rejects.toThrow(/unknown Phrase submission outcome/i);
+    await expect(workflow.submit(input)).rejects.toThrow(
+      "Phrase job may still be appearing in Phrase; the next run will check again",
+    );
     expect(phrase.createJobCalls).toBe(1);
   });
 
@@ -2237,7 +2883,9 @@ describe("PhraseWorkflow submission", () => {
       ["fr", "retrying"],
       ["ja", "pr-created"],
     ]);
-    expect(results[0]?.reason).toContain("Phrase API returned HTTP 404");
+    expect(results[0]?.reason).toBe(
+      "Phrase has not yet exposed the new jobs; the next run continues this batch",
+    );
     expect(repository.commitCount(frBranch!)).toBe(1);
     expect(repository.commitCount(jaBranch!)).toBe(2);
   });
@@ -3532,7 +4180,7 @@ describe("PhraseWorkflow submission", () => {
         batchKey: corrupt.key,
         phraseLocale: "fr",
         phase: "retrying",
-        reason: "Phrase API returned HTTP 404",
+        reason: "Phrase has not yet exposed the new jobs; the next run continues this batch",
       },
     ]);
 
@@ -3978,7 +4626,7 @@ describe("PhraseWorkflow submission", () => {
     expect(repository.pullRequests.map(({ path }) => path)).toEqual(["locales/ja.json"]);
   });
 
-  it("treats a pinned finishImport 404 as a batch failure before creating a sibling PR", async () => {
+  it("treats a young pinned finishImport 404 as retrying while delivering healthy locales", async () => {
     const scenario = makeJapaneseWorkflowScenario();
     const submitted = await submitWithJapaneseImportRetrying(scenario);
     expect(submitted.phase).toBe("importing");
@@ -3993,15 +4641,15 @@ describe("PhraseWorkflow submission", () => {
 
     const results = await scenario.workflow.reconcile(phrasePins);
 
-    expect(results).toEqual([
-      {
-        batchKey: submitted.key,
-        phase: "failed",
-        reason: "Stored Phrase jobs could not be verified in the pinned project",
-      },
+    expect(results.map(({ phraseLocale, phase }) => [phraseLocale, phase])).toEqual([
+      ["fr", "retrying"],
+      ["ja", "pr-created"],
     ]);
-    expect(scenario.phrase.targetDownloadCalls).toBe(0);
-    expect(scenario.repository.pullRequests).toHaveLength(0);
+    expect(results[0]?.reason).toBe(
+      "Phrase has not yet exposed the new jobs; the next run continues this batch",
+    );
+    expect(scenario.phrase.targetDownloadCalls).toBe(1);
+    expect(scenario.repository.pullRequests.map(({ path }) => path)).toEqual(["locales/ja.json"]);
   });
 
   it("preserves an open locale PR when pinned verification returns a permanent error", async () => {
@@ -4282,15 +4930,17 @@ describe("PhraseWorkflow submission", () => {
         results.map(({ phraseLocale, phase }) => [phraseLocale ?? "batch", phase]);
 
       if (error instanceof PhraseApiError && error.status === 404) {
-        expect(phases(pinned.results)).toEqual([["batch", "failed"]]);
-        expect(pinned.results[0]?.reason).toBe(
-          "Stored Phrase jobs could not be verified in the pinned project",
-        );
-        expect(pinned.pullRequestPaths).toEqual([]);
-        expect(phases(unpinned.results)).toEqual([
-          ["fr", "failed"],
+        const expected = [
+          ["fr", "retrying"],
           ["ja", "pr-created"],
-        ]);
+        ];
+        expect(phases(pinned.results)).toEqual(expected);
+        expect(pinned.results[0]?.reason).toBe(
+          "Phrase has not yet exposed the new jobs; the next run continues this batch",
+        );
+        expect(phases(unpinned.results)).toEqual(expected);
+        expect(unpinned.results[0]?.reason).toBe(pinned.results[0]?.reason);
+        expect(pinned.pullRequestPaths).toEqual(["locales/ja.json"]);
         expect(unpinned.pullRequestPaths).toEqual(["locales/ja.json"]);
       } else {
         const expected = [
@@ -4370,10 +5020,10 @@ describe("PhraseWorkflow submission", () => {
       expect(phrase.getJobCalls.map(({ jobUid }) => jobUid)).toEqual(["job-fr", "job-ja-retry"]);
       expect(phrase.asyncRequestIds).toEqual([]);
       expect(phrase.targetDownloadCalls).toBe(downloadsBeforeRetry);
-      expect(state.writes).toBe(writesBeforeRetry + 1);
-      expect(retry?.record.phase).toBe("creating");
-      expect(retry?.record.jobs.map(({ uid }) => uid)).toEqual(["job-fr"]);
-      expect(retry?.record.importAsyncRequestId).toBeUndefined();
+      expect(state.writes).toBe(writesBeforeRetry + 2);
+      expect(retry?.record.phase).toBe("importing");
+      expect(retry?.record.jobs.map(({ uid }) => uid)).toEqual(["job-fr", "job-ja-retry"]);
+      expect(retry?.record.importAsyncRequestId).toBe("import-1");
     },
   );
 
@@ -4532,13 +5182,13 @@ describe("PhraseWorkflow submission", () => {
     expect(results).toContainEqual({
       batchKey: submitted.key,
       phraseLocale: "fr",
-      phase: "failed",
-      reason: "Phrase API returned HTTP 404",
+      phase: "retrying",
+      reason: "Phrase has not yet exposed the new jobs; the next run continues this batch",
     });
     expect(failed?.record.locales.fr).toMatchObject({
-      phase: "failed",
-      failureReason: "Phrase API returned HTTP 404",
+      phase: "pending",
     });
+    expect(failed?.record.phase).toBe("importing");
     expect(phrase.createJobCalls).toBe(1);
   });
 

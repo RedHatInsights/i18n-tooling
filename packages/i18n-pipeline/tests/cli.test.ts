@@ -1,8 +1,9 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 import { isCliEntryPoint, runCli } from "../src/cli.js";
 
@@ -1031,6 +1032,155 @@ objects:
     expect(errors).toEqual([]);
   });
 
+  it.each([
+    ["pinned", true],
+    ["unpinned", false],
+  ] as const)(
+    "exits 1 with a retryable visibility message for a %s submit whose job stays missing",
+    async (_label, pinned) => {
+      projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-job-404-"));
+      await mkdir(join(projectRoot, "locales"));
+      const sourceBytes = Buffer.from(JSON.stringify({ greeting: { defaultMessage: "Hello" } }));
+      await writeFile(join(projectRoot, "locales/en.json"), sourceBytes);
+      await writeFile(join(projectRoot, "phrase.json"), phraseTmsConfig());
+
+      let stateRevision: string | undefined;
+      let stateWriteCount = 0;
+      let stateRecord: Record<string, unknown> | undefined;
+      let jobLookupCount = 0;
+      let signalFirstJobLookup: () => void = () => undefined;
+      const firstJobLookup = new Promise<void>((resolve) => {
+        signalFirstJobLookup = resolve;
+      });
+      const output: string[] = [];
+      const errors: string[] = [];
+      const fetch: typeof globalThis.fetch = async (input, init) => {
+        const url = input instanceof Request ? input.url : String(input);
+        const parsed = new URL(url);
+        const method = (init?.method ?? "GET").toUpperCase();
+
+        if (parsed.pathname.endsWith("/contents/locales/en.json")) {
+          return new Response(
+            JSON.stringify({
+              type: "file",
+              sha: "source-sha",
+              encoding: "base64",
+              content: sourceBytes.toString("base64"),
+            }),
+          );
+        }
+        if (parsed.pathname.endsWith("/contents/.github/i18n-state/batches")) {
+          return new Response("", { status: 404 });
+        }
+        const stateFile = parsed.pathname.match(
+          /\/contents\/\.github\/i18n-state\/batches\/([a-f0-9]{64})\.json$/,
+        );
+        if (stateFile) {
+          if (method === "GET") {
+            if (!stateRecord || !stateRevision) return new Response("", { status: 404 });
+            return new Response(
+              JSON.stringify({
+                type: "file",
+                sha: stateRevision,
+                encoding: "base64",
+                content: Buffer.from(`${JSON.stringify(stateRecord, null, 2)}\n`).toString(
+                  "base64",
+                ),
+              }),
+            );
+          }
+          if (method === "PUT") {
+            const body = JSON.parse(String(init?.body)) as { content: string };
+            stateRecord = JSON.parse(
+              Buffer.from(body.content, "base64").toString("utf8"),
+            ) as Record<string, unknown>;
+            stateRevision = `state-sha-${++stateWriteCount}`;
+            return new Response(JSON.stringify({ content: { sha: stateRevision } }));
+          }
+        }
+        if (parsed.pathname.endsWith("/git/ref/heads/i18n-tms-state")) {
+          return new Response("", { status: 404 });
+        }
+        if (parsed.pathname.endsWith("/git/ref/heads/main")) {
+          return new Response(JSON.stringify({ object: { sha: "base-sha" } }));
+        }
+        if (parsed.pathname.endsWith("/git/refs") && method === "POST") {
+          return new Response("{}", { status: 201 });
+        }
+        if (url === "https://us.phrase.com/idm/oauth/token") {
+          return new Response(JSON.stringify({ access_token: "phrase-access-token" }));
+        }
+        if (parsed.pathname.endsWith("/api2/v1/projects/project-uid/jobs") && method === "POST") {
+          return new Response(
+            JSON.stringify({
+              asyncRequest: { id: "import-1" },
+              jobs: [{ uid: "job-fr", targetLang: "fr", workflowLevel: 1 }],
+              unsupportedFiles: [],
+              warnings: [],
+            }),
+            { status: 201 },
+          );
+        }
+        if (parsed.pathname.endsWith("/api2/v1/async/import-1")) {
+          return new Response(JSON.stringify({ id: "import-1", asyncResponse: {} }));
+        }
+        if (parsed.pathname.endsWith("/api2/v1/projects/project-uid/jobs/job-fr")) {
+          jobLookupCount += 1;
+          signalFirstJobLookup();
+          return new Response("", { status: 404 });
+        }
+        return new Response(`Unexpected request: ${method} ${url}`, { status: 500 });
+      };
+
+      if (pinned) vi.useFakeTimers();
+      try {
+        const cliRun = runCli(
+          [
+            "tms",
+            "submit",
+            "--config",
+            "phrase.json",
+            ...(pinned
+              ? ["--expect-project", "project-uid", "--expect-source-filename", "en.json"]
+              : []),
+          ],
+          {
+            cwd: projectRoot,
+            env: {
+              PHRASE_PLATFORM_API_TOKEN: "platform-token",
+              GITHUB_TOKEN: "run-token",
+              GITHUB_REPOSITORY: "example/app",
+              GITHUB_REF: "refs/heads/main",
+              GITHUB_SHA: "abc123",
+            },
+            fetch,
+            stdout: (message) => output.push(message),
+            stderr: (message) => errors.push(message),
+          },
+        );
+        const reachedJobLookup = await Promise.race([
+          firstJobLookup.then(() => true),
+          cliRun.then(() => false),
+        ]);
+        expect(reachedJobLookup).toBe(true);
+        if (pinned) {
+          for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+          await vi.runAllTimersAsync();
+        }
+        const exitCode = await cliRun;
+
+        expect(exitCode).toBe(1);
+        expect(errors[0]).toContain(
+          "Phrase has not yet exposed the new jobs; the next run continues this batch",
+        );
+        expect(stateRecord).toMatchObject({ phase: "importing", jobs: [{ uid: "job-fr" }] });
+        expect(jobLookupCount).toBe(pinned ? 5 : 1);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("generates the Phrase source from Frontend YAML without a checked-in catalog", async () => {
     projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-feo-phrase-"));
     await mkdir(join(projectRoot, "deploy"));
@@ -1187,6 +1337,212 @@ objects:
       "Phrase auth: service account (PHRASE_SERVICE_ACCOUNT_CLIENT_ID/_SECRET)",
     );
     expect(output.join("\n")).not.toContain("client-secret");
+  });
+
+  it("processes shared batches unpinned while repairing only the loaded config's stuck batch", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-repair-scope-"));
+    await mkdir(join(projectRoot, "locales"));
+    const sourceBytes = Buffer.from(JSON.stringify({ greeting: { defaultMessage: "Hello" } }));
+    await writeFile(join(projectRoot, "locales/en.json"), sourceBytes);
+    await writeFile(join(projectRoot, "phrase.json"), phraseTmsConfig());
+    const now = new Date().toISOString();
+    const sourceDigest = createHash("sha256").update(sourceBytes).digest("hex");
+    const currentConfig = {
+      projectUid: "project-uid",
+      region: "us",
+      sourceCatalog: {
+        path: "locales/en.json",
+        filename: "en.json",
+        adapter: "formatjs-json",
+        locale: "en",
+      },
+      targetAdapter: "formatjs-json",
+      targetLocales: [
+        { phraseLocale: "fr", repositoryLocale: "fr", outputPath: "locales/fr.json" },
+      ],
+      completionPolicy: { default: "per-locale" },
+    };
+    const otherConfig = {
+      projectUid: "other-project",
+      region: "eu",
+      sourceCatalog: {
+        path: "locales/other-en.json",
+        filename: "other-en.json",
+        adapter: "formatjs-json",
+        locale: "en",
+      },
+      targetAdapter: "formatjs-json",
+      targetLocales: [
+        { phraseLocale: "de", repositoryLocale: "de", outputPath: "locales/de.json" },
+      ],
+      completionPolicy: { default: "per-locale" },
+    };
+    const currentKey = "a".repeat(64);
+    const otherReadyKey = "b".repeat(64);
+    const otherStuckKey = "c".repeat(64);
+    const batch = (
+      key: string,
+      phase: string,
+      batchConfig: typeof currentConfig | typeof otherConfig,
+      locales: Record<string, { phase: string; failureReason?: string }>,
+      jobs: Array<{ uid: string; targetLang: string; workflowLevel: number }> = [],
+    ) => ({
+      schema: 1,
+      key,
+      phase,
+      repository: "example/app",
+      baseRef: "main",
+      sourceCommit: "abc123",
+      sourceDigest,
+      config: batchConfig,
+      createdAt: now,
+      jobs,
+      warningCount: 0,
+      locales,
+    });
+    const stateRecords = new Map<string, Record<string, unknown>>([
+      [currentKey, batch(currentKey, "unknown", currentConfig, { fr: { phase: "pending" } })],
+      [
+        otherReadyKey,
+        batch(
+          otherReadyKey,
+          "ready",
+          otherConfig,
+          { de: { phase: "failed", failureReason: "previous Phrase failure" } },
+          [{ uid: "other-job", targetLang: "de", workflowLevel: 1 }],
+        ),
+      ],
+      [otherStuckKey, batch(otherStuckKey, "creating", otherConfig, { de: { phase: "pending" } })],
+    ]);
+    const otherStuckBefore = structuredClone(stateRecords.get(otherStuckKey));
+    let revisionNumber = 0;
+    const revisions = new Map(
+      [...stateRecords.keys()].map((key) => [key, `sha-${++revisionNumber}`]),
+    );
+    const listProjectUids: string[] = [];
+    const listWorkflowLevels: string[] = [];
+    const output: string[] = [];
+    const errors: string[] = [];
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      const parsed = new URL(url);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (parsed.pathname.endsWith("/contents/.github/i18n-state/batches")) {
+        return new Response(
+          JSON.stringify(
+            [...stateRecords.keys()].map((key) => ({ type: "file", name: `${key}.json` })),
+          ),
+        );
+      }
+      const stateFile = parsed.pathname.match(
+        /\/contents\/\.github\/i18n-state\/batches\/([a-f0-9]{64})\.json$/,
+      );
+      if (stateFile) {
+        const key = stateFile[1]!;
+        if (method === "GET") {
+          const record = stateRecords.get(key);
+          if (!record) return new Response("", { status: 404 });
+          return new Response(
+            JSON.stringify({
+              type: "file",
+              sha: revisions.get(key),
+              encoding: "base64",
+              content: Buffer.from(`${JSON.stringify(record, null, 2)}\n`).toString("base64"),
+            }),
+          );
+        }
+        if (method === "PUT") {
+          const body = JSON.parse(String(init?.body)) as { content: string };
+          stateRecords.set(
+            key,
+            JSON.parse(Buffer.from(body.content, "base64").toString("utf8")) as Record<
+              string,
+              unknown
+            >,
+          );
+          revisions.set(key, `sha-${++revisionNumber}`);
+          return new Response(JSON.stringify({ content: { sha: revisions.get(key) } }));
+        }
+      }
+      if (parsed.pathname.endsWith("/git/ref/heads/main")) {
+        return new Response(JSON.stringify({ object: { sha: "base-sha" } }));
+      }
+      if (parsed.pathname.endsWith("/contents/locales/en.json")) {
+        return new Response(
+          JSON.stringify({
+            type: "file",
+            sha: "source-sha",
+            encoding: "base64",
+            content: sourceBytes.toString("base64"),
+          }),
+        );
+      }
+      if (url === "https://us.phrase.com/idm/oauth/token") {
+        return new Response(JSON.stringify({ access_token: "phrase-access-token" }));
+      }
+      if (parsed.pathname.endsWith("/api2/v2/projects/project-uid/jobs")) {
+        const workflowLevel = parsed.searchParams.get("workflowLevel") ?? "1";
+        listProjectUids.push(parsed.pathname.split("/").at(-2)!);
+        listWorkflowLevels.push(workflowLevel);
+        const content =
+          workflowLevel === "1"
+            ? [
+                {
+                  uid: "recovered-job-fr",
+                  targetLang: "fr",
+                  filename: "en.json",
+                  dateCreated: now,
+                  imported: true,
+                  workflowStep: { workflowLevel: 1 },
+                },
+              ]
+            : [];
+        return new Response(JSON.stringify({ content, totalPages: 1 }));
+      }
+      if (parsed.pathname.endsWith("/api2/v1/projects/project-uid/jobs/recovered-job-fr")) {
+        return new Response(
+          JSON.stringify({
+            uid: "recovered-job-fr",
+            targetLang: "fr",
+            workflowLevel: 1,
+            lastWorkflowLevel: 1,
+            filename: "en.json",
+            imported: true,
+            status: "NEW",
+            importStatus: { status: "OK" },
+          }),
+        );
+      }
+      return new Response(`Unexpected request: ${method} ${url}`, { status: 500 });
+    };
+
+    const exitCode = await runCli(["tms", "reconcile", "--config", "phrase.json"], {
+      cwd: projectRoot,
+      env: {
+        PHRASE_PLATFORM_API_TOKEN: "platform-token",
+        GITHUB_TOKEN: "run-token",
+        GITHUB_REPOSITORY: "example/app",
+      },
+      fetch,
+      stdout: (message) => output.push(message),
+      stderr: (message) => errors.push(message),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(errors).toEqual([]);
+    expect(output.some((line) => line.startsWith(`${currentKey.slice(0, 12)} fr: pending`))).toBe(
+      true,
+    );
+    expect(output.some((line) => line.includes(otherStuckKey.slice(0, 12)))).toBe(false);
+    expect(stateRecords.get(currentKey)).toMatchObject({
+      phase: "ready",
+      jobs: [{ uid: "recovered-job-fr" }],
+    });
+    expect(stateRecords.get(otherReadyKey)).toMatchObject({ phase: "completed" });
+    expect(stateRecords.get(otherStuckKey)).toEqual(otherStuckBefore);
+    expect(listProjectUids.every((projectUid) => projectUid === "project-uid")).toBe(true);
+    expect(listWorkflowLevels).toEqual(["1", "1", "2", "2"]);
   });
 
   it("requires an explicit base ref for pull-request runs and ignores empty workflow inputs", async () => {
