@@ -2549,7 +2549,7 @@ describe("PhraseWorkflow submission", () => {
     expect(updated?.record.locales.fr?.toolingCommitSha).toBe(repository.branchHeads.get(branch!));
   });
 
-  it("keeps an open PR unchanged after validation fails and retries on the next run", async () => {
+  it("shows invalid re-exports in the same draft PR and repairs them on the next run", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
     const repository = new FakeRepository();
@@ -2570,7 +2570,6 @@ describe("PhraseWorkflow submission", () => {
     await workflow.reconcile();
     const [created] = await state.listBatches();
     const branch = created?.record.locales.fr?.pullRequestBranch;
-    const initialCommit = repository.branchHeads.get(branch!);
     phrase.targetBytes = new TextEncoder().encode('{"greeting":"Bonjour"}');
 
     const failed = await workflow.reconcile();
@@ -2580,13 +2579,21 @@ describe("PhraseWorkflow submission", () => {
     expect(failed[0]?.reason).toContain("ICU argument mismatches");
     expect(afterFailure?.record.phase).toBe("ready");
     expect(afterFailure?.record.locales.fr?.phase).toBe("pr-created");
-    expect(afterFailure?.record.locales.fr?.toolingCommitSha).toBe(initialCommit);
-    expect(repository.commitCount(branch!)).toBe(1);
+    expect(afterFailure?.record.locales.fr?.toolingCommitSha).toBe(
+      repository.branchHeads.get(branch!),
+    );
+    expect(afterFailure?.record.locales.fr?.validationErrors).toEqual([
+      expect.stringContaining("ICU argument mismatches"),
+    ]);
+    expect(repository.pullRequestBodies.get(failed[0]!.pullRequestUrl!)).toContain(
+      "Translation errors (do not merge)",
+    );
+    expect(repository.commitCount(branch!)).toBe(2);
     expect(repository.pullRequests).toHaveLength(1);
 
     phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
     expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
-    expect(repository.commitCount(branch!)).toBe(2);
+    expect(repository.commitCount(branch!)).toBe(3);
     expect(phrase.targetDownloadCalls).toBe(3);
   });
 
@@ -2667,8 +2674,83 @@ describe("PhraseWorkflow submission", () => {
     expect(results[0]?.phase).toBe("failed");
     expect(results[0]?.reason).toContain("Use # where the number belongs");
     expect(stored?.record.phase).toBe("ready");
-    expect(stored?.record.locales.zh_cn?.phase).toBe("validation-failed");
-    expect(repository.pullRequests).toHaveLength(0);
+    expect(stored?.record.locales.zh_cn?.phase).toBe("pr-created");
+    expect(repository.pullRequests).toHaveLength(1);
+    expect(repository.pullRequests[0]?.draft).toBe(true);
+    expect(repository.pullRequests[0]?.body).toContain("Use # where the number belongs");
+  });
+
+  it("keeps invalid FEO catalogs visible without writing generated YAML until fixed", async () => {
+    const source = new TextEncoder().encode(
+      '{"searchEntries.roles.title":{"defaultMessage":"Roles"}}',
+    );
+    const template =
+      "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n        - id: roles\n          title: Roles\n";
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    repository.onReadFile = (path, ref) => {
+      for (const [branch, head] of repository.branchHeads) {
+        if (head === ref)
+          return (
+            repository.branchFiles.get(branch)?.get(path) ??
+            (path === "deploy/frontend.yaml" ? new TextEncoder().encode(template) : null)
+          );
+      }
+      return path === "deploy/frontend.yaml" ? new TextEncoder().encode(template) : source;
+    };
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state: new MemoryStateStore(),
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes: source,
+      config: {
+        ...config,
+        frontendTemplate: { path: "deploy/frontend.yaml" },
+        targetAdapter: "icu-json",
+      },
+    });
+    phrase.jobStatus = "COMPLETED";
+    phrase.targetBytes = new TextEncoder().encode(
+      '{"searchEntries.roles.title":"Rôles {missing}"}',
+    );
+    const [invalid] = await workflow.reconcile();
+    const pr = repository.pullRequests[0]!;
+    expect(pr.draft).toBe(true);
+    expect(pr.additionalFiles).toBeUndefined();
+    expect(invalid?.phase).toBe("failed");
+    phrase.targetBytes = new TextEncoder().encode('{"searchEntries.roles.title":"Rôles"}');
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    expect(repository.pullRequests).toHaveLength(1);
+    expect(
+      new TextDecoder().decode(repository.branchFiles.get(pr.branch)?.get("deploy/frontend.yaml")),
+    ).toContain("Rôles");
+    expect(repository.pullRequestBodies.get(invalid!.pullRequestUrl!)).not.toContain(
+      "Translation errors",
+    );
+
+    // A template-only problem must update findings even when catalog bytes do not change.
+    const validRead = repository.onReadFile!;
+    const head = repository.branchHeads.get(pr.branch)!;
+    const commits = repository.commitCount(pr.branch);
+    repository.onReadFile = (path, ref, call) =>
+      path === "deploy/frontend.yaml" && ref === head ? null : validRead(path, ref, call);
+    expect((await workflow.reconcile())[0]?.phase).toBe("failed");
+    expect(repository.commitCount(pr.branch)).toBe(commits);
+    expect(repository.pullRequestBodies.get(invalid!.pullRequestUrl!)).toContain(
+      "Missing Frontend template",
+    );
+    repository.onReadFile = validRead;
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    expect(repository.commitCount(pr.branch)).toBe(commits);
+    expect(repository.pullRequestBodies.get(invalid!.pullRequestUrl!)).not.toContain(
+      "Translation errors",
+    );
   });
 
   it("adds the Frontend template to the same locale PR and blocks stale English", async () => {
@@ -4571,10 +4653,109 @@ describe("PhraseWorkflow submission", () => {
 
     expect(result?.phase).toBe("failed");
     expect(result?.reason).toContain('"items": plural {count} lost exact branch =1');
-    expect(repository.pullRequests).toHaveLength(0);
+    expect(repository.pullRequests).toHaveLength(1);
+    expect(repository.pullRequests[0]?.draft).toBe(true);
+    expect(repository.pullRequests[0]?.body).toContain(
+      '"items": plural {count} lost exact branch =1',
+    );
   });
 
-  it("retries a validation-failed locale from the same completed Phrase job", async () => {
+  it.each([
+    ['{"greeting":"Bonjour {name"}', "invalid ICU syntax"],
+    ["{", "Downloaded fr catalog failed validation"],
+  ])(
+    "opens a draft with invalid bytes (%s) and repairs the same PR without changing job status",
+    async (content, diagnostic) => {
+      const state = new MemoryStateStore();
+      const phrase = new FakePhrase();
+      const repository = new FakeRepository();
+      const workflow = new PhraseWorkflow({
+        phrase,
+        state,
+        repository,
+        catalogAdapters: new CatalogAdapterRegistry(),
+      });
+      const batch = await workflow.submit({
+        repository: "example/app",
+        baseRef: "phrase-pilot",
+        sourceCommit: "abc123",
+        sourceBytes,
+        config,
+      });
+      phrase.jobStatus = "COMPLETED";
+      phrase.targetBytes = new TextEncoder().encode(content);
+
+      const [invalid] = await workflow.reconcile();
+      const pr = repository.pullRequests[0]!;
+      expect(pr).toBeDefined();
+      expect(pr.draft).toBe(true);
+      expect(pr.content).toEqual(phrase.targetBytes);
+      expect(pr.body).toContain("Translation errors (do not merge)");
+      expect(pr.body).toContain(diagnostic);
+      expect(invalid?.phase).toBe("failed");
+      expect(invalid?.pullRequestUrl).toBe("https://github.com/example/app/pull/42");
+      expect((await state.readBatch(batch.key))?.record.locales.fr?.phase).toBe("pr-created");
+
+      const commits = repository.branchCommits.get(pr.branch)!.length;
+      expect((await workflow.reconcile())[0]?.phase).toBe("failed");
+      expect(repository.branchCommits.get(pr.branch)).toHaveLength(commits);
+      phrase.targetBytes = new TextEncoder().encode('{"greeting":"Bonjour {name}"}');
+      const [fixed] = await workflow.reconcile();
+      expect(fixed?.phase).toBe("pr-created");
+      expect(fixed?.pullRequestUrl).toBe(invalid?.pullRequestUrl);
+      expect(repository.pullRequests).toHaveLength(1);
+      expect(repository.pullRequestBodies.get(fixed!.pullRequestUrl!)).not.toContain(
+        "Translation errors",
+      );
+      expect(phrase.jobStatus).toBe("COMPLETED");
+      expect(phrase.createJobCalls).toBe(1);
+    },
+  );
+
+  it("shows both errors and warnings and bounds large PR descriptions", async () => {
+    const source = new TextEncoder().encode(
+      JSON.stringify({
+        ...Object.fromEntries(
+          Array.from({ length: 80 }, (_, i) => [
+            `missing-${i}-${"é".repeat(250)}`,
+            { defaultMessage: "Message" },
+          ]),
+        ),
+        requests: { defaultMessage: "{count, plural, one {# request} other {# requests}}" },
+      }),
+    );
+    const phrase = new FakePhrase();
+    phrase.targetBytes = new TextEncoder().encode(
+      JSON.stringify({ requests: "{count, plural, one {élément} other {# éléments}}" }),
+    );
+    const repository = new FakeRepository();
+    repository.baseSourceBytes = source;
+    repository.pinnedSourceBytes = source;
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state: new MemoryStateStore(),
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes: source,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    expect((await workflow.reconcile())[0]?.phase).toBe("failed");
+    const pr = repository.pullRequests[0]!;
+    expect(pr.draft).toBe(true);
+    expect(pr.body).toContain("Translation errors (do not merge)");
+    expect(pr.body).toContain("missing IDs");
+    expect(pr.body).toContain("Translation warnings (review before merging)");
+    expect(pr.body).toContain("additional detail omitted");
+    expect(new TextEncoder().encode(pr.body).length).toBeLessThan(65_536);
+  });
+
+  it("repairs a draft with ICU argument mismatches from the same completed Phrase job", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
     phrase.targetBytes = new TextEncoder().encode(
@@ -4608,8 +4789,10 @@ describe("PhraseWorkflow submission", () => {
     expect(first[0]?.reason).toContain("ICU argument mismatches");
     expect(first[0]?.reason).toContain('"greeting": source [name], target [count]');
     expect(failed?.record.phase).toBe("ready");
-    expect(failed?.record.locales.fr?.phase).toBe("validation-failed");
-    expect(repository.pullRequests).toHaveLength(0);
+    expect(failed?.record.locales.fr?.phase).toBe("pr-created");
+    expect(repository.pullRequests).toHaveLength(1);
+    expect(repository.pullRequests[0]?.draft).toBe(true);
+    expect(repository.pullRequests[0]?.body).toContain("ICU argument mismatches");
 
     phrase.targetBytes = new TextEncoder().encode(
       JSON.stringify({
@@ -4791,7 +4974,7 @@ describe("PhraseWorkflow submission", () => {
     expect(repository.pullRequests).toHaveLength(2);
   });
 
-  it("keeps all-locales targets pending while another locale has a retryable validation failure", async () => {
+  it("delivers all completed locales as drafts even while another locale has validation errors", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
     phrase.jobParts = [
@@ -4833,15 +5016,15 @@ describe("PhraseWorkflow submission", () => {
 
     phrase.jobStatuses.set("job-ja", "COMPLETED");
     const stillInvalid = await workflow.reconcile();
-    expect(stillInvalid.map((result) => result.phase)).toEqual(["failed", "pending"]);
-    expect((await state.listBatches())[0]?.record.locales.ja?.phase).toBe("pending");
-    expect(phrase.targetDownloadCalls).toBe(2);
+    expect(stillInvalid.map((result) => result.phase)).toEqual(["failed", "failed"]);
+    expect((await state.listBatches())[0]?.record.locales.ja?.phase).toBe("pr-created");
+    expect(phrase.targetDownloadCalls).toBe(3);
 
     phrase.targetBytes = new TextEncoder().encode('{"greeting":"Bonjour {name}"}');
     const retried = await workflow.reconcile();
 
     expect(retried.map((result) => result.phase)).toEqual(["pr-created", "pr-created"]);
-    expect(phrase.targetDownloadCalls).toBe(4);
+    expect(phrase.targetDownloadCalls).toBe(5);
   });
 
   it("fails the batch if the pinned source revision can no longer be reproduced", async () => {

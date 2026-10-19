@@ -332,6 +332,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
         409,
       );
     }
+    if (input.draft && open?.html_url) await this.ensurePullRequestDraft(open.html_url);
     const changedFiles = await this.changedFiles(files, branchHead);
     let toolingCommitSha = branchHead ?? input.baseCommit;
     if (changedFiles.length) {
@@ -379,6 +380,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
           body: input.body,
           head: input.branch,
           base: input.baseRef,
+          ...(input.draft ? { draft: true } : {}),
         }),
       });
       const value: unknown = await response.json();
@@ -399,6 +401,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
           let bodyError: unknown;
           let pullRequestFinalized = false;
           try {
+            if (input.draft) await this.ensurePullRequestDraft(open.html_url);
             pullRequestFinalized = !(await this.updatePullRequestBody(
               open.html_url,
               input.body,
@@ -466,6 +469,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       );
     }
 
+    if (input.draft) await this.ensurePullRequestDraft(input.pullRequestUrl);
     const changedFiles = await this.changedFiles(files, headSha);
     if (!changedFiles.length) {
       return {
@@ -508,6 +512,50 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       };
     } catch (bodyError) {
       return { changed: true, toolingCommitSha, bodyUpdated: false, bodyError };
+    }
+  }
+
+  /** Draft conversion must succeed before invalid content reaches an existing PR. */
+  private async ensurePullRequestDraft(pullRequestUrl: string): Promise<void> {
+    const number = this.pullRequestNumber(pullRequestUrl);
+    const response = await this.request(`${this.repositoryPath}/pulls/${number}`, {
+      method: "GET",
+    });
+    const value: unknown = await response.json();
+    if (!isRecord(value) || value.state !== "open" || value.merged_at) {
+      throw new GitHubRepositoryError(
+        "Phrase pull request is no longer open; retry reconciliation",
+        409,
+      );
+    }
+    if (value.draft === true) return;
+    if (!nonEmptyString(value.node_id)) {
+      throw new GitHubRepositoryError(
+        "GitHub returned no pull request node ID for draft conversion",
+        500,
+      );
+    }
+    const converted = await this.request("/graphql", {
+      method: "POST",
+      body: JSON.stringify({
+        query:
+          "mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { pullRequest { isDraft } } }",
+        variables: { id: value.node_id },
+      }),
+    });
+    const result: unknown = await converted.json();
+    if (
+      !isRecord(result) ||
+      result.errors ||
+      !isRecord(result.data) ||
+      !isRecord(result.data.convertPullRequestToDraft) ||
+      !isRecord(result.data.convertPullRequestToDraft.pullRequest) ||
+      result.data.convertPullRequestToDraft.pullRequest.isDraft !== true
+    ) {
+      throw new GitHubRepositoryError(
+        "GitHub did not confirm draft conversion; invalid content was not written",
+        500,
+      );
     }
   }
 
@@ -862,7 +910,9 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
   private async request(path: string, init: RequestInit, allowNotFound = false): Promise<Response> {
     let response: Response;
     try {
-      response = await this.fetcher(`${this.apiUrl}${path}`, {
+      // GitHub Enterprise serves REST at /api/v3 but GraphQL at /api/graphql.
+      const apiUrl = path === "/graphql" ? this.apiUrl.replace(/\/api\/v3$/, "/api") : this.apiUrl;
+      response = await this.fetcher(`${apiUrl}${path}`, {
         ...init,
         signal: AbortSignal.timeout(this.requestTimeoutMs),
         headers: {

@@ -81,6 +81,9 @@ export interface PhraseBatchRecord {
 
 export interface PhraseLocaleRecord {
   phase: PhraseLocalePhase;
+  /** Latest export findings; PR creation does not imply a valid translation. */
+  validationErrors?: string[];
+  validationWarnings?: string[];
   pullRequestUrl?: string;
   failureReason?: string;
   /** Last locale branch commit recorded after its ref update succeeded. */
@@ -115,6 +118,7 @@ export interface PhraseBatchStateStore {
 }
 
 export interface PhraseLocalePullRequest {
+  draft?: boolean;
   repository: string;
   baseRef: string;
   baseCommit: string;
@@ -143,6 +147,8 @@ export interface PhraseLocalePullRequestCreated {
 }
 
 export interface PhraseLocalePullRequestUpdate {
+  /** Convert to draft before writing invalid content; never auto-mark ready. */
+  draft?: boolean;
   repository: string;
   baseRef: string;
   branch: string;
@@ -333,15 +339,22 @@ interface SourceCatalogReadResult {
   formatError?: string;
 }
 
-const MAX_PULL_REQUEST_WARNINGS = 50;
+const MAX_PULL_REQUEST_FINDINGS = 50;
+// Both sections plus metadata must fit GitHub's PR body limit, including Unicode text.
+const MAX_PULL_REQUEST_SECTION_BYTES = 24_000;
 
-/** Lists non-blocking translation lint findings for the locale PR reviewer. */
-function translationWarningsSection(warnings: string[]): string {
-  if (!warnings.length) return "";
-  const shown = warnings.slice(0, MAX_PULL_REQUEST_WARNINGS).map((warning) => `- ${warning}`);
-  const hidden = warnings.length - shown.length;
+function translationFindingsSection(heading: string, findings: string[]): string {
+  if (!findings.length) return "";
+  const shown = findings.slice(0, MAX_PULL_REQUEST_FINDINGS).map((finding) => `- ${finding}`);
+  const hidden = findings.length - shown.length;
   if (hidden > 0) shown.push(`- ...and ${hidden} more`);
-  return `\nTranslation warnings (review before merging):\n${shown.join("\n")}\n`;
+  const details = shown.join("\n");
+  const bytes = new TextEncoder().encode(details);
+  const bounded =
+    bytes.length > MAX_PULL_REQUEST_SECTION_BYTES
+      ? `${new TextDecoder().decode(bytes.slice(0, MAX_PULL_REQUEST_SECTION_BYTES))}\n- ...additional detail omitted to fit PR description`
+      : details;
+  return `\n${heading}:\n${bounded}\n`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1599,7 +1612,7 @@ export class PhraseWorkflow {
         if (reexportingOpenPullRequest && existingLocale?.pullRequestUrl) {
           context.exportedPullRequestUrls.add(existingLocale.pullRequestUrl);
         }
-        const { content, warnings } = await this.exportTarget(
+        const { content, warnings, errors } = await this.exportTarget(
           record,
           target,
           ready.finalJob,
@@ -1643,16 +1656,16 @@ export class PhraseWorkflow {
               translated: Record<string, string>;
             }
           | undefined;
-        if (record.config.frontendTemplate) {
+        // Invalid exports remain reviewable, but must not enter generated runtime files.
+        if (record.config.frontendTemplate && errors.length === 0) {
           const path = record.config.frontendTemplate.path;
           const templateRef =
             reexportingOpenPullRequest && existingPullRequestState?.state === "open"
               ? existingPullRequestState.headSha
               : baseCommit;
           const templateBytes = await this.dependencies.repository.readFile(path, templateRef);
-          if (!templateBytes)
-            throw new PhraseCatalogValidationError(`Missing Frontend template: ${path}`);
           try {
+            if (!templateBytes) throw new Error(`Missing Frontend template: ${path}`);
             const template = new TextDecoder().decode(templateBytes);
             const descriptors = JSON.parse(
               new TextDecoder().decode(pinnedSourceBytes),
@@ -1661,15 +1674,15 @@ export class PhraseWorkflow {
               string,
               string
             >;
-            frontendTemplateData = { path, descriptors, translated };
             additionalFiles.push({
               path,
               content: new TextEncoder().encode(
                 inlineFeoLocale(template, descriptors, translated, target.repositoryLocale),
               ),
             });
+            frontendTemplateData = { path, descriptors, translated };
           } catch (error) {
-            throw new PhraseCatalogValidationError(
+            errors.push(
               `Frontend template inline failed: ${error instanceof Error ? error.message : String(error)}`,
             );
           }
@@ -1753,7 +1766,20 @@ export class PhraseWorkflow {
           `Source commit: ${record.sourceCommit}\n` +
           `Source SHA-256: ${record.sourceDigest}\n` +
           `Final job: ${ready.finalJob.uid}\n` +
-          translationWarningsSection(warnings);
+          "\nReview validation findings before marking ready or merging. " +
+          "Corrections in Phrase are pulled into this PR on later reconciliation runs. " +
+          "Tooling never marks this PR ready automatically.\n" +
+          translationFindingsSection("Translation errors (do not merge)", errors) +
+          translationFindingsSection("Translation warnings (review before merging)", warnings);
+        const findingsChanged =
+          stableJson(existingLocale?.validationErrors ?? []) !== stableJson(errors) ||
+          stableJson(existingLocale?.validationWarnings ?? []) !== stableJson(warnings);
+        const reportDelivery = (pullRequestUrl: string) =>
+          push({
+            phase: errors.length ? "failed" : "pr-created",
+            pullRequestUrl,
+            ...(errors.length ? { reason: errors.join("; ") } : {}),
+          });
         const sourcePath = sourceInputPath(record.config);
         // Resubmission can adopt a moved generated-source template path within this batch.
         const title = `i18n(${target.repositoryLocale}): Phrase translation update for ${sourcePath}`;
@@ -1867,6 +1893,7 @@ export class PhraseWorkflow {
           }
         };
         const pullRequestInput: PhraseLocalePullRequest = {
+          draft: true,
           ...(additionalFiles.length ? { additionalFiles } : {}),
           repository: record.repository,
           baseRef: record.baseRef,
@@ -1896,6 +1923,7 @@ export class PhraseWorkflow {
             );
           }
           const update = await this.dependencies.repository.updateOpenPullRequest({
+            ...(errors.length ? { draft: true } : {}),
             repository: record.repository,
             baseRef: record.baseRef,
             branch,
@@ -1923,6 +1951,8 @@ export class PhraseWorkflow {
             toolingCommitSha: update.toolingCommitSha,
             pullRequestBranch: branch,
             pullRequestBatchKey,
+            validationErrors: errors,
+            validationWarnings: warnings,
           };
           delete updatedLocale.pendingToolingCommitSha;
           if (update.pullRequestFinalized) {
@@ -1945,9 +1975,9 @@ export class PhraseWorkflow {
                 reason: "GitHub did not confirm the updated locale pull request description",
               });
             } else {
-              push({ phase: "pr-created", pullRequestUrl: existingLocale.pullRequestUrl });
+              reportDelivery(existingLocale.pullRequestUrl);
             }
-          } else if (existingLocale.pullRequestBodyPending) {
+          } else if (existingLocale.pullRequestBodyPending || findingsChanged) {
             const bodyUpdated = await this.dependencies.repository.updatePullRequestBody(
               existingLocale.pullRequestUrl,
               body,
@@ -1957,17 +1987,16 @@ export class PhraseWorkflow {
             else updatedLocale.pullRequestFinalized = true;
             record.locales[target.phraseLocale] = updatedLocale;
             revision = await this.dependencies.state.updateBatch(record, revision);
-            if (bodyUpdated)
-              push({ phase: "pr-created", pullRequestUrl: existingLocale.pullRequestUrl });
+            if (bodyUpdated) reportDelivery(existingLocale.pullRequestUrl);
           } else if (
             existingLocale.toolingCommitSha !== update.toolingCommitSha ||
             existingLocale.pendingToolingCommitSha !== undefined
           ) {
             record.locales[target.phraseLocale] = updatedLocale;
             revision = await this.dependencies.state.updateBatch(record, revision);
-            push({ phase: "pr-created", pullRequestUrl: existingLocale.pullRequestUrl });
+            reportDelivery(existingLocale.pullRequestUrl);
           } else {
-            push({ phase: "pr-created", pullRequestUrl: existingLocale.pullRequestUrl });
+            reportDelivery(existingLocale.pullRequestUrl);
           }
         } else {
           const created =
@@ -1983,6 +2012,8 @@ export class PhraseWorkflow {
           const localeRecord: PhraseLocaleRecord = {
             ...(record.locales[target.phraseLocale] ?? { phase: "exporting" }),
             phase: "pr-created",
+            validationErrors: errors,
+            validationWarnings: warnings,
             pullRequestUrl: created.pullRequestUrl,
             pullRequestBranch: branch,
             pullRequestBatchKey,
@@ -1999,7 +2030,7 @@ export class PhraseWorkflow {
           if (created.bodyError) {
             push({ phase: "retrying", reason: safeFailureReason(created.bodyError) });
           } else {
-            push({ phase: "pr-created", pullRequestUrl: created.pullRequestUrl });
+            reportDelivery(created.pullRequestUrl);
           }
         }
       } catch (error) {
@@ -2210,7 +2241,7 @@ export class PhraseWorkflow {
     finalJob: PhraseJobPart,
     sourceCatalog: Catalog,
     targetAdapter: CatalogAdapter,
-  ): Promise<{ content: Uint8Array; warnings: string[] }> {
+  ): Promise<{ content: Uint8Array; warnings: string[]; errors: string[] }> {
     const exportRequestId = await this.dependencies.phrase.startTargetDownload(
       record.config.projectUid,
       finalJob.uid,
@@ -2250,19 +2281,19 @@ export class PhraseWorkflow {
       for (const finding of lintTargetCatalog(sourceCatalog, targetCatalog)) {
         (finding.severity === "error" ? problems : warnings).push(finding.message);
       }
-      if (problems.length) throw new Error(problems.join("; "));
       const serialized = serializeCatalogDocument(
         targetAdapter.write(targetCatalog, context),
         targetAdapter,
         context,
       );
-      return { content: new TextEncoder().encode(serialized), warnings };
+      return { content: new TextEncoder().encode(serialized), warnings, errors: problems };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      throw new PhraseCatalogValidationError(
-        `Downloaded ${target.phraseLocale} catalog failed validation: ${detail}`,
-        record.key,
-      );
+      return {
+        content: targetBytes,
+        warnings: [],
+        errors: [`Downloaded ${target.phraseLocale} catalog failed validation: ${detail}`],
+      };
     }
   }
 

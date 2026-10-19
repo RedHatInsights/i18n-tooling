@@ -68,6 +68,9 @@ function openPullRequestHarness(
     currentContent?: string;
     compare?: (headSha: string) => unknown;
     refUpdateStatuses?: number[];
+    draft?: boolean;
+    draftResult?: unknown;
+    apiUrl?: string;
   } = {},
 ) {
   const calls: Array<{ url: string; method: string }> = [];
@@ -77,12 +80,24 @@ function openPullRequestHarness(
   let currentContent = options.currentContent ?? "old";
   let pendingContent: string | undefined;
   let commitNumber = 0;
+  let draft = options.draft ?? false;
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const url = input instanceof Request ? input.url : String(input);
     const method = (init?.method ?? "GET").toUpperCase();
     calls.push({ url, method });
     if (url.endsWith("/pulls/7") && method === "GET") {
-      return response({ state: "open", head: { sha: branchHead } });
+      return response({ state: "open", head: { sha: branchHead }, draft, node_id: "PR_7" });
+    }
+    if (url.endsWith("/graphql") && method === "POST") {
+      const body = JSON.parse(String(init?.body));
+      expect(body.variables).toEqual({ id: "PR_7" });
+      expect(body.query).toContain("convertPullRequestToDraft");
+      draft = true;
+      return response(
+        options.draftResult ?? {
+          data: { convertPullRequestToDraft: { pullRequest: { isDraft: true } } },
+        },
+      );
     }
     if (url.endsWith("/pulls/7") && method === "PATCH") return response({});
     if (url.includes("/contents/locales/fr.json?ref=")) {
@@ -140,6 +155,7 @@ function openPullRequestHarness(
     repository: "example/app",
     token: "token",
     stateBranch: "i18n-state",
+    apiUrl: options.apiUrl,
     fetch,
   });
   const makeUpdate = (
@@ -176,6 +192,50 @@ function openPullRequestHarness(
 }
 
 describe("GitHubPhraseRepository", () => {
+  it("converts a ready PR to draft before writing invalid content", async () => {
+    const harness = openPullRequestHarness("b".repeat(40));
+    await harness.repository.updateOpenPullRequest(harness.makeUpdate(undefined, { draft: true }));
+    const conversion = harness.calls.findIndex(({ url }) => url.endsWith("/graphql"));
+    const write = harness.calls.findIndex(
+      ({ url, method }) => url.endsWith("/git/blobs") && method === "POST",
+    );
+    expect(conversion).toBeGreaterThan(-1);
+    expect(write).toBeGreaterThan(conversion);
+  });
+
+  it("uses the Enterprise GraphQL endpoint for draft conversion", async () => {
+    const harness = openPullRequestHarness("b".repeat(40), {
+      apiUrl: "https://github.example/api/v3",
+    });
+    await harness.repository.updateOpenPullRequest(harness.makeUpdate(undefined, { draft: true }));
+    expect(harness.calls.some(({ url }) => url === "https://github.example/api/graphql")).toBe(
+      true,
+    );
+  });
+
+  it("does not repeat draft conversion on an already draft PR", async () => {
+    const harness = openPullRequestHarness("b".repeat(40), { draft: true });
+    await harness.repository.updateOpenPullRequest(harness.makeUpdate(undefined, { draft: true }));
+    expect(harness.calls.some(({ url }) => url.endsWith("/graphql"))).toBe(false);
+  });
+
+  it.each([
+    { errors: [{ message: "Not permitted" }] },
+    { data: { convertPullRequestToDraft: { pullRequest: { isDraft: false } } } },
+    {},
+  ])(
+    "does not write invalid content when draft conversion is unconfirmed: %j",
+    async (draftResult) => {
+      const harness = openPullRequestHarness("b".repeat(40), { draftResult });
+      await expect(
+        harness.repository.updateOpenPullRequest(harness.makeUpdate(undefined, { draft: true })),
+      ).rejects.toThrow("GitHub did not confirm draft conversion");
+      expect(
+        harness.calls.some(({ url, method }) => url.endsWith("/git/blobs") && method === "POST"),
+      ).toBe(false);
+    },
+  );
+
   it("rejects a locale PR base commit that is not a full commit SHA", async () => {
     let requests = 0;
     const repository = new GitHubPhraseRepository({
@@ -245,10 +305,15 @@ describe("GitHubPhraseRepository", () => {
     await expect(
       repository.createOrUpdatePullRequest({
         ...pullRequest,
+        draft: true,
         additionalFiles: [{ path: "deploy/frontend.yaml", content: frontend }],
       }),
     ).resolves.toBe("https://github.com/example/app/pull/7");
 
+    const createPr = calls.find(
+      ({ url, init }) => url.endsWith("/pulls") && init?.method === "POST",
+    );
+    expect(JSON.parse(String(createPr?.init?.body))).toMatchObject({ draft: true });
     expect(blobs).toHaveLength(2);
     expect(treeBody).toMatchObject({
       base_tree: "base-tree",
