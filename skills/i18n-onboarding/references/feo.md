@@ -12,7 +12,7 @@ If `locales` is absent, generated translations will be rejected by that schema. 
 
 ## Stable keys and source catalog
 
-Give each translated FEO item a stable ID before extracting. IDs for navigation items and nested routes, bundle IDs, segment IDs, search-entry IDs, service-tile section/group/IDs, and Frontend metadata names must be unique and stable; the CLI rejects missing or duplicate IDs. Never use array indexes.
+Give each translated FEO item a stable ID before extracting. IDs for navigation items and nested routes, bundle IDs, segment IDs, search-entry IDs, service-tile section/group/IDs, and Frontend metadata names must be unique and stable; the CLI rejects missing or duplicate IDs. Never use array indexes. An ID may contain dots: each dot-separated segment must match `^[A-Za-z0-9][A-Za-z0-9_-]*$`, so empty segments and a leading `_` or `-` are rejected. Every key written to `spec.locales` is limited to 256 characters. Items whose keys would collide, even through fields that are empty, are rejected with both items named.
 
 Run `i18n-pipeline feo extract --template deploy/frontend.yaml --output deploy/locales/translation-template.json` and review the extracted English and generated FormatJS descriptor `description` context. Include the source catalog in the repository change; stage or commit it only if the selected autonomy allows that. The extractor makes context from the field name and stable item key. It includes:
 
@@ -21,7 +21,7 @@ Run `i18n-pipeline feo extract --template deploy/frontend.yaml --output deploy/l
 - `serviceTiles.<section>.<group>.<id>.title` and `.description`;
 - `module.defaultDocumentTitle`.
 
-Each search `alt_title` alias is its own message. Its slug is the English alias lowercased, with each run of characters outside `[a-z0-9]` replaced by `-` and the ends trimmed; an empty or duplicate slug fails extraction. The app rebuilds the alias list in English order, using each alias's translation when present. With multiple Frontend objects, keys gain `objects.<metadata.name>.spec.` and the names must be unique. Adding a second Frontend changes catalog IDs, so migrate translations when that happens.
+Each search `alt_title` alias is its own message. Its slug is the English alias lowercased, with each run of characters outside `[a-z0-9]` replaced by `-` and the ends trimmed; an empty slug fails extraction. Aliases with the same slug, such as `acs` and `ACS`, share one key and one translation; the first alias in document order is the English default. The app rebuilds the alias list in English order, using the translation of each alias's slug when present. With multiple Frontend objects, keys gain `objects.<metadata.name>.spec.` and the names must be unique. Adding a second Frontend changes catalog IDs, so migrate translations when that happens.
 
 Add a `feo` entry such as:
 
