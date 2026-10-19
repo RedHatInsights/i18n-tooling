@@ -11,6 +11,14 @@ import {
 type Descriptor = { defaultMessage: string; description: string };
 export type FeoCatalog = Record<string, Descriptor>;
 
+const maxLocaleKeyLength = 256;
+
+type KeyOwner = { item: object; description: string };
+type FrontendKeyRegistry = {
+  catalog: Map<string, KeyOwner>;
+  runtime: Map<string, KeyOwner>;
+};
+
 /** Code-unit order: localeCompare follows the process locale, so output would differ by machine. */
 function byKey([a]: [string, unknown], [b]: [string, unknown]): number {
   return a < b ? -1 : a > b ? 1 : 0;
@@ -30,8 +38,12 @@ function text(value: unknown, label: string): string {
 
 function identifier(node: YAMLMap, name: string, label: string): string {
   const value = text(node.get(name, true), `${label}.${name}`);
-  if (!/^[A-Za-z0-9_-]+$/.test(value))
-    throw new Error(`${label}.${name} has an unsafe identifier: ${value}`);
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)*$/.test(value)) {
+    throw new Error(
+      `${label}.${name} has an unsafe identifier: ${value} ` +
+        `(expected one or more dot-separated segments, each matching /^[A-Za-z0-9][A-Za-z0-9_-]*$/)`,
+    );
+  }
   return value;
 }
 
@@ -89,23 +101,65 @@ function collect(doc: Document): {
   }
   const catalog: FeoCatalog = {};
   let frontendPrefix = "";
-  function unique(key: string, seen: Set<string>): void {
-    if (seen.has(key)) throw new Error(`Duplicate FEO message key: ${key}`);
-    seen.add(key);
+  let registry: FrontendKeyRegistry = { catalog: new Map(), runtime: new Map() };
+  function duplicate(
+    kind: "message" | "runtime",
+    key: string,
+    first: string,
+    second: string,
+  ): never {
+    throw new Error(`Duplicate FEO ${kind} key: ${key}; first from ${first}; also from ${second}`);
   }
-  function add(key: string, node: YAMLMap, field: string, context: string): void {
-    const qualifiedKey = `${frontendPrefix}${key}`;
-    const value = node.get(field, true);
-    if (value === undefined || (isScalar(value) && value.value === "")) return;
+  function register(
+    keys: Map<string, KeyOwner>,
+    key: string,
+    item: object,
+    description: string,
+    kind: "message" | "runtime",
+  ): void {
+    const previous = keys.get(key);
+    if (previous && previous.item !== item) duplicate(kind, key, previous.description, description);
+    if (!previous) keys.set(key, { item, description });
+  }
+  function registerCatalogPath(key: string, item: object, description: string): void {
+    register(registry.catalog, key, item, description, "message");
+  }
+  function registerPotentialMessage(
+    key: string,
+    runtimeKey: string,
+    item: object,
+    description: string,
+  ): void {
+    registerCatalogPath(`${frontendPrefix}${key}`, item, description);
+    register(registry.runtime, runtimeKey, item, description, "runtime");
+  }
+  function validateLocaleKey(key: string): void {
+    if (key.length > maxLocaleKeyLength) {
+      throw new Error(
+        `FEO spec.locales key exceeds the ${maxLocaleKeyLength}-character limit: ${key}`,
+      );
+    }
+  }
+  function add(
+    catalogBase: string,
+    runtimeBase: string,
+    node: YAMLMap,
+    field: string,
+    sourceContext: string,
+    item: object,
+  ): void {
+    const entry = `${frontendPrefix}${catalogBase}`;
     if (field === "alt_title") {
-      if (!isSeq(value)) throw new Error(`${key}: alt_title must contain strings`);
+      const value = node.get(field, true);
+      if (value === undefined || (isScalar(value) && value.value === "")) return;
+      if (!isSeq(value))
+        throw new Error(`${catalogBase}.alt_title: alt_title must contain strings`);
       const aliases = value.items.map((item) => {
         if (!isScalar(item) || typeof item.value !== "string")
-          throw new Error(`${key}: alt_title must contain strings`);
+          throw new Error(`${catalogBase}.alt_title: alt_title must contain strings`);
         return item.value;
       });
-      const entry = `${frontendPrefix}${context}`;
-      const slugs = new Map<string, string>();
+      const slugs = new Map<string, string[]>();
       for (const alias of aliases) {
         const slug = aliasSlug(alias);
         if (!slug) {
@@ -113,99 +167,134 @@ function collect(doc: Document): {
             `${entry}: alt_title alias ${JSON.stringify(alias)} has an empty slug (must contain an ASCII letter or digit)`,
           );
         }
-        const previous = slugs.get(slug);
-        if (previous !== undefined) {
-          throw new Error(
-            `${entry}: alt_title aliases ${JSON.stringify(previous)} and ${JSON.stringify(alias)} have the same slug ${JSON.stringify(slug)}`,
-          );
-        }
-        slugs.set(slug, alias);
-        const aliasKey = `${qualifiedKey}.${slug}`;
-        if (Object.hasOwn(catalog, aliasKey))
-          throw new Error(`Duplicate FEO message key: ${aliasKey}`);
-        catalog[aliasKey] = {
-          defaultMessage: alias,
-          description: `search alias (keyword/synonym) of ${entry}; short search term, not a sentence`,
+        const sameSlug = slugs.get(slug);
+        if (sameSlug) sameSlug.push(alias);
+        else slugs.set(slug, [alias]);
+      }
+      for (const [slug, sameSlug] of slugs) {
+        const aliasKey = `${catalogBase}.alt_title.${slug}`;
+        const runtimeKey = `${runtimeBase}.alt_title.${slug}`;
+        const description = `${sourceContext} alt_title aliases ${JSON.stringify(sameSlug)}`;
+        validateLocaleKey(aliasKey);
+        registerPotentialMessage(aliasKey, runtimeKey, item, description);
+        const firstAlias = sameSlug[0]!;
+        const sharedAliases = sameSlug.slice(1);
+        const sharedDescription = sharedAliases.length
+          ? `; also shared by aliases ${sharedAliases.map((alias) => JSON.stringify(alias)).join(", ")}`
+          : "";
+        catalog[`${frontendPrefix}${aliasKey}`] = {
+          defaultMessage: firstAlias,
+          description:
+            `search alias (keyword/synonym) of ${entry}; short search term, not a sentence` +
+            sharedDescription,
         };
       }
       return;
     }
+    const key = `${catalogBase}.${field}`;
+    registerPotentialMessage(key, `${runtimeBase}.${field}`, item, `${sourceContext}.${field}`);
+    const value = node.get(field, true);
+    if (value === undefined || (isScalar(value) && value.value === "")) return;
     if (!isScalar(value) || typeof value.value !== "string")
       throw new Error(`${key} must be a string`);
     const message = value.value;
     if (!message.trim()) return;
-    if (Object.hasOwn(catalog, qualifiedKey))
-      throw new Error(`Duplicate FEO message key: ${qualifiedKey}`);
-    catalog[qualifiedKey] = {
+    validateLocaleKey(key);
+    catalog[`${frontendPrefix}${key}`] = {
       defaultMessage: message,
-      description: `${field} of ${frontendPrefix}${context}`,
+      description: `${field} of ${entry}`,
     };
   }
   function entries(
     spec: YAMLMap,
     list: string,
     fields: string[],
-    prefix: (item: YAMLMap) => string,
+    identify: (
+      item: YAMLMap,
+      index: number,
+    ) => { catalogBase: string; runtimeBase: string; sourceContext: string },
   ): void {
     const items = spec.get(list, true);
     if (items === undefined) return;
     if (!isSeq(items)) throw new Error(`${list} must be a sequence`);
-    const seen = new Set<string>();
-    for (const raw of items.items) {
+    for (const [index, raw] of items.items.entries()) {
       const item = mapping(raw, list);
-      const key = prefix(item);
-      unique(key, seen);
-      for (const field of fields) add(`${key}.${field}`, item, field, key);
+      const { catalogBase, runtimeBase, sourceContext } = identify(item, index);
+      const owner = {};
+      for (const field of fields) add(catalogBase, runtimeBase, item, field, sourceContext, owner);
     }
   }
-  function nav(items: unknown, prefix: string): void {
-    if (!isSeq(items)) throw new Error(`${prefix}.navItems/routes must be a sequence`);
-    const seen = new Set<string>();
-    for (const raw of items.items) {
-      const item = mapping(raw, prefix);
+  function nav(
+    items: unknown,
+    catalogPrefix: string,
+    runtimePrefix: string,
+    sourcePrefix: string,
+  ): void {
+    if (!isSeq(items)) throw new Error(`${catalogPrefix}.navItems/routes must be a sequence`);
+    for (const [index, raw] of items.items.entries()) {
+      const item = mapping(raw, catalogPrefix);
       if (item.has("segmentRef")) continue;
-      const key = `${prefix}.${identifier(item, "id", prefix)}`;
-      unique(key, seen);
-      for (const field of ["title", "product"]) add(`${key}.${field}`, item, field, key);
+      const id = identifier(item, "id", catalogPrefix);
+      const key = `${catalogPrefix}.${id}`;
+      const runtimeKey = `${runtimePrefix}.${id}`;
+      const source = `${sourcePrefix}[${index}] (id=${JSON.stringify(id)})`;
+      const owner = {};
+      for (const field of ["title", "product"]) add(key, runtimeKey, item, field, source, owner);
       const routes = item.get("routes", true);
-      if (routes !== undefined) nav(routes, `${key}.routes`);
+      if (routes !== undefined)
+        nav(routes, `${key}.routes`, `${runtimeKey}.routes`, `${source}.routes`);
     }
   }
   for (const [index, spec] of specs.entries()) {
     frontendPrefix = prefixes[index]!;
+    registry = { catalog: new Map(), runtime: new Map() };
     const before = new Set(Object.keys(catalog));
-    entries(
-      spec,
-      "searchEntries",
-      ["title", "description", "alt_title"],
-      (item) => `searchEntries.${identifier(item, "id", "searchEntries")}`,
-    );
-    entries(
-      spec,
-      "serviceTiles",
-      ["title", "description"],
-      (item) =>
-        `serviceTiles.${identifier(item, "section", "serviceTiles")}.${identifier(item, "group", "serviceTiles")}.${identifier(item, "id", "serviceTiles")}`,
-    );
+    entries(spec, "searchEntries", ["title", "description", "alt_title"], (item, index) => {
+      const id = identifier(item, "id", "searchEntries");
+      return {
+        catalogBase: `searchEntries.${id}`,
+        runtimeBase: `search.${id}`,
+        sourceContext: `${frontendPrefix}searchEntries[${index}] (id=${JSON.stringify(id)})`,
+      };
+    });
+    entries(spec, "serviceTiles", ["title", "description"], (item, index) => {
+      const section = identifier(item, "section", "serviceTiles");
+      const group = identifier(item, "group", "serviceTiles");
+      const id = identifier(item, "id", "serviceTiles");
+      return {
+        catalogBase: `serviceTiles.${section}.${group}.${id}`,
+        runtimeBase: `tile.${section}.${group}.${id}`,
+        sourceContext:
+          `${frontendPrefix}serviceTiles[${index}] ` +
+          `(section=${JSON.stringify(section)}, group=${JSON.stringify(group)}, id=${JSON.stringify(id)})`,
+      };
+    });
     const segments = spec.get("bundleSegments", true);
     if (segments !== undefined) {
       if (!isSeq(segments)) throw new Error("bundleSegments must be a sequence");
-      const seen = new Set<string>();
-      for (const raw of segments.items) {
+      for (const [index, raw] of segments.items.entries()) {
         const item = mapping(raw, "bundleSegments");
-        const key = `bundleSegments.${identifier(item, "bundleId", "bundleSegments")}.${identifier(item, "segmentId", "bundleSegments")}.navItems`;
-        unique(key, seen);
+        const bundleId = identifier(item, "bundleId", "bundleSegments");
+        const segmentId = identifier(item, "segmentId", "bundleSegments");
+        const key = `bundleSegments.${bundleId}.${segmentId}.navItems`;
+        const runtimeKey = `nav.${bundleId}.${segmentId}`;
+        const source =
+          `${frontendPrefix}bundleSegments[${index}] ` +
+          `(bundleId=${JSON.stringify(bundleId)}, segmentId=${JSON.stringify(segmentId)})`;
+        registerCatalogPath(`${frontendPrefix}${key}`, {}, source);
         const navItems = item.get("navItems", true);
-        if (navItems !== undefined) nav(navItems, key);
+        if (navItems !== undefined) nav(navItems, key, runtimeKey, `${source}.navItems`);
       }
     }
     const module = spec.get("module", true);
     if (module !== undefined)
       add(
-        "module.defaultDocumentTitle",
+        "module",
+        "module",
         mapping(module, "module"),
         "defaultDocumentTitle",
-        "module",
+        `${frontendPrefix}module`,
+        {},
       );
     owned.push(new Set(Object.keys(catalog).filter((key) => !before.has(key))));
   }
@@ -266,7 +355,7 @@ export function inlineFeoLocale(
   }
   for (const [key, value] of Object.entries(target)) {
     if (!Object.hasOwn(catalog, key)) {
-      const hint = key.endsWith(".alt_title") ? "; alt_title is now one message per alias" : "";
+      const hint = key.endsWith(".alt_title") ? "; alt_title uses one message per slug" : "";
       throw new Error(`Unknown translation key: ${key}${hint}`);
     }
     if (typeof value !== "string" || !value.trim()) throw new Error(`Invalid translation: ${key}`);

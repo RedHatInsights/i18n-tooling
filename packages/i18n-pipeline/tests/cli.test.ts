@@ -391,6 +391,91 @@ describe("i18n-pipeline CLI", () => {
     );
   });
 
+  it("round-trips dotted FEO IDs and shared aliases through check mode", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-feo-dotted-"));
+    const templatePath = join(projectRoot, "frontend.yaml");
+    const sourcePath = join(projectRoot, "locales/source.json");
+    const targetPath = join(projectRoot, "locales/fr.json");
+    const template = `kind: Template
+objects:
+  - kind: Frontend
+    spec:
+      searchEntries:
+        - id: RHEL.ros
+          title: RHEL ROS
+          description: Manage ROS
+          alt_title: [acs, ACS, operators]
+        - id: hosts
+          title: Hosts
+          alt_title: [hosts, hosts]
+      serviceTiles:
+        - section: rhel
+          group: security
+          id: malware.signatures
+          title: Malware signatures
+      bundleSegments:
+        - bundleId: hybrid-committed-spend
+          segmentId: main
+          navItems:
+            - id: hybrid-committed-spend.nav
+              title: Committed spend
+              routes:
+                - id: hybrid-committed-spend.overview
+                  title: Overview
+                - id: hybrid-committed-spend.details
+                  title: Details
+`;
+    await writeFile(templatePath, template);
+    const errors: string[] = [];
+    const run = (args: string[]) =>
+      runCli(["feo", ...args], {
+        cwd: projectRoot,
+        stdout: () => undefined,
+        stderr: (message) => errors.push(message),
+      });
+    const extract = ["extract", "--template", "frontend.yaml", "--output", "locales/source.json"];
+    const inline = [
+      "inline",
+      "--template",
+      "frontend.yaml",
+      "--source",
+      "locales/source.json",
+      "--target",
+      "locales/fr.json",
+      "--locale",
+      "fr",
+    ];
+
+    expect(await run(extract)).toBe(0);
+    expect(await run([...extract, "--check"])).toBe(0);
+    const source = JSON.parse(await readFile(sourcePath, "utf8"));
+    expect(source["searchEntries.RHEL.ros.alt_title.acs"].defaultMessage).toBe("acs");
+    expect(source["searchEntries.RHEL.ros.alt_title.ACS"]).toBeUndefined();
+    const translations = {
+      "searchEntries.RHEL.ros.title": "RHEL ROS FR",
+      "searchEntries.RHEL.ros.description": "Manage ROS FR",
+      "searchEntries.RHEL.ros.alt_title.acs": "ACS FR",
+      "searchEntries.RHEL.ros.alt_title.operators": "Operators FR",
+      "searchEntries.hosts.alt_title.hosts": "Hosts FR",
+      "serviceTiles.rhel.security.malware.signatures.title": "Signatures FR",
+      "bundleSegments.hybrid-committed-spend.main.navItems.hybrid-committed-spend.nav.routes.hybrid-committed-spend.overview.title":
+        "Overview FR",
+      "bundleSegments.hybrid-committed-spend.main.navItems.hybrid-committed-spend.nav.routes.hybrid-committed-spend.details.title":
+        "Details FR",
+    };
+    await writeFile(targetPath, JSON.stringify(translations));
+
+    expect(await run([...inline, "--check"])).toBe(1);
+    expect(await readFile(templatePath, "utf8")).toBe(template);
+    expect(await run(inline)).toBe(0);
+    const updated = await readFile(templatePath, "utf8");
+    expect(parse(updated).objects[0].spec.locales.fr).toEqual(translations);
+    expect(await run([...inline, "--check"])).toBe(0);
+    expect(await readFile(templatePath, "utf8")).toBe(updated);
+    expect(await run([...extract, "--check"])).toBe(0);
+    expect(errors).toEqual([expect.stringContaining("out of sync with the FEO inline output")]);
+  });
+
   it("extracts, inlines and checks a multi-Frontend template without writing in check mode", async () => {
     projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-feo-"));
     const templatePath = join(projectRoot, "frontend.yaml");
