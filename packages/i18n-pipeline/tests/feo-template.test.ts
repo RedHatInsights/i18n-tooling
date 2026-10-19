@@ -716,7 +716,7 @@ objects:
   });
 });
 
-describe("FEO locale ids", () => {
+describe("FEO locale ids and CRD limits", () => {
   const source = extractFeoCatalog(template);
   const target = { "searchEntries.users.title": "Utilisateurs" };
 
@@ -741,5 +741,72 @@ describe("FEO locale ids", () => {
     const message = errorMessage(() => inlineFeoLocale(template, source, target, locale));
     expect(message).toContain(`Invalid target locale: ${locale}`);
     expect(message).toContain(hint.trim());
+  });
+
+  function localesBlock(count: number): string {
+    const ids = Array.from(
+      { length: count },
+      (_, index) =>
+        `${String.fromCharCode(97 + Math.floor(index / 26))}${String.fromCharCode(97 + (index % 26))}`,
+    ).filter((id) => id !== "en");
+    return `      locales:\n${ids.map((id) => `        ${id}:\n          searchEntries.users.title: x\n`).join("")}`;
+  }
+
+  it("limits a Frontend to 32 locales", () => {
+    const withLocales = (count: number) =>
+      template.replace("      searchEntries:", `${localesBlock(count)}      searchEntries:`);
+    const at31 = withLocales(31);
+    const at32 = inlineFeoLocale(at31, source, target, "fr");
+    expect(Object.keys(parse(at32).objects[0].spec.locales)).toHaveLength(32);
+    // Re-inlining an existing locale does not add one.
+    expect(inlineFeoLocale(at32, source, target, "fr")).toBe(at32);
+    const message = errorMessage(() => inlineFeoLocale(at32, source, target, "ko"));
+    expect(message).toContain("33 locales");
+    expect(message).toContain("32-locale limit");
+  });
+
+  function manyKeys(count: number): { template: string; catalog: Record<string, string> } {
+    const entries = Array.from(
+      { length: count },
+      (_, index) => `        - id: e${index}\n          title: T\n`,
+    );
+    return {
+      template: `kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n${entries.join("")}`,
+      catalog: Object.fromEntries(
+        Array.from({ length: count }, (_, index) => [`searchEntries.e${index}.title`, "T"]),
+      ),
+    };
+  }
+
+  it("limits a locale to 2048 keys", () => {
+    const ok = manyKeys(2048);
+    const okSource = extractFeoCatalog(ok.template);
+    const inlined = inlineFeoLocale(ok.template, okSource, ok.catalog, "fr");
+    expect(Object.keys(parse(inlined).objects[0].spec.locales.fr)).toHaveLength(2048);
+
+    const tooMany = manyKeys(2049);
+    const message = errorMessage(() =>
+      inlineFeoLocale(tooMany.template, extractFeoCatalog(tooMany.template), tooMany.catalog, "fr"),
+    );
+    expect(message).toContain("2049 keys");
+    expect(message).toContain("2048-key limit");
+  });
+
+  it("limits a message to 4096 characters, counting code points", () => {
+    const inline = (value: string) =>
+      inlineFeoLocale(template, source, { "searchEntries.users.title": value }, "fr");
+    expect(() => inline("a".repeat(4096))).not.toThrow();
+    // 4096 code points are 8192 UTF-16 units; 2049 emoji are 4098 units but only 2049 code points.
+    expect(() => inline("\u{1F600}".repeat(4096))).not.toThrow();
+    expect(() => inline("\u{1F600}".repeat(2049))).not.toThrow();
+    for (const value of [
+      "a".repeat(4097),
+      "\u{1F600}".repeat(4097),
+      `${"a".repeat(4096)}\u{1F600}`,
+    ]) {
+      const message = errorMessage(() => inline(value));
+      expect(message).toContain("4096-character limit");
+      expect(message).toContain("searchEntries.users.title");
+    }
   });
 });
