@@ -90,7 +90,15 @@ To onboard a new consumer, start with the [consumer onboarding checklist](docs/c
 
 ## Onboarding skill
 
-The `i18n-onboarding` skill inspects a repository and drives `i18n-pipeline` to add catalog validation and optional Phrase, Konflux, and FEO localization. It works in Claude Code, Codex CLI, opencode, and Pi. Until the first npm release it needs `I18N_PIPELINE_CLI` to point at a locally built `packages/i18n-pipeline/dist/cli.js`.
+The `i18n-onboarding` skill inspects a repository and drives `i18n-pipeline` to add catalog validation and optional Phrase, Konflux, and FEO localization. It works in Claude Code, Codex CLI, opencode, and Pi. Until the first npm release it needs `I18N_PIPELINE_CLI` to point at a locally built `packages/i18n-pipeline/dist/cli.js`:
+
+```bash
+git clone https://github.com/RedHatInsights/i18n-tooling.git ~/src/i18n-tooling
+cd ~/src/i18n-tooling && npm ci --ignore-scripts && npm run build
+export I18N_PIPELINE_CLI=~/src/i18n-tooling/packages/i18n-pipeline/dist/cli.js
+```
+
+Instead of exporting the variable, you can put the CLI on `PATH`, for example `ln -s ~/src/i18n-tooling/packages/i18n-pipeline/dist/cli.js ~/bin/i18n-pipeline`. To update it, run `git pull` and the build again. The pull request validation workflow and the i18n hub build the CLI from source themselves, so only local runs need this step.
 
 Install it for all four harnesses with one command:
 
