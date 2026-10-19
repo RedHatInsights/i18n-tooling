@@ -52,7 +52,7 @@ Set `sourceCatalog.filename` to `<repository-name>.<catalog>.en.json`, where `<c
 
 Use either `sourceCatalog.importSettingsUid` or `useProjectFileImportSettings`, not both. Map each Phrase locale to its repository locale once, in `targetLocales`. `catalog-validation.json` can use `tmsConfig` to derive those target checks; do not list them again.
 
-Point the validation config's `tmsConfig` at `phrase-tms.json` in the same change. A target file that has not arrived yet is pending, not a validation error.
+Point the validation config's `tmsConfig` at `phrase-tms.json` in the same change. A target file that has not arrived yet, or that is an empty `{}` placeholder the app imports before delivery, is pending, not a validation error. Keep such placeholders.
 
 The reusable reconciliation workflow writes one flat locale JSON file per target locale and opens or updates one PR per locale. It does not run the consumer's build or aggregation scripts. Never use an aggregate file as a target `outputPath`.
 

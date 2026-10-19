@@ -865,6 +865,18 @@ export async function validateCatalogProject(
           targetAdapter,
           contextFor(targetReference.locale, "target", targetReference.options),
         );
+        // Apps that import every locale file often commit `{}` placeholders before delivery.
+        if (
+          targetReference.optional &&
+          Object.keys(target.catalog.messages).length === 0 &&
+          Object.keys(source.catalog.messages).length > 0
+        ) {
+          pendingTargetCount += 1;
+          warnings.push(
+            `TMS target "${targetReference.path}" is an empty placeholder; counted as pending until translations are delivered.`,
+          );
+          continue;
+        }
         targetCount += 1;
         problems.push(
           ...comparisonProblems(
