@@ -1,6 +1,6 @@
 # Phrase GitHub App / Connector Evaluation
 
-> **Historical evaluation.** The current implementation uses direct Phrase API workflows and the i18n hub (the private `RedHatInsights/i18n-hub` repository). Phrase's GitHub connector/APC and webhooks are deferred.
+> **Historical evaluation.** The current implementation uses direct Phrase API workflows and the i18n hub (the `RedHatInsights/i18n-hub` repository, not public). Phrase's GitHub connector/APC and webhooks are deferred.
 
 **Status:** Recommended for sandbox validation, not yet production adoption
 
