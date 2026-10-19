@@ -593,7 +593,13 @@ async function runTmsCommand(
     return failedLocales.length ? 1 : 0;
   }
 
-  const results = await workflow.reconcile(phrasePins);
+  const results = await workflow.reconcile({
+    ...phrasePins,
+    repairScope: {
+      projectUid: parsed.workflow.projectUid,
+      sourceFilename: parsed.workflow.sourceCatalog.filename,
+    },
+  });
   if (!results.length) {
     options.stdout("No ready Phrase batches found.");
     return 0;

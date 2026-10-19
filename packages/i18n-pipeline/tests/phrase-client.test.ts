@@ -20,7 +20,10 @@ describe("PhraseClient", () => {
       return new Response(
         JSON.stringify({
           asyncRequest: { id: "import-42", action: "IMPORT_JOB" },
-          jobs: [{ uid: "job-fr", targetLang: "fr", workflowLevel: 1 }],
+          jobs: [
+            { uid: "job-fr-step-1", targetLang: "fr", workflowLevel: 1 },
+            { uid: "job-fr-step-2", targetLang: "fr", workflowLevel: 2 },
+          ],
           unsupportedFiles: [],
           warnings: [],
         }),
@@ -43,7 +46,10 @@ describe("PhraseClient", () => {
     });
 
     expect(result.asyncRequest.id).toBe("import-42");
-    expect(result.jobs).toHaveLength(1);
+    expect(result.jobs).toEqual([
+      { uid: "job-fr-step-1", targetLang: "fr", workflowLevel: 1 },
+      { uid: "job-fr-step-2", targetLang: "fr", workflowLevel: 2 },
+    ]);
     expect(calls).toHaveLength(2);
     expect(calls[0]?.url).toBe("https://us.phrase.com/idm/oauth/token");
     expect(calls[0]?.init?.method).toBe("POST");
@@ -108,6 +114,132 @@ describe("PhraseClient", () => {
       filename: "translation-template.json",
       importStatus: { status: "OK", errorMessage: null },
     });
+  });
+
+  it("lists every page with both notReady filters and deduplicates job parts by UID", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const job = (uid: string, targetLang: string, sourceFileUid: string) => ({
+      uid,
+      targetLang,
+      filename: "source catalog.json",
+      dateCreated: "2026-10-19T10:00:00Z",
+      importStatus: { status: "OK" },
+      imported: true,
+      sourceFileUid,
+      status: "NEW",
+      workflowStep: { workflowLevel: 1 },
+    });
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      calls.push({ url, init });
+      if (url.endsWith("/idm/oauth/token")) {
+        return new Response(JSON.stringify({ access_token: "short-lived-jwt", expires_in: 3600 }));
+      }
+      const parsed = new URL(url);
+      const pageNumber = Number(parsed.searchParams.get("pageNumber"));
+      const notReady = parsed.searchParams.get("notReady");
+      const content =
+        notReady === "true"
+          ? pageNumber === 0
+            ? [job("job-fr", "fr", "source-a"), job("job-ja", "ja", "source-b")]
+            : [job("job-es", "es", "source-c")]
+          : pageNumber === 0
+            ? [job("job-fr", "fr", "source-a")]
+            : [job("job-de", "de", "source-d")];
+      return new Response(JSON.stringify({ content, totalPages: 2 }));
+    };
+    const client = new PhraseClient({ platformApiToken: "platform-token", region: "us", fetch });
+
+    const jobs = await client.listJobs("project-uid", { filename: "source catalog.json" });
+
+    expect(jobs.map(({ uid }) => uid)).toEqual(["job-fr", "job-de", "job-ja", "job-es"]);
+    expect(jobs[0]).toMatchObject({
+      uid: "job-fr",
+      targetLang: "fr",
+      workflowLevel: 1,
+      filename: "source catalog.json",
+      dateCreated: "2026-10-19T10:00:00Z",
+      sourceFileUid: "source-a",
+      importStatus: { status: "OK" },
+    });
+    const listCalls = calls.slice(1);
+    expect(listCalls).toHaveLength(4);
+    expect(
+      listCalls.map(({ url }) => {
+        const parsed = new URL(url);
+        return {
+          path: parsed.pathname,
+          pageNumber: parsed.searchParams.get("pageNumber"),
+          pageSize: parsed.searchParams.get("pageSize"),
+          workflowLevel: parsed.searchParams.get("workflowLevel"),
+          filename: parsed.searchParams.get("filename"),
+          notReady: parsed.searchParams.get("notReady"),
+        };
+      }),
+    ).toEqual([
+      {
+        path: "/web/api2/v2/projects/project-uid/jobs",
+        pageNumber: "0",
+        pageSize: "50",
+        workflowLevel: "1",
+        filename: "source catalog.json",
+        notReady: null,
+      },
+      {
+        path: "/web/api2/v2/projects/project-uid/jobs",
+        pageNumber: "1",
+        pageSize: "50",
+        workflowLevel: "1",
+        filename: "source catalog.json",
+        notReady: null,
+      },
+      {
+        path: "/web/api2/v2/projects/project-uid/jobs",
+        pageNumber: "0",
+        pageSize: "50",
+        workflowLevel: "1",
+        filename: "source catalog.json",
+        notReady: "true",
+      },
+      {
+        path: "/web/api2/v2/projects/project-uid/jobs",
+        pageNumber: "1",
+        pageSize: "50",
+        workflowLevel: "1",
+        filename: "source catalog.json",
+        notReady: "true",
+      },
+    ]);
+  });
+
+  it("returns incomplete job-list metadata for recovery to reject safely", async () => {
+    const listedJob = {
+      uid: "job-without-locale",
+      filename: "source catalog.json",
+      dateCreated: "not-a-timestamp",
+      workflowStep: { workflowLevel: 1 },
+    };
+    const fetch: typeof globalThis.fetch = async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith("/idm/oauth/token")) {
+        return new Response(JSON.stringify({ access_token: "short-lived-jwt", expires_in: 3600 }));
+      }
+      return new Response(JSON.stringify({ content: [listedJob], totalPages: 1 }));
+    };
+    const client = new PhraseClient({ platformApiToken: "platform-token", region: "eu", fetch });
+
+    const jobs = await client.listJobs("project-uid", { filename: "source catalog.json" });
+
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({
+      uid: "job-without-locale",
+      filename: "source catalog.json",
+      dateCreated: "not-a-timestamp",
+      workflowLevel: 1,
+      listingEntry: "page 1, item 1",
+    });
+    expect(jobs[0]?.targetLang).toBeUndefined();
+    expect(jobs[0]?.sourceFileUid).toBeUndefined();
   });
 
   it("reports failed asynchronous operations without mislabeling them as HTTP errors", async () => {
