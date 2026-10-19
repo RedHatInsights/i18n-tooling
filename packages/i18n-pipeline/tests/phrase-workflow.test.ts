@@ -223,6 +223,7 @@ class FakeRepository implements PhraseWorkflowRepository {
     PhraseLocalePullRequest,
     "recordToolingCommitSha" | "recheckOwnedCommitEligibility"
   >[] = [];
+  readonly createDraftRequirements: Array<boolean | undefined> = [];
   readonly resolvedRefs: string[] = [];
   readonly pullRequestStates = new Map<string, "open" | "merged" | "closed">();
   pullRequestStateCalls = 0;
@@ -277,6 +278,7 @@ class FakeRepository implements PhraseWorkflowRepository {
     input: PhraseLocalePullRequest,
   ): Promise<PhraseLocalePullRequestCreated> {
     if (this.pullRequestError) throw this.pullRequestError;
+    this.createDraftRequirements.push(input.draft);
     const pullRequestUrl = `https://github.com/example/app/pull/${42 + this.pullRequests.length}`;
     const files = [{ path: input.path, content: input.content }, ...(input.additionalFiles ?? [])];
     const previousHeadSha = this.branchHeads.get(input.branch) ?? null;
@@ -298,7 +300,7 @@ class FakeRepository implements PhraseWorkflowRepository {
     const { recordToolingCommitSha, recheckOwnedCommitEligibility, ...storedInput } = input;
     void recordToolingCommitSha;
     void recheckOwnedCommitEligibility;
-    this.pullRequests.push(storedInput);
+    this.pullRequests.push({ ...storedInput, draft: true });
     this.pullRequestBranches.set(pullRequestUrl, input.branch);
     this.pullRequestBodies.set(pullRequestUrl, input.body);
     return { pullRequestUrl, toolingCommitSha };
@@ -2549,7 +2551,7 @@ describe("PhraseWorkflow submission", () => {
     expect(updated?.record.locales.fr?.toolingCommitSha).toBe(repository.branchHeads.get(branch!));
   });
 
-  it("keeps an open PR unchanged after validation fails and retries on the next run", async () => {
+  it("shows invalid re-exports in the same draft PR and repairs them on the next run", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
     const repository = new FakeRepository();
@@ -2570,7 +2572,6 @@ describe("PhraseWorkflow submission", () => {
     await workflow.reconcile();
     const [created] = await state.listBatches();
     const branch = created?.record.locales.fr?.pullRequestBranch;
-    const initialCommit = repository.branchHeads.get(branch!);
     phrase.targetBytes = new TextEncoder().encode('{"greeting":"Bonjour"}');
 
     const failed = await workflow.reconcile();
@@ -2580,13 +2581,21 @@ describe("PhraseWorkflow submission", () => {
     expect(failed[0]?.reason).toContain("ICU argument mismatches");
     expect(afterFailure?.record.phase).toBe("ready");
     expect(afterFailure?.record.locales.fr?.phase).toBe("pr-created");
-    expect(afterFailure?.record.locales.fr?.toolingCommitSha).toBe(initialCommit);
-    expect(repository.commitCount(branch!)).toBe(1);
+    expect(afterFailure?.record.locales.fr?.toolingCommitSha).toBe(
+      repository.branchHeads.get(branch!),
+    );
+    expect(afterFailure?.record.locales.fr?.validationErrors).toEqual([
+      expect.stringContaining("ICU argument mismatches"),
+    ]);
+    expect(repository.pullRequestBodies.get(failed[0]!.pullRequestUrl!)).toContain(
+      "Translation errors (do not merge)",
+    );
+    expect(repository.commitCount(branch!)).toBe(2);
     expect(repository.pullRequests).toHaveLength(1);
 
     phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
     expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
-    expect(repository.commitCount(branch!)).toBe(2);
+    expect(repository.commitCount(branch!)).toBe(3);
     expect(phrase.targetDownloadCalls).toBe(3);
   });
 
@@ -2667,8 +2676,98 @@ describe("PhraseWorkflow submission", () => {
     expect(results[0]?.phase).toBe("failed");
     expect(results[0]?.reason).toContain("Use # where the number belongs");
     expect(stored?.record.phase).toBe("ready");
-    expect(stored?.record.locales.zh_cn?.phase).toBe("validation-failed");
-    expect(repository.pullRequests).toHaveLength(0);
+    expect(stored?.record.locales.zh_cn?.phase).toBe("pr-created");
+    expect(repository.pullRequests).toHaveLength(1);
+    expect(repository.pullRequests[0]?.draft).toBe(true);
+    expect(repository.pullRequests[0]?.body).toContain("Use # where the number belongs");
+  });
+
+  it("keeps invalid FEO catalogs visible without writing generated YAML until fixed", async () => {
+    const source = new TextEncoder().encode(
+      '{"searchEntries.roles.title":{"defaultMessage":"Roles"}}',
+    );
+    const template =
+      "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n        - id: roles\n          title: Roles\n";
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    repository.onReadFile = (path, ref) => {
+      for (const [branch, head] of repository.branchHeads) {
+        if (head === ref)
+          return (
+            repository.branchFiles.get(branch)?.get(path) ??
+            (path === "deploy/frontend.yaml" ? new TextEncoder().encode(template) : null)
+          );
+      }
+      return path === "deploy/frontend.yaml" ? new TextEncoder().encode(template) : source;
+    };
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state: new MemoryStateStore(),
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes: source,
+      config: {
+        ...config,
+        frontendTemplate: { path: "deploy/frontend.yaml" },
+        targetAdapter: "icu-json",
+      },
+    });
+    phrase.jobStatus = "COMPLETED";
+    phrase.targetBytes = new TextEncoder().encode(
+      '{"searchEntries.roles.title":"Rôles {missing}"}',
+    );
+    const [invalid] = await workflow.reconcile();
+    const pr = repository.pullRequests[0]!;
+    expect(pr.draft).toBe(true);
+    expect(pr.additionalFiles).toBeUndefined();
+    expect(invalid?.phase).toBe("failed");
+    phrase.targetBytes = new TextEncoder().encode('{"searchEntries.roles.title":"Rôles"}');
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    expect(repository.pullRequests).toHaveLength(1);
+    expect(
+      new TextDecoder().decode(repository.branchFiles.get(pr.branch)?.get("deploy/frontend.yaml")),
+    ).toContain("Rôles");
+    expect(repository.pullRequestBodies.get(invalid!.pullRequestUrl!)).not.toContain(
+      "Translation errors",
+    );
+
+    const validYaml = repository.branchFiles.get(pr.branch)!.get("deploy/frontend.yaml");
+    phrase.targetBytes = new TextEncoder().encode(
+      '{"searchEntries.roles.title":"Rôles {missing}"}',
+    );
+    expect((await workflow.reconcile())[0]?.phase).toBe("failed");
+    expect(repository.branchFiles.get(pr.branch)!.get("deploy/frontend.yaml")).toEqual(validYaml);
+    expect(repository.pullRequestBodies.get(invalid!.pullRequestUrl!)).toContain(
+      "Generated Frontend YAML was not updated",
+    );
+    expect(repository.pullRequestBodies.get(invalid!.pullRequestUrl!)).toContain(
+      "earlier valid export",
+    );
+    phrase.targetBytes = new TextEncoder().encode('{"searchEntries.roles.title":"Rôles"}');
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+
+    // A template-only problem must update findings even when catalog bytes do not change.
+    const validRead = repository.onReadFile!;
+    const head = repository.branchHeads.get(pr.branch)!;
+    const commits = repository.commitCount(pr.branch);
+    repository.onReadFile = (path, ref, call) =>
+      path === "deploy/frontend.yaml" && ref === head ? null : validRead(path, ref, call);
+    expect((await workflow.reconcile())[0]?.phase).toBe("failed");
+    expect(repository.commitCount(pr.branch)).toBe(commits);
+    expect(repository.pullRequestBodies.get(invalid!.pullRequestUrl!)).toContain(
+      "Missing Frontend template",
+    );
+    repository.onReadFile = validRead;
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    expect(repository.commitCount(pr.branch)).toBe(commits);
+    expect(repository.pullRequestBodies.get(invalid!.pullRequestUrl!)).not.toContain(
+      "Translation errors",
+    );
   });
 
   it("adds the Frontend template to the same locale PR and blocks stale English", async () => {
@@ -4571,10 +4670,256 @@ describe("PhraseWorkflow submission", () => {
 
     expect(result?.phase).toBe("failed");
     expect(result?.reason).toContain('"items": plural {count} lost exact branch =1');
-    expect(repository.pullRequests).toHaveLength(0);
+    expect(repository.pullRequests).toHaveLength(1);
+    expect(repository.pullRequests[0]?.draft).toBe(true);
+    expect(repository.pullRequests[0]?.body).toContain(
+      '"items": plural {count} lost exact branch =1',
+    );
   });
 
-  it("retries a validation-failed locale from the same completed Phrase job", async () => {
+  it("requires drafts for adoption only when validation fails", async () => {
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state: new MemoryStateStore(),
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    await workflow.reconcile();
+    expect(repository.createDraftRequirements).toEqual([false]);
+    expect(repository.pullRequests[0]?.draft).toBe(true);
+  });
+
+  it.each(["open", "closed", "merged"] as const)(
+    "allows fresh-job retry only for a closed unmerged invalid PR (state: %s)",
+    async (prState) => {
+      const state = new MemoryStateStore();
+      const phrase = new FakePhrase();
+      const repository = new FakeRepository();
+      const workflow = new PhraseWorkflow({
+        phrase,
+        state,
+        repository,
+        catalogAdapters: new CatalogAdapterRegistry(),
+      });
+      const input = {
+        repository: "example/app",
+        baseRef: "phrase-pilot",
+        sourceCommit: "abc123",
+        sourceBytes,
+        config,
+      };
+      const batch = await workflow.submit(input);
+      phrase.jobStatus = "COMPLETED";
+      phrase.targetBytes = new TextEncoder().encode('{"greeting":"Bonjour"}');
+      const [invalid] = await workflow.reconcile();
+      repository.pullRequestStates.set(invalid!.pullRequestUrl!, prState);
+      await workflow.reconcile();
+      phrase.jobParts = [{ uid: "job-fr-retry", targetLang: "fr", workflowLevel: 1 }];
+      phrase.targetBytes = new TextEncoder().encode('{"greeting":"Bonjour {name}"}');
+      const retried = await workflow.submit({ ...input, retryFailed: true });
+      expect(phrase.createJobCalls).toBe(prState === "closed" ? 2 : 1);
+      if (prState === "closed") {
+        expect(retried.key).not.toBe(batch.key);
+        expect(retried.jobs.map((job) => job.uid)).toEqual(["job-fr-retry"]);
+        expect(
+          (await state.readBatch(batch.key))?.record.locales.fr?.pullRequestReexportDelegated,
+        ).toBe(true);
+        expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+        expect(repository.pullRequests).toHaveLength(2);
+        expect(repository.pullRequests[1]?.branch).not.toBe(repository.pullRequests[0]?.branch);
+        expect((await workflow.submit({ ...input, retryFailed: true })).key).toBe(retried.key);
+        expect(phrase.createJobCalls).toBe(2);
+      } else {
+        expect(retried.key).toBe(batch.key);
+      }
+    },
+  );
+
+  it("does not resume the replaced closed-invalid PR when it reopens in an active parent batch", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    phrase.jobParts = [
+      { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
+      { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
+    ];
+    phrase.expectedTargetLangs = ["fr", "ja"];
+    phrase.targetBytesByJob.set("job-fr", new TextEncoder().encode('{"greeting":"Bonjour"}'));
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const input = {
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config: {
+        ...config,
+        targetLocales: [
+          ...config.targetLocales,
+          { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
+        ],
+      },
+    };
+    const batch = await workflow.submit(input);
+    phrase.jobStatus = "COMPLETED";
+    const [invalid] = await workflow.reconcile();
+    const oldBranch = repository.pullRequests[0]!.branch;
+    repository.pullRequestStates.set(invalid!.pullRequestUrl!, "closed");
+    await workflow.reconcile();
+    expect((await state.readBatch(batch.key))?.record.phase).toBe("ready");
+    phrase.expectedTargetLangs = ["fr"];
+    phrase.jobParts = [{ uid: "job-fr-retry", targetLang: "fr", workflowLevel: 1 }];
+    await workflow.submit({ ...input, retryFailed: true });
+    repository.pullRequestStates.set(invalid!.pullRequestUrl!, "open");
+    phrase.targetDownloadJobUids.length = 0;
+    await workflow.reconcile();
+    expect(phrase.targetDownloadJobUids).not.toContain("job-fr");
+    expect(phrase.targetDownloadJobUids).toContain("job-fr-retry");
+    expect(repository.commitCount(oldBranch)).toBe(1);
+    expect(repository.pullRequests).toHaveLength(3);
+  });
+
+  it.each([
+    ['{"greeting":"Bonjour {name"}', "invalid ICU syntax"],
+    ["{", "Downloaded fr catalog failed validation"],
+  ])(
+    "opens a draft with invalid bytes (%s) and repairs the same PR without changing job status",
+    async (content, diagnostic) => {
+      const state = new MemoryStateStore();
+      const phrase = new FakePhrase();
+      const repository = new FakeRepository();
+      const workflow = new PhraseWorkflow({
+        phrase,
+        state,
+        repository,
+        catalogAdapters: new CatalogAdapterRegistry(),
+      });
+      const batch = await workflow.submit({
+        repository: "example/app",
+        baseRef: "phrase-pilot",
+        sourceCommit: "abc123",
+        sourceBytes,
+        config,
+      });
+      phrase.jobStatus = "COMPLETED";
+      phrase.targetBytes = new TextEncoder().encode(content);
+
+      const [invalid] = await workflow.reconcile();
+      const pr = repository.pullRequests[0]!;
+      expect(pr).toBeDefined();
+      expect(pr.draft).toBe(true);
+      expect(pr.content).toEqual(phrase.targetBytes);
+      expect(pr.body).toContain("Translation errors (do not merge)");
+      expect(pr.body).toContain(diagnostic);
+      expect(invalid?.phase).toBe("failed");
+      expect(invalid?.pullRequestUrl).toBe("https://github.com/example/app/pull/42");
+      expect((await state.readBatch(batch.key))?.record.locales.fr?.phase).toBe("pr-created");
+
+      const commits = repository.branchCommits.get(pr.branch)!.length;
+      expect((await workflow.reconcile())[0]?.phase).toBe("failed");
+      expect(repository.branchCommits.get(pr.branch)).toHaveLength(commits);
+      phrase.targetBytes = new TextEncoder().encode('{"greeting":"Bonjour {name}"}');
+      const [fixed] = await workflow.reconcile();
+      expect(fixed?.phase).toBe("pr-created");
+      expect(fixed?.pullRequestUrl).toBe(invalid?.pullRequestUrl);
+      expect(repository.pullRequests).toHaveLength(1);
+      expect(repository.pullRequestBodies.get(fixed!.pullRequestUrl!)).not.toContain(
+        "Translation errors",
+      );
+      expect(phrase.jobStatus).toBe("COMPLETED");
+      expect(phrase.createJobCalls).toBe(1);
+    },
+  );
+
+  it("refreshes legacy PR descriptions even when findings and catalog bytes are unchanged", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const batch = await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Bonjour"}');
+    const [invalid] = await workflow.reconcile();
+    const stored = await state.readBatch(batch.key);
+    delete stored!.record.locales.fr!.pullRequestBodyDigest;
+    await state.updateBatch(stored!.record, stored!.revision);
+    const expectedBody = repository.pullRequestBodies.get(invalid!.pullRequestUrl!);
+    repository.pullRequestBodies.set(
+      invalid!.pullRequestUrl!,
+      "old description without current safety notes",
+    );
+    const branch = repository.pullRequests[0]!.branch;
+    const commits = repository.commitCount(branch);
+    expect((await workflow.reconcile())[0]?.phase).toBe("failed");
+    expect(repository.pullRequestBodies.get(invalid!.pullRequestUrl!) === expectedBody).toBe(true);
+    expect(repository.commitCount(branch)).toBe(commits);
+  });
+
+  it("shows both errors and warnings and truncates Unicode without replacement characters", async () => {
+    const source = new TextEncoder().encode(
+      JSON.stringify({
+        ...Object.fromEntries([["é".repeat(30_000), { defaultMessage: "Message" }]]),
+        requests: { defaultMessage: "{count, plural, one {# request} other {# requests}}" },
+      }),
+    );
+    const phrase = new FakePhrase();
+    phrase.targetBytes = new TextEncoder().encode(
+      JSON.stringify({ requests: "{count, plural, one {élément} other {# éléments}}" }),
+    );
+    const repository = new FakeRepository();
+    repository.baseSourceBytes = source;
+    repository.pinnedSourceBytes = source;
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state: new MemoryStateStore(),
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes: source,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    expect((await workflow.reconcile())[0]?.phase).toBe("failed");
+    const pr = repository.pullRequests[0]!;
+    expect(pr.draft).toBe(true);
+    expect(pr.body).toContain("Translation errors (do not merge)");
+    expect(pr.body).toContain("missing IDs");
+    expect(pr.body).toContain("Translation warnings (review before merging)");
+    expect(pr.body).toContain("additional detail omitted");
+    expect(pr.body.includes("\uFFFD")).toBe(false);
+    expect(new TextEncoder().encode(pr.body).length).toBeLessThan(65_536);
+  });
+
+  it("repairs a draft with ICU argument mismatches from the same completed Phrase job", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
     phrase.targetBytes = new TextEncoder().encode(
@@ -4608,8 +4953,10 @@ describe("PhraseWorkflow submission", () => {
     expect(first[0]?.reason).toContain("ICU argument mismatches");
     expect(first[0]?.reason).toContain('"greeting": source [name], target [count]');
     expect(failed?.record.phase).toBe("ready");
-    expect(failed?.record.locales.fr?.phase).toBe("validation-failed");
-    expect(repository.pullRequests).toHaveLength(0);
+    expect(failed?.record.locales.fr?.phase).toBe("pr-created");
+    expect(repository.pullRequests).toHaveLength(1);
+    expect(repository.pullRequests[0]?.draft).toBe(true);
+    expect(repository.pullRequests[0]?.body).toContain("ICU argument mismatches");
 
     phrase.targetBytes = new TextEncoder().encode(
       JSON.stringify({
@@ -4791,7 +5138,7 @@ describe("PhraseWorkflow submission", () => {
     expect(repository.pullRequests).toHaveLength(2);
   });
 
-  it("keeps all-locales targets pending while another locale has a retryable validation failure", async () => {
+  it("keeps all-locales siblings pending while a delivered draft has validation errors", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
     phrase.jobParts = [
@@ -4982,7 +5329,10 @@ describe("PhraseWorkflow submission", () => {
     expect(repository.pullRequests[0]?.baseCommit).toBe(oldBaseCommit);
   });
 
-  it("supersedes a late FEO template English change on the moved base head", async () => {
+  it.each([
+    '{"searchEntries.roles.title":"角色"}',
+    '{"searchEntries.roles.title":"角色 {missing}"}',
+  ])("supersedes a late FEO template English change even with target %s", async (target) => {
     const source = new TextEncoder().encode(
       '{"searchEntries.roles.title":{"defaultMessage":"Roles","description":"Role title"}}',
     );
@@ -4995,7 +5345,7 @@ describe("PhraseWorkflow submission", () => {
     const phrase = new FakePhrase();
     phrase.expectedTargetLangs = ["zh_cn"];
     phrase.jobParts = [{ uid: "job-zh_cn", targetLang: "zh_cn", workflowLevel: 1 }];
-    phrase.targetBytes = new TextEncoder().encode('{"searchEntries.roles.title":"角色"}');
+    phrase.targetBytes = new TextEncoder().encode(target);
     const repository = new FakeRepository();
     repository.baseCommit = oldBaseCommit;
     repository.onReadFile = (path, ref) => {

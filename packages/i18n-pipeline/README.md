@@ -24,7 +24,7 @@ The FormatJS adapter retains string/object descriptions and other descriptor met
 - **`unused-plural-category`** — a branch uses a category the source locale never selects, such as `zero` in English. Use `=0`.
 - **`unformatted-count-argument`** — a plural selector or count-like argument (`count`, `total`, `*Count`, …) is printed as `{count}`, which renders raw digits. Use `{count, number}` or `#` so fr renders `1 234 567`.
 
-`check`, `validate-project`, and Phrase reconciliation also check each translation against its source and target locale. Errors fail the locale; Phrase reconciliation lists warnings in the locale PR description.
+`check`, `validate-project`, and Phrase reconciliation also check each translation against its source and target locale. Errors fail validation; Phrase reconciliation still opens a draft locale PR with errors and warnings in its description, then updates the same PR after corrections. Jobs stay `COMPLETED`. Invalid exports do not update generated Frontend YAML; failed downloads and other API errors remain retryable without fabricating catalog content.
 
 | Rule                             | Severity | Locales        | Finding                                                                                                                              |
 | -------------------------------- | -------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
