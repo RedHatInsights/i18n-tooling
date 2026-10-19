@@ -62,7 +62,7 @@ Map both `APP_*` names for App mode. Never use `secrets: inherit`.
 - Set top-level `permissions: {}` and grant permissions per job.
 - **Trap: source lint scope.** The default `source-glob` scans all sources. Existing code with imported, dynamic, or inline descriptors fails immediately. Scope `source-glob` to the files that declare messages (rbac-ui: `src/Messages.js`), and track migrating the rest as separate work.
 
-**Done when:** the validation job passes on a PR, and fails on a PR that edits `Messages.js` without regenerating the catalogs.
+**Done when:** message-source files are included in the caller's PR path filters, and a source-only drift PR runs validation and fails.
 
 ## 6. Pilot Phrase from a feature branch
 
@@ -83,17 +83,21 @@ A delivered catalog is not a live locale. rbac-ui's `src/locales/locale.ts` alwa
 
 After the pilot round trip, restore the triggers from the [example callers](../examples/phrase-consumer/.github/workflows/) so nobody has to dispatch a run:
 
-- **Submit** runs on a push to the default branch that changes the source catalog or the Phrase config. List exactly those two paths under `paths`. A rerun for unchanged source reuses its batch instead of creating a second Phrase job. A config change that Phrase sees, such as adding a target locale, submits a new batch for every locale; see [how batches are keyed](../README.md#phrase-tms-round-trip).
+- **Submit** runs on a push to the default branch that changes the source input or the Phrase config. Watch the Phrase config and actual source input: use `frontendTemplate.path` when `frontendTemplate.generateSourceCatalog` is true, otherwise `sourceCatalog.path`. A rerun for unchanged source reuses its batch instead of creating a second Phrase job. A config change that Phrase sees, such as adding a target locale, submits a new batch for every locale; see [how batches are keyed](../README.md#phrase-tms-round-trip).
 - **Reconcile** runs on a schedule. Pick your own minute, away from the top of the hour. Scheduled workflows run from the default branch only.
 - Keep `workflow_dispatch` on both. The submit dispatch offers `retry-failed` for a batch that failed in Phrase.
 - Restrict the Phrase environment's deployment refs to the default branch, and do not add required reviewers.
-- Move `PHRASE_PLATFORM_API_TOKEN` from a person's account to a dedicated technical user, limited to the business unit that owns the Phrase project. A Phrase Service Account is not an option for submit: its bot user [cannot create jobs](https://support.phrase.com/hc/en-us/articles/29488404284316-Service-Accounts). See [Phrase credentials](../README.md#phrase-tms-round-trip).
+- A person's `PHRASE_PLATFORM_API_TOKEN` may serve until a dedicated technical user exists; then replace it with a technical-user token scoped to the business unit that owns the Phrase project. A Phrase Service Account is not an option for submit: its bot user [cannot create jobs](https://support.phrase.com/hc/en-us/articles/29488404284316-Service-Accounts). See [Phrase credentials](../README.md#phrase-tms-round-trip).
 - **Trap: an environment with required reviewers.** A scheduled run then waits for approval and never starts on its own.
 - **Trap: nobody sees a failed schedule.** GitHub notifies only the person who last edited the workflow's `cron` line. Agree who watches the Actions tab, or add your own notification step to the caller.
 - **Trap: schedules stop in quiet repositories.** GitHub disables scheduled workflows in a public repository after 60 days without activity. Re-enable the workflow in the Actions tab.
-- **Trap: locale pull request checks.** GitHub Actions holds checks on a pull request opened with `GITHUB_TOKEN` until a maintainer approves them. Konflux checks are expected to start on their own, which the pilot has to confirm; when one does not, a repository collaborator comments `/ok-to-test`. See the [GitHub Actions and Konflux caveats](../README.md#phrase-tms-round-trip), and agree who watches new locale pull requests.
+- **Trap: locale pull request checks.** GitHub Actions holds checks on a pull request opened with `GITHUB_TOKEN` until a maintainer approves them. Konflux on locale PRs remains untested and requires a separate acceptance check; when a check does not start, a repository collaborator comments `/ok-to-test`. See the [GitHub Actions and Konflux caveats](../README.md#phrase-tms-round-trip), and agree who watches new locale pull requests.
 
-**Done when:** a merge that changes a message starts submit on its own, a merge that does not touch the catalog starts nothing, and the next scheduled reconcile runs without waiting for approval.
+**Done when:** a merge that changes a message starts submit on its own, a merge touching neither the source input nor the Phrase config does not start submit, and the next scheduled reconcile runs without waiting for approval.
+
+## Hub-owned Phrase automation
+
+Keep catalog validation and the Phrase config in the consumer repository. Install the hub's GitHub App on each target consumer during onboarding, then submit a reviewed registration to `i18n-hub`'s `consumers.json` with `phraseProject` and `phraseFile`; follow the README of the `RedHatInsights/i18n-hub` repository (not public). Phrase credentials and the reconcile schedule live in the hub. Choose hub-owned or consumer-owned Phrase automation for a repository; never run both.
 
 ## Rolling back
 
@@ -101,8 +105,8 @@ Stop the automation first, then decide what to keep.
 
 1. Disable the two caller workflows in the Actions tab, or remove their `push` and `schedule` triggers. Nothing runs after that.
 2. Keep the state branch (`i18n-tms-state` in the example). Never delete it or its records. It is the only record of which Phrase jobs exist. Without it the next submit creates a new Phrase job for a source that was already sent, translators receive duplicate work, and reconcile no longer knows about the jobs in progress.
-3. Leave open locale pull requests open, or merge them. Reconcile keeps updating open PRs from Phrase. Closing one without merging does not fail the locale. A closed PR is checked for reopening while its batch remains active; reopening resumes re-export. Once a reconcile observes every PR in the batch merged or closed, the batch completes, and reopening afterward does not resume automation.
-4. Phrase jobs keep running. The tooling never cancels them. Cancel in Phrase the ones you no longer want; a cancelled job is recorded as a failed locale on the next reconcile.
+3. Leave open locale pull requests open, or merge them. Disabling the workflows leaves PRs intact; after resuming, reconcile refreshes eligible open PRs from Phrase. Closing one without merging does not fail the locale. A closed PR is checked for reopening while its batch remains active; reopening resumes re-export only while the branch head remains tooling-owned. Once a reconcile observes every PR in the batch merged or closed, the batch completes, and reopening afterward does not resume automation.
+4. Phrase jobs keep running. The tooling never cancels them. Cancel in Phrase the ones you no longer want; cancellation fails undelivered locales. For a locale with an open PR, it blocks refresh and reports failure while preserving the PR record.
 5. To return to an earlier tooling version, pin `uses:` back to the previous reviewed commit SHA.
 
 To resume, enable the workflows again. Reconcile continues from the stored state and submit skips sources it has already sent.

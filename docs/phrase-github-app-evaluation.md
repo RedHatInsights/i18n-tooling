@@ -1,5 +1,7 @@
 # Phrase GitHub App / Connector Evaluation
 
+> **Historical evaluation.** The current implementation uses direct Phrase API workflows and the i18n hub (the `RedHatInsights/i18n-hub` repository, not public). Phrase's GitHub connector/APC and webhooks are deferred.
+
 **Status:** Recommended for sandbox validation, not yet production adoption
 
 **Repository:** `i18n-tooling`
@@ -54,7 +56,7 @@ For the first POC, omit the webhook receiver and use two GitHub workflows:
 1. **Submit workflow** — manual dispatch or source-catalog change uploads/submits one batch and records its Phrase project/job mapping.
 2. **Reconcile workflow** — `schedule` plus `workflow_dispatch` polls Phrase, and when every expected locale reaches the final workflow state, downloads, validates, and opens the PR with `gh pr create` or the GitHub API.
 
-Use a Phrase Service Account in GitHub Actions secrets and the built-in `GITHUB_TOKEN` for the PR. Add workflow concurrency so two reconciliations cannot create duplicate PRs.
+Submission requires a user's Platform API token; Phrase Service Accounts cannot create jobs. Use the built-in `GITHUB_TOKEN` for the PR. Add workflow concurrency so two reconciliations cannot create duplicate PRs.
 
 > **Correction (2026-10-15):** Phrase bot users [cannot create jobs or projects](https://support.phrase.com/hc/en-us/articles/29488404284316-Service-Accounts), so a Service Account cannot run submit. Submit uses a user's Platform API token; see [Phrase credentials](../README.md#phrase-tms-round-trip).
 

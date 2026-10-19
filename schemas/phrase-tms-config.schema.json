@@ -45,16 +45,19 @@
     },
     "sourceCatalog": {
       "type": "object",
+      "description": "Phrase source catalog settings. For generated FEO source, the template path is the source input while path remains the logical catalog location.",
       "required": ["path", "adapter", "locale"],
       "properties": {
         "path": {
           "type": "string",
-          "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*/$)(?!.*(?:^|/)\\.\\.?(/|$)).+$"
+          "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*/$)(?!.*(?:^|/)\\.\\.?(/|$)).+$",
+          "description": "Logical repository-relative source catalog path. With frontendTemplate.generateSourceCatalog, the source input is frontendTemplate.path; otherwise this file is read from the repository."
         },
         "filename": {
           "type": "string",
           "minLength": 1,
-          "pattern": "^[^/\\\\]+$"
+          "pattern": "^[^/\\\\]+$",
+          "description": "Phrase upload filename; defaults to the basename of path. The expected-source-filename workflow pin checks this value and the Phrase jobs. Hub consumers should use a unique filename within the Phrase project."
         },
         "adapter": {
           "$ref": "#/$defs/builtInAdapter"
@@ -86,14 +89,17 @@
     },
     "frontendTemplate": {
       "type": "object",
+      "description": "Optional Frontend YAML input. Reconciliation inlines each locale into this file; generateSourceCatalog makes it the Phrase source input.",
       "required": ["path"],
       "properties": {
         "path": {
           "type": "string",
-          "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*/$)(?!.*(?:^|/)\\.\\.?(/|$)).+$"
+          "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*/$)(?!.*(?:^|/)\\.\\.?(/|$)).+$",
+          "description": "Repository-relative Frontend YAML path used for source generation when enabled and for locale inlining during reconciliation."
         },
         "generateSourceCatalog": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Generate the Phrase source catalog from path on submit and reconciliation instead of reading sourceCatalog.path."
         }
       },
       "additionalProperties": false
@@ -123,15 +129,18 @@
     },
     "completionPolicy": {
       "type": "object",
+      "description": "Readiness policy for opening locale PRs. Batch completion is separate: a batch completes when each locale has failed or its PR is merged or closed.",
       "properties": {
         "default": {
           "enum": ["per-locale", "all-locales"],
-          "default": "per-locale"
+          "default": "per-locale",
+          "description": "Readiness policy for target locales without a byLocale override. per-locale opens each ready locale PR independently; all-locales waits until every target locale is ready and blocks sibling PRs if a locale fails. Both policies open one PR per locale."
         },
         "byLocale": {
           "type": "object",
           "additionalProperties": {
-            "enum": ["per-locale", "all-locales"]
+            "enum": ["per-locale", "all-locales"],
+            "description": "Readiness policy override for this Phrase locale."
           }
         }
       },
