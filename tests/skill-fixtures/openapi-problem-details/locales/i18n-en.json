@@ -1,0 +1,3 @@
+{
+  "service.error.not-found": "Service {serviceName} was not found."
+}

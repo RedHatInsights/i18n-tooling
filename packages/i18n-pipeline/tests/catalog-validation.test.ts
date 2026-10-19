@@ -662,6 +662,40 @@ describe("catalog project validation", () => {
     );
   });
 
+  it("counts an empty placeholder TMS target as pending with a warning", async () => {
+    await createProject();
+    await writeTmsConfig();
+    await writeFile(join(projectRoot!, "locales/zh-CN.json"), "{}\n");
+
+    const result = await runValidation({ version: 1, tmsConfig: "phrase-tms.json", checks: [] });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output.join("\n")).toContain(
+      'TMS target "locales/zh-CN.json" is an empty placeholder; counted as pending',
+    );
+    expect(result.output.at(-1)).toBe(
+      "Catalog validation passed (1 source, 1 target, 0 generated catalogs, 1 pending TMS target).",
+    );
+  });
+
+  it("still checks an empty placeholder named directly in checks", async () => {
+    await createProject();
+    await writeFile(join(projectRoot!, "locales/zh-CN.json"), "{}\n");
+
+    const result = await runValidation({
+      version: 1,
+      checks: [
+        {
+          source: { path: "locales/en.json", adapter: "formatjs-json", locale: "en" },
+          targets: [{ path: "locales/zh-CN.json", adapter: "icu-json", locale: "zh-CN" }],
+        },
+      ],
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors[0]).toContain("missing from target: greeting");
+  });
+
   it("reports catalog files that the plan does not declare", async () => {
     await createProject();
     await writeTmsConfig();

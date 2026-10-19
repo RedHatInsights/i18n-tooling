@@ -1,0 +1,27 @@
+name: Validate locale catalogs
+
+on:
+  pull_request:
+    paths:
+      - .github/i18n/**
+      - locales/translation-template.json
+      - src/locales/**
+      - scripts/**
+      - package.json
+      - package-lock.json
+
+permissions: {}
+
+jobs:
+  validate:
+    # zizmor: ignore[unpinned-uses] -- Replace marker with a reviewed immutable SHA before adoption.
+    uses: RedHatInsights/i18n-tooling/.github/workflows/i18n-validate.yml@<reviewed-commit-sha>
+    with:
+      package-manager: npm
+      validation-config: .github/i18n/catalog-validation.json
+      catalog-adapter: formatjs-json
+      catalog-path: locales/translation-template.json
+      catalog-role: source
+      catalog-locale: en
+    permissions:
+      contents: read

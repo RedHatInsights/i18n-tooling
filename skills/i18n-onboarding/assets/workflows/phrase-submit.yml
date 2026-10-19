@@ -1,0 +1,34 @@
+name: Phrase submit
+
+on:
+  # A merge to the default branch that changes the source catalog or the Phrase config.
+  push:
+    branches:
+      - main
+    paths:
+      - locales/translation-template.json
+      - .github/i18n/phrase-tms.json
+  workflow_dispatch:
+    inputs:
+      retry-failed:
+        description: Create a new Phrase job for failed outcomes of the current source
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  submit:
+    # zizmor: ignore[unpinned-uses] -- Replace marker with a reviewed immutable SHA before adoption.
+    uses: RedHatInsights/i18n-tooling/.github/workflows/phrase-submit.yml@<reviewed-commit-sha>
+    with:
+      config-path: .github/i18n/phrase-tms.json
+      environment: phrase-pilot
+      retry-failed: ${{ inputs.retry-failed == true }}
+    secrets:
+      # Map this name even when its value is in phrase-pilot; uncomment both APP_* lines for App mode.
+      PHRASE_PLATFORM_API_TOKEN: ${{ secrets.PHRASE_PLATFORM_API_TOKEN }}
+      # APP_CLIENT_ID: ${{ secrets.APP_CLIENT_ID }}
+      # APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+    permissions:
+      contents: write

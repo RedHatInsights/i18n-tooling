@@ -1,0 +1,22 @@
+{
+  "filters.clear": {
+    "defaultMessage": "Clear filters"
+  },
+  "results.count": {
+    "defaultMessage": "{count, plural, one {# result}}",
+    "description": "Count of search results shown above the list."
+  },
+  "results.empty": {
+    "defaultMessage": "No results match your filters."
+  },
+  "service.pause.billing": {
+    "defaultMessage": "Stop the bill for service.",
+    "description": "Button shown before a service is deactivated."
+  },
+  "service.status": {
+    "defaultMessage": "Active"
+  },
+  "settings.save": {
+    "defaultMessage": "Save"
+  }
+}
