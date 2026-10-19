@@ -8,7 +8,7 @@ Inspect the installed `@redhat-cloud-services/frontend-components-config-utiliti
 
 If `locales` is absent, generated translations will be rejected by that schema. Include upgrading this dependency and removing any local validator patch for it (including a `patches/` entry or `patch-package` step) as a separate dependency unit. Inspect the package manager and lockfile; use the repository's normal upgrade workflow, and verify the installed schema again after the upgrade. The wizard lists this upgrade as its own preselected item. When the developer keeps it selected, perform the upgrade as its own unit (its own commit when commits were chosen). When they deselect it, or the package registry cannot be reached, leave the dependency and lockfile unchanged and report the upgrade as a required follow-up for FEO localization. Do not patch the installed schema or hide its validation failure.
 
-**Release note, verify before relying on it:** the first release expected to contain this schema change is `4.14.0`; the release is not confirmed. Schema inspection, not this expectation, determines support.
+**Release note:** `frontend-components-config-utilities` `4.14.0` (2026-10-15) is the first release whose schema accepts `spec.locales`. It usually arrives through `@redhat-cloud-services/frontend-components-config`, whose `^4.12.5` range already allows it, so updating only the utilities package in the lockfile is enough. Schema inspection, not this note, determines support.
 
 ## Stable keys and source catalog
 
