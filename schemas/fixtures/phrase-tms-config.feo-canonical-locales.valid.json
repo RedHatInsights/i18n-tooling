@@ -1,0 +1,39 @@
+{
+  "provider": "phrase",
+  "project": {
+    "uid": "project-uid",
+    "region": "eu"
+  },
+  "sourceCatalog": {
+    "path": "deploy/locales/insights-rbac-ui-feo-frontend-en.json",
+    "filename": "insights-rbac-ui-feo-frontend-en.json",
+    "adapter": "formatjs-json",
+    "locale": "en"
+  },
+  "frontendTemplate": {
+    "path": "deploy/frontend.yaml",
+    "generateSourceCatalog": true
+  },
+  "targetLocales": [
+    {
+      "phraseLocale": "fr",
+      "repositoryLocale": "fr",
+      "outputPath": "deploy/locales/fr.json"
+    },
+    {
+      "phraseLocale": "zh_cn",
+      "repositoryLocale": "zh-CN",
+      "outputPath": "deploy/locales/zh-CN.json"
+    },
+    {
+      "phraseLocale": "zh_hant_tw",
+      "repositoryLocale": "zh-Hant-TW",
+      "outputPath": "deploy/locales/zh-Hant-TW.json"
+    },
+    {
+      "phraseLocale": "es_419",
+      "repositoryLocale": "es-419",
+      "outputPath": "deploy/locales/es-419.json"
+    }
+  ]
+}

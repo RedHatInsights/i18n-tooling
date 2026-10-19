@@ -715,3 +715,31 @@ objects:
     );
   });
 });
+
+describe("FEO locale ids", () => {
+  const source = extractFeoCatalog(template);
+  const target = { "searchEntries.users.title": "Utilisateurs" };
+
+  it.each(["fr", "ko", "ja", "zh-CN", "zh-Hant-TW", "es-419", "fil", "sr-Latn"])(
+    "inlines canonical locale %s",
+    (locale) => {
+      expect(
+        parse(inlineFeoLocale(template, source, target, locale)).objects[0].spec.locales,
+      ).toEqual({ [locale]: { "searchEntries.users.title": "Utilisateurs" } });
+    },
+  );
+
+  it.each([
+    ["zh-cn", ' use "zh-CN"'],
+    ["fr-fr", ' use "fr-FR"'],
+    ["zh-hant-tw", ' use "zh-Hant-TW"'],
+    ["fr-FR-u-nu-latn", "canonical BCP 47"],
+    ["fr_FR", "canonical BCP 47"],
+    ["EN", "canonical BCP 47"],
+    ["en", "canonical BCP 47"],
+  ])("rejects locale %s with a hint", (locale, hint) => {
+    const message = errorMessage(() => inlineFeoLocale(template, source, target, locale));
+    expect(message).toContain(`Invalid target locale: ${locale}`);
+    expect(message).toContain(hint.trim());
+  });
+});

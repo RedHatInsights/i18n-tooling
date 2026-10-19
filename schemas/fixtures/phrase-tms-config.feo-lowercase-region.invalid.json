@@ -1,0 +1,24 @@
+{
+  "provider": "phrase",
+  "project": {
+    "uid": "project-uid",
+    "region": "eu"
+  },
+  "sourceCatalog": {
+    "path": "deploy/locales/insights-rbac-ui-feo-frontend-en.json",
+    "filename": "insights-rbac-ui-feo-frontend-en.json",
+    "adapter": "formatjs-json",
+    "locale": "en"
+  },
+  "frontendTemplate": {
+    "path": "deploy/frontend.yaml",
+    "generateSourceCatalog": true
+  },
+  "targetLocales": [
+    {
+      "phraseLocale": "zh_cn",
+      "repositoryLocale": "zh-cn",
+      "outputPath": "deploy/locales/zh-cn.json"
+    }
+  ]
+}

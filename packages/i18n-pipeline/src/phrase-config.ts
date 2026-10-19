@@ -1,3 +1,4 @@
+import { feoLocaleHint, isFeoLocaleId } from "./feo-locale.js";
 import type { LocaleCompletionPolicy, PhraseWorkflowConfig } from "./phrase-workflow.js";
 
 export interface PhraseTmsConfig {
@@ -153,12 +154,10 @@ export function validatePhraseWorkflowConfig(config: PhraseWorkflowConfig): void
     if (!locale.phraseLocale.trim() || !locale.repositoryLocale.trim()) {
       throw new TypeError("Each target locale needs Phrase language and repository locale");
     }
-    if (
-      config.frontendTemplate &&
-      (!/^[a-z]{2,3}(?:-[A-Za-z0-9]+)*$/.test(locale.repositoryLocale) ||
-        locale.repositoryLocale === "en")
-    ) {
-      throw new TypeError(`Invalid target repository locale: ${locale.repositoryLocale}`);
+    if (config.frontendTemplate && !isFeoLocaleId(locale.repositoryLocale)) {
+      throw new TypeError(
+        `Invalid target repository locale: ${locale.repositoryLocale}${feoLocaleHint(locale.repositoryLocale)}`,
+      );
     }
     validateRepoPath(locale.outputPath, "Target output path");
     if (locale.outputPath === config.sourceCatalog.path) {

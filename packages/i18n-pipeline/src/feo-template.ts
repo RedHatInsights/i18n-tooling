@@ -7,6 +7,7 @@ import {
   type YAMLMap,
   type Document,
 } from "yaml";
+import { feoLocaleHint, isFeoLocaleId } from "./feo-locale.js";
 
 type Descriptor = { defaultMessage: string; description: string };
 export type FeoCatalog = Record<string, Descriptor>;
@@ -344,8 +345,8 @@ export function inlineFeoLocale(
   target: Record<string, string>,
   locale: string,
 ): string {
-  if (!/^[a-z]{2,3}(?:-[A-Za-z0-9]+)*$/.test(locale) || locale === "en")
-    throw new Error(`Invalid target locale: ${locale}`);
+  if (!isFeoLocaleId(locale))
+    throw new Error(`Invalid target locale: ${locale}${feoLocaleHint(locale)}`);
   const doc = parse(template);
   const { catalog, specs, owned, prefixes } = collect(doc);
   for (const key of new Set([...Object.keys(source), ...Object.keys(catalog)])) {

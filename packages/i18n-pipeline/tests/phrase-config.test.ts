@@ -72,20 +72,56 @@ describe("Phrase TMS config parser", () => {
     ).toThrow(/formatjs-json and en/);
   });
 
-  it.each(["en", "zh_cn"])(
-    "rejects unsupported FEO repository locale %s during parsing",
+  it.each([
+    ["en", "canonical BCP 47"],
+    ["EN", "canonical BCP 47"],
+    ["zh_cn", "canonical BCP 47"],
+    ["fr_FR", "canonical BCP 47"],
+    ["zh-cn", 'use "zh-CN"'],
+    ["fr-fr", 'use "fr-FR"'],
+    ["zh-hant-tw", 'use "zh-Hant-TW"'],
+    ["fr-FR-u-nu-latn", "canonical BCP 47"],
+  ])("rejects unsupported FEO repository locale %s during parsing", (locale, hint) => {
+    expect(() =>
+      parsePhraseTmsConfig({
+        ...minimalConfig,
+        frontendTemplate: { path: "deploy/frontend.yaml" },
+        targetLocales: [
+          { phraseLocale: "fr", repositoryLocale: locale, outputPath: "locales/fr.json" },
+        ],
+      }),
+    ).toThrow(
+      new RegExp(`Invalid target repository locale: ${locale}.*${hint.replace(/[()]/g, "\\$&")}`),
+    );
+  });
+
+  it.each(["fr", "ko", "ja", "zh-CN", "zh-Hant-TW", "es-419", "fil", "sr-Latn"])(
+    "accepts canonical FEO repository locale %s and keeps Phrase codes as phraseLocale",
     (locale) => {
-      expect(() =>
-        parsePhraseTmsConfig({
-          ...minimalConfig,
-          frontendTemplate: { path: "deploy/frontend.yaml" },
-          targetLocales: [
-            { phraseLocale: "fr", repositoryLocale: locale, outputPath: "locales/fr.json" },
-          ],
-        }),
-      ).toThrow(/Invalid target repository locale/);
+      const parsed = parsePhraseTmsConfig({
+        ...minimalConfig,
+        frontendTemplate: { path: "deploy/frontend.yaml" },
+        targetLocales: [
+          { phraseLocale: "zh_cn", repositoryLocale: locale, outputPath: "locales/x.json" },
+        ],
+      });
+      expect(parsed.workflow.targetLocales[0]).toMatchObject({
+        phraseLocale: "zh_cn",
+        repositoryLocale: locale,
+      });
     },
   );
+
+  it("leaves repository locales of non-FEO configs unrestricted", () => {
+    expect(() =>
+      parsePhraseTmsConfig({
+        ...minimalConfig,
+        targetLocales: [
+          { phraseLocale: "fr_fr", repositoryLocale: "fr_FR", outputPath: "locales/fr.json" },
+        ],
+      }),
+    ).not.toThrow();
+  });
 
   it("opts into generating a FormatJS source catalog from Frontend YAML", () => {
     const config = {

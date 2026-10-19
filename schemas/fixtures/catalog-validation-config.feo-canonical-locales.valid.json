@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "checks": [],
+  "feo": [
+    {
+      "template": "deploy/frontend.yaml",
+      "source": "deploy/locales/translation-template.json",
+      "locales": {
+        "fr": "deploy/locales/fr.json",
+        "ko": "deploy/locales/ko.json",
+        "ja": "deploy/locales/ja.json",
+        "zh-CN": "deploy/locales/zh-CN.json",
+        "zh-Hant-TW": "deploy/locales/zh-Hant-TW.json",
+        "es-419": "deploy/locales/es-419.json",
+        "fil": "deploy/locales/fil.json",
+        "sr-Latn": "deploy/locales/sr-Latn.json"
+      }
+    }
+  ]
+}
