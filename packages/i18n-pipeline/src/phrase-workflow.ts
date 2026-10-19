@@ -55,6 +55,7 @@ export interface PhraseWorkflowConfig {
  */
 export type PhraseBatchPhase =
   "creating" | "unknown" | "importing" | "ready" | "completed" | "failed" | "superseded";
+/** `validation-failed` is retained for state written before draft-PR delivery. */
 export type PhraseLocalePhase =
   "pending" | "exporting" | "failed" | "validation-failed" | "pr-created";
 
@@ -99,6 +100,8 @@ export interface PhraseLocaleRecord {
   pullRequestFinalized?: boolean;
   /** A merged PR is permanently final and is not looked up again. */
   pullRequestMerged?: boolean;
+  /** Last generated description; missing digest refreshes pre-upgrade PR safety notes once. */
+  pullRequestBodyDigest?: string;
   /** Retry the PR title and description update if it failed after a commit. */
   pullRequestBodyPending?: boolean;
   /** A retry batch owns re-exporting this carried PR. */
@@ -270,7 +273,7 @@ class PhrasePinMismatchError extends Error {
   }
 }
 
-/** A downloaded target catalog is unusable; retrying the same export cannot fix it. */
+/** Compatibility error for integrations predating export findings and draft PRs. */
 export class PhraseCatalogValidationError extends PhraseWorkflowError {
   constructor(message: string, batchKey?: string) {
     super(message, batchKey);
@@ -351,9 +354,10 @@ function translationFindingsSection(heading: string, findings: string[]): string
   if (hidden > 0) shown.push(`- ...and ${hidden} more`);
   const details = shown.join("\n");
   const bytes = new TextEncoder().encode(details);
+  // Streaming decode drops an incomplete trailing UTF-8 code point instead of emitting U+FFFD.
   const bounded =
     bytes.length > MAX_PULL_REQUEST_SECTION_BYTES
-      ? `${new TextDecoder().decode(bytes.slice(0, MAX_PULL_REQUEST_SECTION_BYTES))}\n- ...additional detail omitted to fit PR description`
+      ? `${new TextDecoder().decode(bytes.slice(0, MAX_PULL_REQUEST_SECTION_BYTES), { stream: true })}\n- ...additional detail omitted to fit PR description`
       : details;
   return `\n${heading}:\n${bounded}\n`;
 }
@@ -597,7 +601,7 @@ function makeBatchRecord(
               ? localePullRequestBranch(previousRecord.key, target.repositoryLocale)
               : undefined))
           : undefined;
-      if (previousLocale?.phase !== "pr-created") {
+      if (previousLocale?.phase !== "pr-created" || isClosedInvalidPullRequest(previousLocale)) {
         return [phraseLocale, { phase: "pending" as const }];
       }
       const carriedLocale: PhraseLocaleRecord = {
@@ -637,9 +641,10 @@ function makeBatchRecord(
     config: input.config,
     createdAt: new Date(now).toISOString(),
     jobs:
-      previousRecord?.jobs.filter(
-        (job) => previousRecord.locales[job.targetLang]?.phase === "pr-created",
-      ) ?? [],
+      previousRecord?.jobs.filter((job) => {
+        const locale = previousRecord.locales[job.targetLang];
+        return locale?.phase === "pr-created" && !isClosedInvalidPullRequest(locale);
+      }) ?? [],
     warningCount: 0,
     ...(previousRecord ? { retryParentBatchKey: previousRecord.key } : {}),
     locales,
@@ -665,12 +670,24 @@ function localePullRequestBranch(batchKey: string, repositoryLocale: string): st
   return `i18n/phrase-${batchKey.slice(0, 16)}-${localeSlug}`;
 }
 
+function isClosedInvalidPullRequest(locale: PhraseLocaleRecord): boolean {
+  return (
+    locale.phase === "pr-created" &&
+    locale.pullRequestFinalized === true &&
+    !locale.pullRequestMerged &&
+    Boolean(locale.validationErrors?.length)
+  );
+}
+
 function hasRetryableFailures(record: PhraseBatchRecord): boolean {
   return (
     record.phase === "failed" ||
     ((record.phase === "completed" || record.phase === "ready") &&
       Object.values(record.locales).some(
-        (locale) => locale.phase === "failed" || locale.phase === "validation-failed",
+        (locale) =>
+          locale.phase === "failed" ||
+          locale.phase === "validation-failed" ||
+          isClosedInvalidPullRequest(locale),
       ))
   );
 }
@@ -687,6 +704,7 @@ function needsReconciliation(record: PhraseBatchRecord): boolean {
   );
 }
 
+// Legacy records have no PR yet; draft-era findings live on pr-created locales.
 function hasValidationFailure(record: PhraseBatchRecord): boolean {
   return Object.values(record.locales).some((locale) => locale.phase === "validation-failed");
 }
@@ -1580,7 +1598,8 @@ export class PhraseWorkflow {
         localePolicy(record, target.phraseLocale) === "all-locales"
       ) {
         const validationFailedLocale = Object.entries(record.locales).find(
-          ([, locale]) => locale.phase === "validation-failed",
+          ([, locale]) =>
+            locale.phase === "validation-failed" || Boolean(locale.validationErrors?.length),
         )?.[0];
         if (validationFailedLocale) {
           push({ phase: "pending" });
@@ -1712,21 +1731,22 @@ export class PhraseWorkflow {
             );
             return;
           }
-          if (frontendTemplateData) {
+          if (record.config.frontendTemplate) {
+            const templatePath = record.config.frontendTemplate.path;
             const latestTemplateBytes = await this.dependencies.repository.readFile(
-              frontendTemplateData.path,
+              templatePath,
               latestBaseCommit,
             );
             if (!latestTemplateBytes) {
               push({
                 phase: "retrying",
-                reason: `Could not read Frontend template ${frontendTemplateData.path} on ${latestBaseCommit}`,
+                reason: `Could not read Frontend template ${templatePath} on ${latestBaseCommit}`,
               });
               continue;
             }
             const latestTemplate = new TextDecoder().decode(latestTemplateBytes);
             if (
-              !record.config.frontendTemplate?.generateSourceCatalog &&
+              !record.config.frontendTemplate.generateSourceCatalog &&
               !feoTemplateMatchesSourceCatalog(latestTemplate, sourceCatalog)
             ) {
               await this.closeBatch(
@@ -1738,22 +1758,24 @@ export class PhraseWorkflow {
               );
               return;
             }
-            try {
-              inlineFeoLocale(
-                latestTemplate,
-                frontendTemplateData.descriptors,
-                frontendTemplateData.translated,
-                target.repositoryLocale,
-              );
-            } catch (error) {
-              await this.closeBatch(
-                record,
-                revision,
-                "superseded",
-                `Frontend template changed on the recorded PR base ref: ${error instanceof Error ? error.message : String(error)}`,
-                results,
-              );
-              return;
+            if (frontendTemplateData) {
+              try {
+                inlineFeoLocale(
+                  latestTemplate,
+                  frontendTemplateData.descriptors,
+                  frontendTemplateData.translated,
+                  target.repositoryLocale,
+                );
+              } catch (error) {
+                await this.closeBatch(
+                  record,
+                  revision,
+                  "superseded",
+                  `Frontend template changed on the recorded PR base ref: ${error instanceof Error ? error.message : String(error)}`,
+                  results,
+                );
+                return;
+              }
             }
           }
         }
@@ -1770,9 +1792,18 @@ export class PhraseWorkflow {
           "\nReview validation findings before marking ready or merging. " +
           "Corrections in Phrase are pulled into this PR on later reconciliation runs. " +
           "Tooling never marks this PR ready automatically.\n" +
+          (record.config.frontendTemplate && errors.length
+            ? "\nGenerated Frontend YAML was not updated for this export. Any existing locale block may reflect an earlier valid export and must not be merged with this catalog.\n"
+            : "") +
           translationFindingsSection("Translation errors (do not merge)", errors) +
           translationFindingsSection("Translation warnings (review before merging)", warnings);
-        const findingsChanged =
+        const deliveryMetadata = {
+          validationErrors: errors,
+          validationWarnings: warnings,
+          pullRequestBodyDigest: digest(new TextEncoder().encode(body)),
+        };
+        const metadataChanged =
+          existingLocale?.pullRequestBodyDigest !== deliveryMetadata.pullRequestBodyDigest ||
           stableJson(existingLocale?.validationErrors ?? []) !== stableJson(errors) ||
           stableJson(existingLocale?.validationWarnings ?? []) !== stableJson(warnings);
         const reportDelivery = (pullRequestUrl: string) =>
@@ -1953,8 +1984,7 @@ export class PhraseWorkflow {
             toolingCommitSha: update.toolingCommitSha,
             pullRequestBranch: branch,
             pullRequestBatchKey,
-            validationErrors: errors,
-            validationWarnings: warnings,
+            ...deliveryMetadata,
           };
           delete updatedLocale.pendingToolingCommitSha;
           if (update.pullRequestFinalized) {
@@ -1979,7 +2009,7 @@ export class PhraseWorkflow {
             } else {
               reportDelivery(existingLocale.pullRequestUrl);
             }
-          } else if (existingLocale.pullRequestBodyPending || findingsChanged) {
+          } else if (existingLocale.pullRequestBodyPending || metadataChanged) {
             const bodyUpdated = await this.dependencies.repository.updatePullRequestBody(
               existingLocale.pullRequestUrl,
               body,
@@ -1990,14 +2020,14 @@ export class PhraseWorkflow {
             record.locales[target.phraseLocale] = updatedLocale;
             revision = await this.dependencies.state.updateBatch(record, revision);
             if (bodyUpdated) reportDelivery(existingLocale.pullRequestUrl);
-          } else if (
-            existingLocale.toolingCommitSha !== update.toolingCommitSha ||
-            existingLocale.pendingToolingCommitSha !== undefined
-          ) {
-            record.locales[target.phraseLocale] = updatedLocale;
-            revision = await this.dependencies.state.updateBatch(record, revision);
-            reportDelivery(existingLocale.pullRequestUrl);
           } else {
+            if (
+              existingLocale.toolingCommitSha !== update.toolingCommitSha ||
+              existingLocale.pendingToolingCommitSha !== undefined
+            ) {
+              record.locales[target.phraseLocale] = updatedLocale;
+              revision = await this.dependencies.state.updateBatch(record, revision);
+            }
             reportDelivery(existingLocale.pullRequestUrl);
           }
         } else {
@@ -2014,8 +2044,7 @@ export class PhraseWorkflow {
           const localeRecord: PhraseLocaleRecord = {
             ...(record.locales[target.phraseLocale] ?? { phase: "exporting" }),
             phase: "pr-created",
-            validationErrors: errors,
-            validationWarnings: warnings,
+            ...deliveryMetadata,
             pullRequestUrl: created.pullRequestUrl,
             pullRequestBranch: branch,
             pullRequestBatchKey,
@@ -2046,6 +2075,7 @@ export class PhraseWorkflow {
         const permanent =
           error instanceof PhraseCatalogValidationError ||
           (error instanceof PhraseRepositoryError && error.permanent);
+        // Compatibility with injected integrations that still throw this public error.
         if (error instanceof PhraseCatalogValidationError) {
           if (!reexportingOpenPullRequest) {
             record.locales[target.phraseLocale] = {
@@ -2189,6 +2219,10 @@ export class PhraseWorkflow {
             if (!locale.pullRequestReexportDelegated) {
               locale.pullRequestReexportDelegated = true;
             }
+          } else if (isClosedInvalidPullRequest(locale)) {
+            // A replacement job owns this locale now; reopening the old PR must not
+            // resume a second exporter while the parent has other active locales.
+            locale.pullRequestReexportDelegated = true;
           }
         } else if (locale.phase !== "failed") {
           parent.locales[target.phraseLocale] = {
