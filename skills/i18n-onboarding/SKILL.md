@@ -79,7 +79,7 @@ Read [references/phrase.md](references/phrase.md), then the reference for the se
 
 ### FEO localization
 
-Read [references/feo.md](references/feo.md). Add stable YAML item IDs and translator context through the fields the CLI extracts, generate `deploy/locales/translation-template.json` with `feo extract`, and add the `feo` validation entry. Stage or commit the generated template only if the selected autonomy allows that. Do not create `deploy/locales/<locale>.json`; each arrives later from Phrase. The current reusable Phrase reconcile workflow writes locale JSON but does not run FEO inlining. After a locale arrives, `feo inline` generates `spec.locales.<locale>` from that file; include this step in the consumer's documented reconciliation follow-up. Validation reports drift and does not rewrite files.
+Read [references/feo.md](references/feo.md). Add stable YAML item IDs and translator context through the fields the CLI extracts, generate `deploy/locales/translation-template.json` with `feo extract`, and add the `feo` validation entry. Stage or commit the generated template only if the selected autonomy allows that. Do not create `deploy/locales/<locale>.json`; each arrives later from Phrase, which with the FEO Phrase config also writes `spec.locales.<locale>` in the same PR. Validation reports drift and does not rewrite files.
 
 ## Finish and report
 
