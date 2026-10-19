@@ -765,6 +765,66 @@ describe("catalog project validation", () => {
     ]);
   });
 
+  it("validates dotted FEO IDs and shared alias keys through the FEO adapter", async () => {
+    await createProject();
+    await mkdir(join(projectRoot!, "deploy/locales"), { recursive: true });
+    const template = `kind: Template
+objects:
+  - kind: Frontend
+    spec:
+      searchEntries:
+        - id: RHEL.ros
+          title: RHEL ROS
+          alt_title: [acs, ACS, operators]
+      bundleSegments:
+        - bundleId: hybrid-committed-spend
+          segmentId: main
+          navItems:
+            - id: hybrid-committed-spend.nav
+              routes:
+                - id: hybrid-committed-spend.overview
+                  title: Overview
+`;
+    await writeFile(join(projectRoot!, "deploy/frontend.yaml"), template, "utf8");
+    const translations = {
+      "searchEntries.RHEL.ros.title": "RHEL ROS FR",
+      "searchEntries.RHEL.ros.alt_title.acs": "ACS FR",
+      "bundleSegments.hybrid-committed-spend.main.navItems.hybrid-committed-spend.nav.routes.hybrid-committed-spend.overview.title":
+        "Overview FR",
+    };
+    await writeFile(
+      join(projectRoot!, "deploy/locales/fr.json"),
+      `${JSON.stringify(translations, null, 2)}\n`,
+      "utf8",
+    );
+    await runFeo([
+      "extract",
+      "--template",
+      "deploy/frontend.yaml",
+      "--output",
+      "deploy/locales/translation-template.json",
+    ]);
+    await runFeo([
+      "inline",
+      "--template",
+      "deploy/frontend.yaml",
+      "--source",
+      "deploy/locales/translation-template.json",
+      "--target",
+      "deploy/locales/fr.json",
+      "--locale",
+      "fr",
+    ]);
+
+    const result = await runValidation(feoValidationConfig({ fr: "deploy/locales/fr.json" }));
+
+    expect(result.exitCode).toBe(0);
+    expect(result.errors).toEqual([]);
+    expect(result.output).toEqual([
+      "Catalog validation passed (0 sources, 0 targets, 0 generated catalogs, 1 FEO template).",
+    ]);
+  });
+
   it("skips listed FEO locales that have not been delivered", async () => {
     await createUndeliveredFeoProject();
     const locales = {
@@ -1126,7 +1186,7 @@ describe("catalog project validation", () => {
     expect(result.exitCode).toBe(1);
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]).toContain(
-      "Unknown translation key: searchEntries.people.alt_title; alt_title is now one message per alias",
+      "Unknown translation key: searchEntries.people.alt_title; alt_title uses one message per slug",
     );
     expect(result.errors[0]).toContain("i18n-pipeline feo inline");
   });

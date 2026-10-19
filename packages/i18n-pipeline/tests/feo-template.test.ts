@@ -38,6 +38,58 @@ parameters:
   - name: ENV_NAME
 `;
 
+const dottedTemplate = `kind: Template
+objects:
+  - kind: Frontend
+    spec:
+      searchEntries:
+        - id: RHEL.ros
+          title: RHEL ROS
+          description: Manage ROS
+          alt_title: [acs, ACS, operators]
+        - id: hosts
+          title: Hosts
+          alt_title: [hosts, hosts]
+      serviceTiles:
+        - section: rhel
+          group: security
+          id: malware.signatures
+          title: Malware signatures
+      bundleSegments:
+        - bundleId: hybrid-committed-spend
+          segmentId: main
+          navItems:
+            - id: hybrid-committed-spend.nav
+              title: Committed spend
+              routes:
+                - id: hybrid-committed-spend.overview
+                  title: Overview
+                - id: hybrid-committed-spend.details
+                  title: Details
+`;
+
+function errorMessage(run: () => unknown): string {
+  try {
+    run();
+  } catch (error) {
+    if (error instanceof Error) return error.message;
+    throw error;
+  }
+  throw new Error("Expected operation to throw");
+}
+
+function expectDuplicateContexts(
+  template: string,
+  first: string,
+  second: string,
+  kind: "message" | "runtime" = "message",
+): void {
+  const message = errorMessage(() => extractFeoCatalog(template));
+  expect(message).toContain(`Duplicate FEO ${kind} key`);
+  expect(message).toContain(first);
+  expect(message).toContain(second);
+}
+
 describe("FEO template localization", () => {
   it("extracts stable ID keys, translator context and one message per search alias", () => {
     const catalog = extractFeoCatalog(template);
@@ -57,6 +109,12 @@ describe("FEO template localization", () => {
       "short search term, not a sentence",
     );
     expect(Object.keys(catalog).some((key) => key.includes("segmentRef"))).toBe(false);
+    const unidentifiedNav = template.replace(
+      "                - segmentRef:",
+      "                - title: Unidentified item\n                - segmentRef:",
+    );
+    // A nav item without an id has no stable key, so its title could never be translated.
+    expect(() => extractFeoCatalog(unidentifiedNav)).toThrow("id must be a non-empty string");
     const reordered = template.replace(
       / {8}- id: roles\n {10}title: Roles\n {10}alt_title: \[role, RBAC\]\n {8}- id: users\n {10}title: Users/,
       "        - id: users\n          title: Users\n        - id: roles\n          title: Roles\n          alt_title: [role, RBAC]",
@@ -85,7 +143,40 @@ describe("FEO template localization", () => {
     expect(catalog["searchEntries.roles.alt_title.r-d"]?.defaultMessage).toBe("R&D");
   });
 
-  it("rejects aliases with empty or duplicate slugs and names the entry and aliases", () => {
+  it("accepts dotted IDs and shares one key between aliases with the same slug", () => {
+    const catalog = extractFeoCatalog(dottedTemplate);
+
+    expect(catalog["searchEntries.RHEL.ros.title"]?.defaultMessage).toBe("RHEL ROS");
+    expect(catalog["searchEntries.RHEL.ros.description"]?.defaultMessage).toBe("Manage ROS");
+    expect(catalog["searchEntries.RHEL.ros.alt_title.acs"]?.defaultMessage).toBe("acs");
+    expect(catalog["searchEntries.RHEL.ros.alt_title.acs"]?.description).toContain('"ACS"');
+    expect(catalog["searchEntries.RHEL.ros.alt_title.operators"]?.defaultMessage).toBe("operators");
+    expect(catalog["searchEntries.hosts.alt_title.hosts"]?.defaultMessage).toBe("hosts");
+    expect(catalog["searchEntries.hosts.alt_title.hosts"]?.description).toContain('"hosts"');
+    expect(
+      catalog[
+        "bundleSegments.hybrid-committed-spend.main.navItems.hybrid-committed-spend.nav.routes.hybrid-committed-spend.overview.title"
+      ]?.defaultMessage,
+    ).toBe("Overview");
+    expect(
+      catalog[
+        "bundleSegments.hybrid-committed-spend.main.navItems.hybrid-committed-spend.nav.routes.hybrid-committed-spend.details.title"
+      ]?.defaultMessage,
+    ).toBe("Details");
+    expect(catalog["serviceTiles.rhel.security.malware.signatures.title"]?.defaultMessage).toBe(
+      "Malware signatures",
+    );
+
+    const reorderedAliases = dottedTemplate.replace(
+      "alt_title: [acs, ACS, operators]",
+      "alt_title: [ACS, acs, operators]",
+    );
+    expect(
+      extractFeoCatalog(reorderedAliases)["searchEntries.RHEL.ros.alt_title.acs"]?.defaultMessage,
+    ).toBe("ACS");
+  });
+
+  it("rejects empty alias slugs and records aliases that share a slug", () => {
     const emptySlug = template.replace("alt_title: [role, RBAC]", 'alt_title: ["!!!"]');
     expect(() => extractFeoCatalog(emptySlug)).toThrow(
       'searchEntries.roles: alt_title alias "!!!" has an empty slug',
@@ -95,8 +186,172 @@ describe("FEO template localization", () => {
       "alt_title: [role, RBAC]",
       'alt_title: ["Roles", "ROLES!"]',
     );
-    expect(() => extractFeoCatalog(duplicateSlug)).toThrow(
-      'searchEntries.roles: alt_title aliases "Roles" and "ROLES!" have the same slug "roles"',
+    const catalog = extractFeoCatalog(duplicateSlug);
+    expect(catalog["searchEntries.roles.alt_title.roles"]?.defaultMessage).toBe("Roles");
+    expect(catalog["searchEntries.roles.alt_title.roles"]?.description).toContain('"ROLES!"');
+  });
+
+  it("rejects unsafe identifier segments and FEO keys longer than 256 characters", () => {
+    for (const id of ["-roles", "_roles", "a.-roles", "a._roles", "a..b", "a."]) {
+      const invalid = template.replace("id: roles", `id: ${id}`);
+      const message = errorMessage(() => extractFeoCatalog(invalid));
+      expect(message).toContain(`searchEntries.id has an unsafe identifier: ${id}`);
+      expect(message).toContain("dot-separated segments");
+      expect(message).toContain("^[A-Za-z0-9][A-Za-z0-9_-]*$");
+    }
+
+    const boundaryId = "x".repeat(236);
+    const boundaryKey = `searchEntries.${boundaryId}.title`;
+    expect(boundaryKey.length).toBe(256);
+    const withoutAliases = template.replace("          alt_title: [role, RBAC]\n", "");
+    const boundary = withoutAliases.replace("id: roles", `id: ${boundaryId}`);
+    expect(extractFeoCatalog(boundary)[boundaryKey]?.defaultMessage).toBe("Roles");
+
+    const multiFrontend = boundary
+      .replace(
+        "  - kind: Frontend\n    spec:",
+        "  - kind: Frontend\n    metadata:\n      name: first\n    spec:",
+      )
+      .replace(
+        "parameters:",
+        "  - kind: Frontend\n    metadata:\n      name: second\n    spec: {}\nparameters:",
+      );
+    const prefixedKey = `objects.first.spec.${boundaryKey}`;
+    expect(prefixedKey.length).toBeGreaterThan(256);
+    expect(extractFeoCatalog(multiFrontend)[prefixedKey]?.defaultMessage).toBe("Roles");
+
+    const longId = "x".repeat(237);
+    const longKey = `searchEntries.${longId}.title`;
+    const tooLong = withoutAliases.replace("id: roles", `id: ${longId}`);
+    const message = errorMessage(() => extractFeoCatalog(tooLong));
+    expect(message).toContain("256-character");
+    expect(message).toContain(longKey);
+  });
+
+  it("limits alias keys to 256 characters before multi-Frontend prefixes and inlines boundary keys", () => {
+    const id = "x".repeat(220);
+    const boundaryAlias = "a".repeat(11);
+    const boundaryKey = `searchEntries.${id}.alt_title.${boundaryAlias}`;
+    expect(boundaryKey.length).toBe(256);
+
+    const aliasTemplate = (alias: string, multipleFrontends = false) => {
+      const firstMetadata = multipleFrontends ? "    metadata:\n      name: first\n" : "";
+      const secondFrontend = multipleFrontends
+        ? "  - kind: Frontend\n    metadata:\n      name: second\n    spec: {}\n"
+        : "";
+      return `kind: Template\nobjects:\n  - kind: Frontend\n${firstMetadata}    spec:\n      searchEntries:\n        - id: ${id}\n          alt_title: [${alias}]\n${secondFrontend}`;
+    };
+
+    const single = aliasTemplate(boundaryAlias);
+    const singleSource = extractFeoCatalog(single);
+    const singleTarget = { [boundaryKey]: "Boundary alias" };
+    const singleResult = inlineFeoLocale(single, singleSource, singleTarget, "fr");
+    expect(parse(singleResult).objects[0].spec.locales.fr).toEqual(singleTarget);
+    expect(inlineFeoLocale(singleResult, singleSource, singleTarget, "fr")).toBe(singleResult);
+
+    const multiple = aliasTemplate(boundaryAlias, true);
+    const prefixedKey = `objects.first.spec.${boundaryKey}`;
+    expect(prefixedKey.length).toBeGreaterThan(256);
+    const multipleSource = extractFeoCatalog(multiple);
+    const multipleTarget = { [prefixedKey]: "Boundary alias" };
+    const multipleResult = inlineFeoLocale(multiple, multipleSource, multipleTarget, "fr");
+    expect(parse(multipleResult).objects[0].spec.locales.fr).toEqual(singleTarget);
+    expect(parse(multipleResult).objects[0].spec.locales.fr).not.toHaveProperty(prefixedKey);
+    expect(inlineFeoLocale(multipleResult, multipleSource, multipleTarget, "fr")).toBe(
+      multipleResult,
+    );
+
+    const tooLongKey = `searchEntries.${id}.alt_title.${"a".repeat(12)}`;
+    expect(tooLongKey.length).toBe(257);
+    for (const multipleFrontends of [false, true]) {
+      const tooLong = aliasTemplate("a".repeat(12), multipleFrontends);
+      const message = errorMessage(() => extractFeoCatalog(tooLong));
+      expect(message).toContain("256-character");
+      expect(message).toContain(tooLongKey);
+    }
+  });
+
+  it("names both source item contexts when structural paths collide", () => {
+    const duplicateNav = `kind: Template
+objects:
+  - kind: Frontend
+    spec:
+      bundleSegments:
+        - bundleId: app
+          segmentId: main
+          navItems:
+            - id: x.routes.y
+              title: Parent route
+            - id: x
+              title: Parent
+              routes:
+                - id: y
+                  product: Child product
+`;
+    expectDuplicateContexts(
+      duplicateNav,
+      'navItems[0] (id="x.routes.y").title',
+      'navItems[1] (id="x").routes[0] (id="y").title',
+    );
+
+    const duplicateSearch = `kind: Template
+objects:
+  - kind: Frontend
+    spec:
+      searchEntries:
+        - id: a.alt_title
+        - id: a
+          alt_title: [title]
+`;
+    expectDuplicateContexts(
+      duplicateSearch,
+      'searchEntries[0] (id="a.alt_title").title',
+      'searchEntries[1] (id="a") alt_title aliases ["title"]',
+    );
+
+    const duplicateTiles = `kind: Template
+objects:
+  - kind: Frontend
+    spec:
+      serviceTiles:
+        - section: a.b
+          group: c
+          id: shared
+          title: First tile
+        - section: a
+          group: b.c
+          id: shared
+          title: Second tile
+`;
+    expectDuplicateContexts(
+      duplicateTiles,
+      'serviceTiles[0] (section="a.b", group="c", id="shared")',
+      'serviceTiles[1] (section="a", group="b.c", id="shared")',
+    );
+  });
+
+  it("rejects nav runtime-key collisions when catalog paths differ", () => {
+    const duplicateRuntimeNav = `kind: Template
+objects:
+  - kind: Frontend
+    spec:
+      bundleSegments:
+        - bundleId: b
+          segmentId: s.navItems.x
+          navItems:
+            - id: y
+              title: First item
+        - bundleId: b
+          segmentId: s
+          navItems:
+            - id: navItems.x.y
+              title: Second item
+`;
+    expectDuplicateContexts(
+      duplicateRuntimeNav,
+      'bundleSegments[0] (bundleId="b", segmentId="s.navItems.x").navItems[0] (id="y").title',
+      'bundleSegments[1] (bundleId="b", segmentId="s").navItems[0] (id="navItems.x.y").title',
+      "runtime",
     );
   });
 
@@ -266,7 +521,7 @@ describe("FEO template localization", () => {
     expect(() =>
       inlineFeoLocale(template, source, { "searchEntries.roles.alt_title": "role|RBAC" }, "zh-CN"),
     ).toThrow(
-      "Unknown translation key: searchEntries.roles.alt_title; alt_title is now one message per alias",
+      "Unknown translation key: searchEntries.roles.alt_title; alt_title uses one message per slug",
     );
     expect(() =>
       inlineFeoLocale(
