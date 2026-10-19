@@ -118,6 +118,7 @@ export interface PhraseBatchStateStore {
 }
 
 export interface PhraseLocalePullRequest {
+  /** Require draft on adoption for invalid content. New PRs are always created as drafts. */
   draft?: boolean;
   repository: string;
   baseRef: string;
@@ -1893,7 +1894,8 @@ export class PhraseWorkflow {
           }
         };
         const pullRequestInput: PhraseLocalePullRequest = {
-          draft: true,
+          // Creation is always draft; adoption only requires conversion for errors.
+          draft: errors.length > 0,
           ...(additionalFiles.length ? { additionalFiles } : {}),
           repository: record.repository,
           baseRef: record.baseRef,

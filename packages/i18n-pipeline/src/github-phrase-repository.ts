@@ -119,6 +119,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
   private readonly fetcher: typeof globalThis.fetch;
   private readonly requestTimeoutMs: number;
   private readonly apiUrl: string;
+  private readonly graphqlUrl: string;
   private readonly stateDirectory: string;
   private readonly repositoryPath: string;
   private readonly owner: string;
@@ -139,6 +140,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     assertRepositoryPath(stateDirectory);
     this.stateDirectory = stateDirectory.replace(/\/+$/g, "");
     this.apiUrl = (options.apiUrl ?? "https://api.github.com").replace(/\/+$/, "");
+    this.graphqlUrl = `${this.apiUrl.replace(/\/api\/v3$/, "/api")}/graphql`;
     this.fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
   }
@@ -309,9 +311,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
 
     const files = [{ path: input.path, content: input.content }, ...(input.additionalFiles ?? [])];
     const branchHead = await this.getReference(input.branch);
-    const open = existing.find(
-      (pullRequest) => pullRequest.state === "open" && pullRequest.html_url,
-    );
+    let open = existing.find((pullRequest) => pullRequest.state === "open" && pullRequest.html_url);
     if (open && !branchHead) {
       throw new GitHubRepositoryError("Open Phrase pull request has no locale branch head", 409);
     }
@@ -332,7 +332,15 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
         409,
       );
     }
+    // An existing branch may acquire a ready PR after discovery. Establish or adopt
+    // its draft PR before changing invalid content, including the POST/422 race.
+    if (!open && branchHead && input.draft) {
+      await input.recheckOwnedCommitEligibility?.(branchHead);
+      const created = await this.createDraftPullRequest(input);
+      open = { html_url: created.pullRequestUrl, state: "open" };
+    }
     if (input.draft && open?.html_url) await this.ensurePullRequestDraft(open.html_url);
+    const openPullRequestUrl = open?.html_url;
     const changedFiles = await this.changedFiles(files, branchHead);
     let toolingCommitSha = branchHead ?? input.baseCommit;
     if (changedFiles.length) {
@@ -343,8 +351,8 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
         branchHead === null,
         input.recordToolingCommitSha,
         input.recheckOwnedCommitEligibility,
-        open?.html_url
-          ? () => this.pullRequestIsOpenAtHead(open.html_url!, toolingCommitSha)
+        openPullRequestUrl
+          ? () => this.pullRequestIsOpenAtHead(openPullRequestUrl, toolingCommitSha)
           : undefined,
       );
       if ("finalized" in commitResult) {
@@ -357,21 +365,27 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       }
       toolingCommitSha = commitResult.sha;
     }
-    if (open?.html_url) {
-      try {
-        if (!(await this.updatePullRequestBody(open.html_url, input.body, input.title))) {
-          return {
-            pullRequestUrl: open.html_url,
-            toolingCommitSha,
-            pullRequestFinalized: true,
-          };
-        }
-        return { pullRequestUrl: open.html_url, toolingCommitSha };
-      } catch (bodyError) {
-        return { pullRequestUrl: open.html_url, toolingCommitSha, bodyError };
-      }
+    if (!open?.html_url) {
+      const created = await this.createDraftPullRequest(input);
+      if (!created.adopted) return { pullRequestUrl: created.pullRequestUrl, toolingCommitSha };
+      open = { html_url: created.pullRequestUrl, state: "open" };
     }
+    const pullRequestUrl = open.html_url!;
+    try {
+      const bodyUpdated = await this.updatePullRequestBody(pullRequestUrl, input.body, input.title);
+      return {
+        pullRequestUrl,
+        toolingCommitSha,
+        ...(!bodyUpdated ? { pullRequestFinalized: true } : {}),
+      };
+    } catch (bodyError) {
+      return { pullRequestUrl, toolingCommitSha, bodyError };
+    }
+  }
 
+  private async createDraftPullRequest(
+    input: PhraseLocalePullRequest,
+  ): Promise<{ pullRequestUrl: string; adopted: boolean }> {
     try {
       const response = await this.request(`${this.repositoryPath}/pulls`, {
         method: "POST",
@@ -380,7 +394,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
           body: input.body,
           head: input.branch,
           base: input.baseRef,
-          ...(input.draft ? { draft: true } : {}),
+          draft: true,
         }),
       });
       const value: unknown = await response.json();
@@ -390,35 +404,22 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
           response.status,
         );
       }
-      return { pullRequestUrl: value.html_url, toolingCommitSha };
+      return { pullRequestUrl: value.html_url, adopted: false };
     } catch (error) {
-      if (error instanceof GitHubRepositoryError && error.status === 422) {
-        const raced = await this.findPullRequests(input.branch, input.baseRef);
-        const open = raced.find(
-          (pullRequest) => pullRequest.state === "open" && pullRequest.html_url,
+      if (!(error instanceof GitHubRepositoryError) || error.status !== 422) throw error;
+      const raced = await this.findPullRequests(input.branch, input.baseRef);
+      const open = raced.find(
+        (pullRequest) => pullRequest.state === "open" && pullRequest.html_url,
+      );
+      if (!open?.html_url) {
+        throw new GitHubRepositoryError(
+          "GitHub rejected draft PR creation (HTTP 422). Delivery requires draft pull request support; check the repository plan and branch diff. No ready-PR fallback is allowed.",
+          422,
         );
-        if (open?.html_url) {
-          let bodyError: unknown;
-          let pullRequestFinalized = false;
-          try {
-            if (input.draft) await this.ensurePullRequestDraft(open.html_url);
-            pullRequestFinalized = !(await this.updatePullRequestBody(
-              open.html_url,
-              input.body,
-              input.title,
-            ));
-          } catch (updateError) {
-            bodyError = updateError;
-          }
-          return {
-            pullRequestUrl: open.html_url,
-            toolingCommitSha,
-            ...(pullRequestFinalized ? { pullRequestFinalized: true } : {}),
-            ...(bodyError ? { bodyError } : {}),
-          };
-        }
       }
-      throw error;
+      // A conversion failure is a delivery failure, not a description-only error.
+      if (input.draft) await this.ensurePullRequestDraft(open.html_url);
+      return { pullRequestUrl: open.html_url, adopted: true };
     }
   }
 
@@ -911,8 +912,8 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     let response: Response;
     try {
       // GitHub Enterprise serves REST at /api/v3 but GraphQL at /api/graphql.
-      const apiUrl = path === "/graphql" ? this.apiUrl.replace(/\/api\/v3$/, "/api") : this.apiUrl;
-      response = await this.fetcher(`${apiUrl}${path}`, {
+      const url = path === "/graphql" ? this.graphqlUrl : `${this.apiUrl}${path}`;
+      response = await this.fetcher(url, {
         ...init,
         signal: AbortSignal.timeout(this.requestTimeoutMs),
         headers: {

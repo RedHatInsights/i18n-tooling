@@ -71,6 +71,7 @@ function openPullRequestHarness(
     draft?: boolean;
     draftResult?: unknown;
     apiUrl?: string;
+    discovery?: "open" | "race" | "create" | "unsupported";
   } = {},
 ) {
   const calls: Array<{ url: string; method: string }> = [];
@@ -81,10 +82,34 @@ function openPullRequestHarness(
   let pendingContent: string | undefined;
   let commitNumber = 0;
   let draft = options.draft ?? false;
+  let discoveryCalls = 0;
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const url = input instanceof Request ? input.url : String(input);
     const method = (init?.method ?? "GET").toUpperCase();
     calls.push({ url, method });
+    if (url.includes("/pulls?")) {
+      discoveryCalls += 1;
+      if (
+        options.discovery === "unsupported" ||
+        ((options.discovery === "race" || options.discovery === "create") && discoveryCalls === 1)
+      )
+        return response([]);
+      return response([
+        {
+          state: "open",
+          html_url: "https://github.com/example/app/pull/7",
+          head: { sha: branchHead },
+        },
+      ]);
+    }
+    if (url.endsWith("/pulls") && method === "POST") {
+      expect(JSON.parse(String(init?.body)).draft).toBe(true);
+      if (options.discovery === "create") {
+        draft = true;
+        return response({ html_url: "https://github.com/example/app/pull/7" }, 201);
+      }
+      return response({ message: "Validation Failed" }, 422);
+    }
     if (url.endsWith("/pulls/7") && method === "GET") {
       return response({ state: "open", head: { sha: branchHead }, draft, node_id: "PR_7" });
     }
@@ -192,6 +217,89 @@ function openPullRequestHarness(
 }
 
 describe("GitHubPhraseRepository", () => {
+  it.each(["open", "race"] as const)(
+    "adopts a ready PR (%s) without converting a valid update",
+    async (discovery) => {
+      const harness = openPullRequestHarness("b".repeat(40), { discovery });
+      await harness.repository.createOrUpdatePullRequestWithCommit({
+        ...pullRequest,
+        draft: false,
+      });
+      expect(harness.calls.some(({ url }) => url.endsWith("/graphql"))).toBe(false);
+      expect(harness.currentContent).toBe(new TextDecoder().decode(pullRequest.content));
+    },
+  );
+
+  it("creates a draft for an existing branch before writing invalid content", async () => {
+    const harness = openPullRequestHarness("b".repeat(40), { discovery: "create" });
+    await harness.repository.createOrUpdatePullRequestWithCommit({ ...pullRequest, draft: true });
+    const creation = harness.calls.findIndex(
+      ({ url, method }) => url.endsWith("/pulls") && method === "POST",
+    );
+    const write = harness.calls.findIndex(
+      ({ url, method }) => url.endsWith("/git/blobs") && method === "POST",
+    );
+    expect(creation).toBeGreaterThan(-1);
+    expect(write).toBeGreaterThan(creation);
+  });
+
+  it("rechecks delivery eligibility before creating a draft for an existing branch", async () => {
+    const harness = openPullRequestHarness("b".repeat(40), { discovery: "create" });
+    await expect(
+      harness.repository.createOrUpdatePullRequestWithCommit({
+        ...pullRequest,
+        draft: true,
+        recheckOwnedCommitEligibility: async () => {
+          throw new Error("batch superseded");
+        },
+      }),
+    ).rejects.toThrow("batch superseded");
+    expect(
+      harness.calls.some(({ url, method }) => url.endsWith("/pulls") && method === "POST"),
+    ).toBe(false);
+    expect(harness.currentContent).toBe("old");
+  });
+
+  it("handles the 422 adoption race before writing invalid content", async () => {
+    const harness = openPullRequestHarness("b".repeat(40), { discovery: "race" });
+    await harness.repository.createOrUpdatePullRequestWithCommit({ ...pullRequest, draft: true });
+    const creation = harness.calls.findIndex(
+      ({ url, method }) => url.endsWith("/pulls") && method === "POST",
+    );
+    const conversion = harness.calls.findIndex(({ url }) => url.endsWith("/graphql"));
+    const write = harness.calls.findIndex(
+      ({ url, method }) => url.endsWith("/git/blobs") && method === "POST",
+    );
+    expect(creation).toBeGreaterThan(-1);
+    expect(conversion).toBeGreaterThan(creation);
+    expect(write).toBeGreaterThan(conversion);
+  });
+
+  it("does not write invalid content or swallow failed draft conversion in a 422 race", async () => {
+    const harness = openPullRequestHarness("b".repeat(40), {
+      discovery: "race",
+      draftResult: { errors: [{ message: "Not permitted" }] },
+    });
+    await expect(
+      harness.repository.createOrUpdatePullRequestWithCommit({ ...pullRequest, draft: true }),
+    ).rejects.toThrow("GitHub did not confirm draft conversion");
+    expect(harness.currentContent).toBe("old");
+    expect(
+      harness.calls.some(({ url, method }) => url.endsWith("/git/blobs") && method === "POST"),
+    ).toBe(false);
+  });
+
+  it("fails closed with an actionable draft-creation error instead of a ready-PR fallback", async () => {
+    const harness = openPullRequestHarness("b".repeat(40), { discovery: "unsupported" });
+    await expect(
+      harness.repository.createOrUpdatePullRequestWithCommit({ ...pullRequest, draft: true }),
+    ).rejects.toThrow("requires draft pull request support");
+    expect(harness.currentContent).toBe("old");
+    expect(
+      harness.calls.filter(({ url, method }) => url.endsWith("/pulls") && method === "POST"),
+    ).toHaveLength(1);
+  });
+
   it("converts a ready PR to draft before writing invalid content", async () => {
     const harness = openPullRequestHarness("b".repeat(40));
     await harness.repository.updateOpenPullRequest(harness.makeUpdate(undefined, { draft: true }));
@@ -203,15 +311,18 @@ describe("GitHubPhraseRepository", () => {
     expect(write).toBeGreaterThan(conversion);
   });
 
-  it("uses the Enterprise GraphQL endpoint for draft conversion", async () => {
-    const harness = openPullRequestHarness("b".repeat(40), {
-      apiUrl: "https://github.example/api/v3",
-    });
-    await harness.repository.updateOpenPullRequest(harness.makeUpdate(undefined, { draft: true }));
-    expect(harness.calls.some(({ url }) => url === "https://github.example/api/graphql")).toBe(
-      true,
-    );
-  });
+  it.each(["https://github.example/api/v3", "https://github.example/api/v3/"])(
+    "uses the Enterprise GraphQL endpoint for %s",
+    async (apiUrl) => {
+      const harness = openPullRequestHarness("b".repeat(40), { apiUrl });
+      await harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(undefined, { draft: true }),
+      );
+      expect(harness.calls.some(({ url }) => url === "https://github.example/api/graphql")).toBe(
+        true,
+      );
+    },
+  );
 
   it("does not repeat draft conversion on an already draft PR", async () => {
     const harness = openPullRequestHarness("b".repeat(40), { draft: true });
