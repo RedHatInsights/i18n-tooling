@@ -269,8 +269,11 @@ export interface PhraseReconcileResult {
   batchKey: string;
   /** Omitted when the whole batch could not be reconciled on this run. */
   phraseLocale?: string;
-  /** `retrying` means a transient failure; the next reconcile run tries again. */
-  phase: "pending" | "retrying" | "failed" | "superseded" | "pr-created";
+  /**
+   * `retrying` means a transient failure; the next reconcile run tries again.
+   * `invalid-translation` means a locale PR was delivered with translation validation errors.
+   */
+  phase: "pending" | "retrying" | "failed" | "superseded" | "pr-created" | "invalid-translation";
   pullRequestUrl?: string;
   reason?: string;
 }
@@ -2814,7 +2817,7 @@ export class PhraseWorkflow {
           stableJson(existingLocale?.validationWarnings ?? []) !== stableJson(warnings);
         const reportDelivery = (pullRequestUrl: string) =>
           push({
-            phase: errors.length ? "failed" : "pr-created",
+            phase: errors.length ? "invalid-translation" : "pr-created",
             pullRequestUrl,
             ...(errors.length ? { reason: errors.join("; ") } : {}),
           });

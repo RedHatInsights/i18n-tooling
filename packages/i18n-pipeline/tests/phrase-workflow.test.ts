@@ -2563,7 +2563,11 @@ describe("PhraseWorkflow submission", () => {
     const [result] = await scenario.workflow.reconcile();
     const report = scenario.repository.pullRequestComments[0]?.body;
 
-    expect(result?.phase).toBe("failed");
+    expect(result).toMatchObject({
+      phase: "invalid-translation",
+      pullRequestUrl: "https://github.com/example/app/pull/42",
+      reason: expect.stringContaining("ICU argument mismatches"),
+    });
     expect(report).toBe(
       [
         "<!-- i18n-pipeline:translation-findings digest=b136d1e56363762a2337ae834338591e8e24ce1d6aa087f87d320ad7e122b708 -->",
@@ -2649,7 +2653,7 @@ describe("PhraseWorkflow submission", () => {
       "Generated Frontend YAML was not updated for this export. Any existing locale block may reflect an earlier valid export and must not be merged with this catalog.";
     const firstReport = scenario.repository.pullRequestComments[0]?.body ?? "";
 
-    expect(firstResult?.phase).toBe("failed");
+    expect(firstResult?.phase).toBe("invalid-translation");
     expect(firstReport).toContain(`> [!NOTE]\n> ${note}`);
     expect(firstReport).toContain(
       `> [!CAUTION]\n> **❌ 1 error** blocks merging.\n\n> [!NOTE]\n> ${note}`,
@@ -2796,7 +2800,7 @@ describe("PhraseWorkflow submission", () => {
     scenario.repository.commentError = undefined;
     const [retried] = await scenario.workflow.reconcile();
     const storedAfterRetry = await scenario.state.readBatch(scenario.batch.key);
-    expect(retried?.phase).toBe("failed");
+    expect(retried?.phase).toBe("invalid-translation");
     expect(scenario.repository.pullRequestComments).toHaveLength(1);
     expect(storedAfterRetry?.record.locales.fr?.pullRequestCommentPending).toBeUndefined();
     expect(scenario.repository.commitCount(branch!)).toBe(1);
@@ -3702,7 +3706,7 @@ describe("PhraseWorkflow submission", () => {
     const failed = await workflow.reconcile();
     const [afterFailure] = await state.listBatches();
 
-    expect(failed[0]?.phase).toBe("failed");
+    expect(failed[0]?.phase).toBe("invalid-translation");
     expect(failed[0]?.reason).toContain("ICU argument mismatches");
     expect(afterFailure?.record.phase).toBe("ready");
     expect(afterFailure?.record.locales.fr?.phase).toBe("pr-created");
@@ -3801,7 +3805,7 @@ describe("PhraseWorkflow submission", () => {
     const results = await workflow.reconcile();
     const [stored] = await state.listBatches();
 
-    expect(results[0]?.phase).toBe("failed");
+    expect(results[0]?.phase).toBe("invalid-translation");
     expect(results[0]?.reason).toContain("Use # where the number belongs");
     expect(stored?.record.phase).toBe("ready");
     expect(stored?.record.locales.zh_cn?.phase).toBe("pr-created");
@@ -3853,7 +3857,7 @@ describe("PhraseWorkflow submission", () => {
     const pr = repository.pullRequests[0]!;
     expect(pr.draft).toBe(true);
     expect(pr.additionalFiles).toBeUndefined();
-    expect(invalid?.phase).toBe("failed");
+    expect(invalid?.phase).toBe("invalid-translation");
     phrase.targetBytes = new TextEncoder().encode('{"searchEntries.roles.title":"Rôles"}');
     expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
     expect(repository.pullRequests).toHaveLength(1);
@@ -3868,7 +3872,7 @@ describe("PhraseWorkflow submission", () => {
     phrase.targetBytes = new TextEncoder().encode(
       '{"searchEntries.roles.title":"Rôles {missing}"}',
     );
-    expect((await workflow.reconcile())[0]?.phase).toBe("failed");
+    expect((await workflow.reconcile())[0]?.phase).toBe("invalid-translation");
     expect(repository.branchFiles.get(pr.branch)!.get("deploy/frontend.yaml")).toEqual(validYaml);
     expect(repository.pullRequestBodies.get(invalid!.pullRequestUrl!)).toContain(
       "Generated Frontend YAML was not updated",
@@ -3885,7 +3889,7 @@ describe("PhraseWorkflow submission", () => {
     const commits = repository.commitCount(pr.branch);
     repository.onReadFile = (path, ref, call) =>
       path === "deploy/frontend.yaml" && ref === head ? null : validRead(path, ref, call);
-    expect((await workflow.reconcile())[0]?.phase).toBe("failed");
+    expect((await workflow.reconcile())[0]?.phase).toBe("invalid-translation");
     expect(repository.commitCount(pr.branch)).toBe(commits);
     expect(repository.pullRequestComments.at(-1)?.body).toContain("Missing Frontend template");
     repository.onReadFile = validRead;
@@ -5941,7 +5945,7 @@ describe("PhraseWorkflow submission", () => {
 
     const [result] = await workflow.reconcile();
 
-    expect(result?.phase).toBe("failed");
+    expect(result?.phase).toBe("invalid-translation");
     expect(result?.reason).toContain('"items": plural {count} lost exact branch =1');
     expect(repository.pullRequests).toHaveLength(1);
     expect(repository.pullRequests[0]?.draft).toBe(true);
@@ -6098,12 +6102,12 @@ describe("PhraseWorkflow submission", () => {
       expect(pr.content).toEqual(phrase.targetBytes);
       expect(pr.body).toContain("❌ 1 error — see the latest 🌐 Translation check comment.");
       expect(repository.pullRequestComments.at(-1)?.body).toContain(diagnostic);
-      expect(invalid?.phase).toBe("failed");
+      expect(invalid?.phase).toBe("invalid-translation");
       expect(invalid?.pullRequestUrl).toBe("https://github.com/example/app/pull/42");
       expect((await state.readBatch(batch.key))?.record.locales.fr?.phase).toBe("pr-created");
 
       const commits = repository.branchCommits.get(pr.branch)!.length;
-      expect((await workflow.reconcile())[0]?.phase).toBe("failed");
+      expect((await workflow.reconcile())[0]?.phase).toBe("invalid-translation");
       expect(repository.branchCommits.get(pr.branch)).toHaveLength(commits);
       phrase.targetBytes = new TextEncoder().encode('{"greeting":"Bonjour {name}"}');
       const [fixed] = await workflow.reconcile();
@@ -6148,7 +6152,7 @@ describe("PhraseWorkflow submission", () => {
     );
     const branch = repository.pullRequests[0]!.branch;
     const commits = repository.commitCount(branch);
-    expect((await workflow.reconcile())[0]?.phase).toBe("failed");
+    expect((await workflow.reconcile())[0]?.phase).toBe("invalid-translation");
     expect(repository.pullRequestBodies.get(invalid!.pullRequestUrl!) === expectedBody).toBe(true);
     expect(repository.commitCount(branch)).toBe(commits);
   });
@@ -6181,7 +6185,7 @@ describe("PhraseWorkflow submission", () => {
       config,
     });
     phrase.jobStatus = "COMPLETED";
-    expect((await workflow.reconcile())[0]?.phase).toBe("failed");
+    expect((await workflow.reconcile())[0]?.phase).toBe("invalid-translation");
     const pr = repository.pullRequests[0]!;
     expect(pr.draft).toBe(true);
     expect(pr.body).toContain(
@@ -6225,7 +6229,7 @@ describe("PhraseWorkflow submission", () => {
     const first = await workflow.reconcile();
     const [failed] = await state.listBatches();
 
-    expect(first[0]?.phase).toBe("failed");
+    expect(first[0]?.phase).toBe("invalid-translation");
     expect(first[0]?.reason).toContain("ICU argument mismatches");
     expect(first[0]?.reason).toContain('"greeting": source [name], target [count]');
     expect(failed?.record.phase).toBe("ready");
@@ -6452,13 +6456,13 @@ describe("PhraseWorkflow submission", () => {
     await workflow.submit(input);
 
     const first = await workflow.reconcile();
-    expect(first.map((result) => result.phase)).toEqual(["failed", "pending"]);
+    expect(first.map((result) => result.phase)).toEqual(["invalid-translation", "pending"]);
     expect((await state.listBatches())[0]?.record.phase).toBe("ready");
     expect((await state.listBatches())[0]?.record.locales.ja?.phase).toBe("pending");
 
     phrase.jobStatuses.set("job-ja", "COMPLETED");
     const stillInvalid = await workflow.reconcile();
-    expect(stillInvalid.map((result) => result.phase)).toEqual(["failed", "pending"]);
+    expect(stillInvalid.map((result) => result.phase)).toEqual(["invalid-translation", "pending"]);
     expect((await state.listBatches())[0]?.record.locales.ja?.phase).toBe("pending");
     expect(phrase.targetDownloadCalls).toBe(2);
 

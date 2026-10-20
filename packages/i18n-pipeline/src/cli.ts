@@ -628,6 +628,17 @@ async function runTmsCommand(
     return 0;
   }
   for (const result of results) options.stdout(formatReconcileResult(result));
+  if (options.env.GITHUB_ACTIONS === "true") {
+    for (const result of results) {
+      if (result.phase !== "invalid-translation") continue;
+      const message =
+        `${result.phraseLocale} translation has validation errors; see the 🌐 Translation check comment on ` +
+        `${result.pullRequestUrl}. Fix it in Phrase.`;
+      options.stdout(
+        `::warning title=i18n-pipeline translation check::${escapeAnnotation(message)}`,
+      );
+    }
+  }
   return results.some((result) => result.phase === "failed" || result.phase === "retrying") ? 1 : 0;
 }
 
