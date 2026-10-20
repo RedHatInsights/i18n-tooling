@@ -1,6 +1,6 @@
 # Phrase through the i18n-hub
 
-Use this reference when the Phrase mode is **Hub**. The i18n hub (the `RedHatInsights/i18n-hub` repository, not public) runs `sync.yml` on weekdays at 06:17 and 14:17 UTC. Hub maintainers can also dispatch it for one consumer. For each registered consumer, it runs the shared submit and reconcile workflows with a short-lived i18n GitHub App token scoped to that consumer. Batch state on each config's state branch and locale PRs stay in the consumer repository, and the App's bot authors those PRs.
+Use this reference when the Phrase mode is **Hub**. The i18n hub (the `RedHatInsights/i18n-hub` repository, not public) runs `sync.yml` on weekdays at 05:17 and 12:17 UTC. Hub maintainers can also dispatch it for one consumer. For each registered consumer, it runs the shared submit and reconcile workflows with a short-lived i18n GitHub App token scoped to that consumer. Batch state on each config's state branch and locale PRs stay in the consumer repository, and the App's bot authors those PRs.
 
 ## Consumer change
 
