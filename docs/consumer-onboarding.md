@@ -97,7 +97,7 @@ After the pilot round trip, restore the triggers from the [example callers](../e
 
 ## Hub-owned Phrase automation
 
-Keep catalog validation and the Phrase config in the consumer repository. Install the hub's GitHub App on each target consumer during onboarding, then submit a reviewed registration to `i18n-hub`'s `consumers.json` with `phraseProject` and `phraseFile`; follow the README of the `RedHatInsights/i18n-hub` repository (not public). Phrase credentials and the reconcile schedule live in the hub. Choose hub-owned or consumer-owned Phrase automation for a repository; never run both.
+Keep catalog validation and the Phrase config in the consumer repository. Install the hub's GitHub App, [`hcc-i18n-tms-sync`](https://github.com/apps/hcc-i18n-tms-sync/installations/new), on each target consumer during onboarding, then submit a reviewed registration to `i18n-hub`'s `consumers.json` with `phraseProject` and `phraseFile`; follow the README of the `RedHatInsights/i18n-hub` repository (not public). Phrase credentials and the reconcile schedule live in the hub. Choose hub-owned or consumer-owned Phrase automation for a repository; never run both.
 
 ## Rolling back
 

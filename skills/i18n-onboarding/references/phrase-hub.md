@@ -42,7 +42,7 @@ To open it:
 1. Clone i18n-hub into a new temporary directory outside the consumer, and create the branch `register-<name>`.
 2. Append the entry to `consumers.json`, keeping the existing formatting.
 3. Run `npm run check` and `npm test`. Both must pass.
-4. Commit only `consumers.json`, push, and open a **draft** PR that keeps the hub's PR template. Its description links the consumer PR and states the merge order: the consumer PR merges first and the App is installed, then this PR is marked ready.
+4. Commit only `consumers.json`, push, and open a **draft** PR that keeps the hub's PR template. Its description links the consumer PR and states the merge order: the consumer PR merges first and the App is installed, then this PR is marked ready. It also requests the App installation under its own heading, `App installation`: name `RedHatInsights/<repository-name>`, link the [install page](https://github.com/apps/hcc-i18n-tms-sync/installations/new), and ask a `RedHatInsights` organization owner to add the repository to the existing `hcc-i18n-tms-sync` installation. This PR is the install request; GitHub has no API to file one.
 
 In every other case, print the entry in the final report and put "Register in i18n-hub" with the entry in the consumer PR checklist. Explain which condition was not met.
 
@@ -50,7 +50,7 @@ In every other case, print the entry in the final report and put "Register in i1
 
 Add these items to the consumer PR checklist:
 
-- Install the i18n GitHub App on this repository with `contents: write` and `pull-requests: write`. The i18n-hub README names the App and its owners.
+- Install the i18n GitHub App, [`hcc-i18n-tms-sync`](https://github.com/apps/hcc-i18n-tms-sync/installations/new), on this repository with `contents: write` and `pull-requests: write`. A `RedHatInsights` organization owner adds the repository to the existing installation; link the hub registration PR that requests it, if one was opened.
 - If a ruleset restricts branch creation, exclude each config's `state.branch` and `i18n/phrase-*`.
 - Get the hub registration PR reviewed by the hub's Code Owners, and merge it after the consumer PR.
 
