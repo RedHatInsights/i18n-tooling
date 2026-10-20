@@ -118,7 +118,12 @@ describe("PhraseClient", () => {
 
   it("lists every page with both notReady filters and deduplicates job parts by UID", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
-    const job = (uid: string, targetLang: string, sourceFileUid: string) => ({
+    const job = (
+      uid: string,
+      targetLang: string,
+      sourceFileUid: string,
+      includeWorkflowStep = true,
+    ) => ({
       uid,
       targetLang,
       filename: "source catalog.json",
@@ -127,7 +132,7 @@ describe("PhraseClient", () => {
       imported: true,
       sourceFileUid,
       status: "NEW",
-      workflowStep: { workflowLevel: 1 },
+      ...(includeWorkflowStep ? { workflowStep: { workflowLevel: 1 } } : {}),
     });
     const fetch: typeof globalThis.fetch = async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
@@ -141,7 +146,7 @@ describe("PhraseClient", () => {
       const content =
         notReady === "true"
           ? pageNumber === 0
-            ? [job("job-fr", "fr", "source-a"), job("job-ja", "ja", "source-b")]
+            ? [job("job-fr", "fr", "source-a", false), job("job-ja", "ja", "source-b")]
             : [job("job-es", "es", "source-c")]
           : pageNumber === 0
             ? [job("job-fr", "fr", "source-a")]
@@ -157,6 +162,7 @@ describe("PhraseClient", () => {
       uid: "job-fr",
       targetLang: "fr",
       workflowLevel: 1,
+      workflowLevelReported: true,
       filename: "source catalog.json",
       dateCreated: "2026-10-19T10:00:00Z",
       sourceFileUid: "source-a",
@@ -217,7 +223,6 @@ describe("PhraseClient", () => {
       uid: "job-without-locale",
       filename: "source catalog.json",
       dateCreated: "not-a-timestamp",
-      workflowStep: { workflowLevel: 1 },
     };
     const fetch: typeof globalThis.fetch = async (input) => {
       const url = input instanceof Request ? input.url : String(input);
@@ -236,6 +241,7 @@ describe("PhraseClient", () => {
       filename: "source catalog.json",
       dateCreated: "not-a-timestamp",
       workflowLevel: 1,
+      workflowLevelReported: false,
       listingEntry: "page 1, item 1",
     });
     expect(jobs[0]?.targetLang).toBeUndefined();

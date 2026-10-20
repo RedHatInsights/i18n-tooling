@@ -342,6 +342,8 @@ const FRESH_JOB_VISIBILITY_RETRY_WINDOW_MS = 60 * 1000;
 const FRESH_JOB_VISIBILITY_RETRY_INTERVAL_MS = 15 * 1000;
 const PHRASE_JOB_FIRST_WORKFLOW_LEVEL = 1;
 const PHRASE_JOB_MAX_WORKFLOW_LEVEL = 15;
+// Phrase can timestamp parts of one create request seconds apart across a second boundary.
+const PHRASE_JOB_RECOVERY_CLUSTER_GAP_MS = 5_000;
 const PHRASE_JOB_VISIBILITY_GRACE_LABEL = "15 minutes";
 const NO_PHRASE_JOB_CREATED_VOID_REASON = `No Phrase job was created for this batch; voided after ${PHRASE_JOB_VISIBILITY_GRACE_LABEL}`;
 const DELIVERY_FINAL_LOCALE_PHASES: ReadonlySet<PhraseLocalePhase> = new Set([
@@ -761,39 +763,87 @@ function isWithinPhraseJobVisibilityGrace(createdAt: string, now: number): boole
   return Number.isFinite(createdAtMs) && now - createdAtMs < PHRASE_JOB_VISIBILITY_GRACE_MS;
 }
 
-function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
-  const leftSet = new Set(left);
-  const rightSet = new Set(right);
-  return leftSet.size === rightSet.size && [...leftSet].every((value) => rightSet.has(value));
-}
-
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+function deduplicateListedJobsByUid(jobs: readonly PhraseJobListPart[]): PhraseJobListPart[] {
+  const jobsByUid = new Map<string, PhraseJobListPart>();
+  const jobsWithoutUid: PhraseJobListPart[] = [];
+  for (const job of jobs) {
+    if (!isNonEmptyString(job.uid)) {
+      jobsWithoutUid.push(job);
+      continue;
+    }
+    const existing = jobsByUid.get(job.uid);
+    if (!existing) {
+      jobsByUid.set(job.uid, job);
+      continue;
+    }
+    const existingLevelReported = existing.workflowLevelReported === true;
+    const currentLevelReported = job.workflowLevelReported === true;
+    const existingLevel = existing.workflowLevel ?? PHRASE_JOB_FIRST_WORKFLOW_LEVEL;
+    const currentLevel = job.workflowLevel ?? PHRASE_JOB_FIRST_WORKFLOW_LEVEL;
+    if (
+      (currentLevelReported && !existingLevelReported) ||
+      (!currentLevelReported && !existingLevelReported && currentLevel < existingLevel)
+    ) {
+      jobsByUid.set(job.uid, job);
+    }
+  }
+  return [...jobsByUid.values(), ...jobsWithoutUid];
+}
+
+function groupRecoveryCandidates<T>(
+  candidates: readonly T[],
+  getCreatedAtMs: (candidate: T) => number | undefined,
+): T[][] {
+  const datedCandidates: Array<{ candidate: T; createdAtMs: number }> = [];
+  const candidatesWithoutDate: T[] = [];
+  for (const candidate of candidates) {
+    const createdAtMs = getCreatedAtMs(candidate);
+    if (createdAtMs !== undefined && Number.isFinite(createdAtMs)) {
+      datedCandidates.push({ candidate, createdAtMs });
+    } else {
+      candidatesWithoutDate.push(candidate);
+    }
+  }
+  datedCandidates.sort((left, right) => left.createdAtMs - right.createdAtMs);
+
+  const groups: T[][] = [];
+  let previousCreatedAtMs: number | undefined;
+  for (const { candidate, createdAtMs } of datedCandidates) {
+    let group = groups[groups.length - 1];
+    if (
+      !group ||
+      previousCreatedAtMs === undefined ||
+      createdAtMs - previousCreatedAtMs > PHRASE_JOB_RECOVERY_CLUSTER_GAP_MS
+    ) {
+      group = [];
+      groups.push(group);
+    }
+    group.push(candidate);
+    previousCreatedAtMs = createdAtMs;
+  }
+  if (candidatesWithoutDate.length) groups.push(candidatesWithoutDate);
+  return groups;
+}
+
 function describeRecoveryCandidates(candidates: readonly PhraseJobListPart[]): string {
-  const jobsByCreatedAt = new Map<number | undefined, PhraseJobListPart[]>();
-  for (const job of candidates) {
+  const uniqueCandidates = deduplicateListedJobsByUid(candidates);
+  return groupRecoveryCandidates(uniqueCandidates, (job) => {
     const createdAtMs =
       typeof job.dateCreated === "string" ? Date.parse(job.dateCreated) : Number.NaN;
-    const key = Number.isFinite(createdAtMs) ? createdAtMs : undefined;
-    const group = jobsByCreatedAt.get(key) ?? [];
-    group.push(job);
-    jobsByCreatedAt.set(key, group);
-  }
-
-  return [...jobsByCreatedAt.entries()]
-    .sort(([left], [right]) => {
-      if (left === undefined) return right === undefined ? 0 : 1;
-      if (right === undefined) return -1;
-      return left - right;
-    })
-    .map(([createdAtMs, jobs]) => {
-      const groupName =
-        createdAtMs === undefined
-          ? "unparsable creation time"
-          : `creation time ${new Date(createdAtMs).toISOString()}`;
-      const entries = jobs
+    return Number.isFinite(createdAtMs) ? createdAtMs : undefined;
+  })
+    .map((jobs) => {
+      const firstCreatedAt = jobs[0]?.dateCreated;
+      const firstCreatedAtMs =
+        typeof firstCreatedAt === "string" ? Date.parse(firstCreatedAt) : Number.NaN;
+      const groupName = !Number.isFinite(firstCreatedAtMs)
+        ? "unparsable creation time"
+        : `creation time ${new Date(firstCreatedAtMs).toISOString()}`;
+      const entries = [...jobs]
         .sort((left, right) =>
           (left.uid ?? left.listingEntry).localeCompare(right.uid ?? right.listingEntry),
         )
@@ -1419,6 +1469,7 @@ export class PhraseWorkflow {
 
     const filename = repairScope.sourceFilename;
     const listedJobs: PhraseJobListPart[] = [];
+    const listedJobUids = new Set<string>();
     let lastWorkflowLevel: number | undefined;
     for (
       let workflowLevel = PHRASE_JOB_FIRST_WORKFLOW_LEVEL;
@@ -1430,6 +1481,13 @@ export class PhraseWorkflow {
         workflowLevel,
       });
       listedJobs.push(...levelJobs);
+      let newUidCount = 0;
+      for (const job of levelJobs) {
+        if (isNonEmptyString(job.uid) && !listedJobUids.has(job.uid)) {
+          listedJobUids.add(job.uid);
+          newUidCount += 1;
+        }
+      }
       const reportedLastLevels = levelJobs
         .map(({ lastWorkflowLevel }) => lastWorkflowLevel)
         .filter(
@@ -1442,14 +1500,15 @@ export class PhraseWorkflow {
       if (reportedLastLevels.length) {
         lastWorkflowLevel = Math.max(lastWorkflowLevel ?? 0, ...reportedLastLevels);
       }
+      if (newUidCount === 0) break;
       if (lastWorkflowLevel !== undefined && workflowLevel >= lastWorkflowLevel) break;
-      if (levelJobs.length === 0) break;
     }
+    const uniqueListedJobs = deduplicateListedJobsByUid(listedJobs);
     const claimedJobUids = new Set(
       otherRecords.flatMap((other) => other.jobs.map((job) => job.uid)),
     );
     const earliestCandidateTime = createdAtMs - PHRASE_JOB_CREATION_CLOCK_SKEW_MS;
-    const candidates = listedJobs.flatMap((job) => {
+    const candidates = uniqueListedJobs.flatMap((job) => {
       if (job.filename !== undefined && job.filename !== filename) return [];
       if (isNonEmptyString(job.uid) && claimedJobUids.has(job.uid)) return [];
       const jobCreatedAtMs =
@@ -1476,8 +1535,16 @@ export class PhraseWorkflow {
       );
     }
 
-    const jobsByCreatedAt = new Map<number, PhraseJobPart[]>();
-    for (const { job, jobCreatedAtMs } of candidates) {
+    const expectedTargetLangs = pendingTargetLangs(record);
+    const effectiveLastWorkflowLevel =
+      lastWorkflowLevel ??
+      Math.max(
+        PHRASE_JOB_FIRST_WORKFLOW_LEVEL,
+        ...uniqueListedJobs.map((job) => job.workflowLevel ?? PHRASE_JOB_FIRST_WORKFLOW_LEVEL),
+      );
+    const expectedTargetLangSet = new Set(expectedTargetLangs);
+    let hasDuplicateLocale = false;
+    const recoveryCandidates = candidates.map(({ job, jobCreatedAtMs }) => {
       const phraseJob: PhraseJobPart = {
         uid: job.uid!,
         targetLang: job.targetLang!,
@@ -1492,51 +1559,55 @@ export class PhraseWorkflow {
         ...(job.status === undefined ? {} : { status: job.status }),
         ...(job.importStatus === undefined ? {} : { importStatus: job.importStatus }),
       };
-      const group = jobsByCreatedAt.get(jobCreatedAtMs!) ?? [];
-      group.push(phraseJob);
-      jobsByCreatedAt.set(jobCreatedAtMs!, group);
-    }
-
-    const expectedTargetLangs = pendingTargetLangs(record);
-    const projectLastWorkflowLevel =
-      lastWorkflowLevel ??
-      Math.max(...listedJobs.map((job) => job.workflowLevel ?? PHRASE_JOB_FIRST_WORKFLOW_LEVEL));
-    const matchingGroups = [...jobsByCreatedAt]
-      .filter(([, jobs]) => {
-        const jobsByWorkflowLevel = new Map<number, PhraseJobPart[]>();
-        for (const job of jobs) {
-          const levelJobs = jobsByWorkflowLevel.get(job.workflowLevel) ?? [];
-          levelJobs.push(job);
-          jobsByWorkflowLevel.set(job.workflowLevel, levelJobs);
+      return { job: phraseJob, jobCreatedAtMs: jobCreatedAtMs! };
+    });
+    const matchingGroups = groupRecoveryCandidates(
+      recoveryCandidates,
+      (candidate) => candidate.jobCreatedAtMs,
+    ).flatMap((jobs) => {
+      const jobsByWorkflowLevel = new Map<number, PhraseJobPart[]>();
+      for (const { job } of jobs) {
+        const levelJobs = jobsByWorkflowLevel.get(job.workflowLevel) ?? [];
+        levelJobs.push(job);
+        jobsByWorkflowLevel.set(job.workflowLevel, levelJobs);
+      }
+      let matches = true;
+      for (
+        let workflowLevel = PHRASE_JOB_FIRST_WORKFLOW_LEVEL;
+        workflowLevel <= effectiveLastWorkflowLevel;
+        workflowLevel += 1
+      ) {
+        const levelJobs = jobsByWorkflowLevel.get(workflowLevel);
+        if (!levelJobs) {
+          matches = false;
+          continue;
         }
-        for (
-          let workflowLevel = PHRASE_JOB_FIRST_WORKFLOW_LEVEL;
-          workflowLevel <= projectLastWorkflowLevel;
-          workflowLevel += 1
+        const localeCounts = new Map<string, number>();
+        for (const job of levelJobs) {
+          localeCounts.set(job.targetLang, (localeCounts.get(job.targetLang) ?? 0) + 1);
+        }
+        if ([...localeCounts.values()].some((count) => count > 1)) hasDuplicateLocale = true;
+        if (
+          levelJobs.length !== expectedTargetLangs.length ||
+          expectedTargetLangs.some((targetLang) => localeCounts.get(targetLang) !== 1) ||
+          [...localeCounts.keys()].some((targetLang) => !expectedTargetLangSet.has(targetLang))
         ) {
-          const levelJobs = jobsByWorkflowLevel.get(workflowLevel);
-          if (
-            !levelJobs ||
-            !sameStringSet(
-              levelJobs.map((job) => job.targetLang),
-              expectedTargetLangs,
-            )
-          ) {
-            return false;
-          }
+          matches = false;
         }
-        return [...jobsByWorkflowLevel.keys()].every(
-          (workflowLevel) => workflowLevel <= projectLastWorkflowLevel,
-        );
-      })
-      .map(([createdAtMs, jobs]) => ({ createdAtMs, jobs }))
-      .sort((left, right) => left.createdAtMs - right.createdAtMs);
+      }
+      if ([...jobsByWorkflowLevel.keys()].some((level) => level > effectiveLastWorkflowLevel)) {
+        matches = false;
+      }
+      return matches ? [{ jobs: jobs.map(({ job }) => job) }] : [];
+    });
 
     if (matchingGroups.length > 1 || (candidates.length > 0 && matchingGroups.length === 0)) {
       const reason =
         matchingGroups.length > 1
           ? "More than one Phrase creation-time group matches this batch"
-          : "Phrase jobs exist for this batch, but no creation-time group matches its pending locales";
+          : hasDuplicateLocale
+            ? "More than one Phrase job matches a locale within a Phrase creation-time group"
+            : "Phrase jobs exist for this batch, but no creation-time group matches its pending locales";
       throw new PhraseAmbiguousRecoveryError(
         `${reason}. Candidate jobs grouped by creation time: ${describeRecoveryCandidates(candidates.map(({ job }) => job))}. Move the jobs that do not belong to this batch to the Phrase recycle bin, then rerun.`,
         record.key,
