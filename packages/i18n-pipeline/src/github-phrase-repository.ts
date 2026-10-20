@@ -23,6 +23,9 @@ export interface GitHubPhraseRepositoryOptions {
 
 /** State writes retried when GitHub rejects them only because the branch head moved. */
 const STATE_WRITE_ATTEMPTS = 3;
+const API_PAGE_SIZE = 100;
+const AUTHOR_HISTORY_PAGE_LIMIT = 5;
+const MAX_ASSIGNEES = 10;
 
 interface GitHubFile {
   sha: string;
@@ -86,6 +89,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function commitAuthorLogin(commit: unknown): string | undefined {
+  if (!isRecord(commit) || !isRecord(commit.author) || !nonEmptyString(commit.author.login)) {
+    return undefined;
+  }
+  const login = commit.author.login.trim();
+  if (commit.author.type === "Bot" || /\[bot\]$/i.test(login)) return undefined;
+  return login;
 }
 
 function assertRepositoryPath(path: string): void {
@@ -155,6 +167,65 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     const sha = await this.getReference(ref);
     if (!sha) throw new GitHubRepositoryError(`GitHub base branch does not exist: ${ref}`, 404);
     return sha;
+  }
+
+  async listSourceChangeAuthors(input: {
+    path: string;
+    headCommit: string;
+    baseCommit?: string;
+  }): Promise<string[]> {
+    assertRepositoryPath(input.path);
+    assertGitRef(input.headCommit);
+
+    if (!input.baseCommit) {
+      const commits = await this.listCommitsForPath(input.path, input.headCommit, 1);
+      const login = commitAuthorLogin(commits[0]);
+      return login ? [login] : [];
+    }
+
+    assertGitRef(input.baseCommit);
+    const compareShas = new Set<string>();
+    for (let page = 1; page <= AUTHOR_HISTORY_PAGE_LIMIT; page += 1) {
+      const compareRef = encodeURIComponent(`${input.baseCommit}...${input.headCommit}`);
+      const query = new URLSearchParams({ per_page: String(API_PAGE_SIZE), page: String(page) });
+      const response = await this.request(
+        `${this.repositoryPath}/compare/${compareRef}?${query.toString()}`,
+        { method: "GET" },
+      );
+      const value: unknown = await response.json();
+      if (!isRecord(value) || !Array.isArray(value.commits)) {
+        throw new GitHubRepositoryError("GitHub returned an invalid commit comparison", 500);
+      }
+      for (const commit of value.commits) {
+        if (isRecord(commit) && nonEmptyString(commit.sha)) compareShas.add(commit.sha);
+      }
+      if (value.commits.length < API_PAGE_SIZE) break;
+    }
+    if (!compareShas.size) return [];
+
+    const logins: string[] = [];
+    const seen = new Set<string>();
+    for (let page = 1; page <= AUTHOR_HISTORY_PAGE_LIMIT; page += 1) {
+      const commits = await this.listCommitsForPath(
+        input.path,
+        input.headCommit,
+        API_PAGE_SIZE,
+        page,
+      );
+      const matching = commits.filter(
+        (commit) => isRecord(commit) && nonEmptyString(commit.sha) && compareShas.has(commit.sha),
+      );
+      if (!matching.length) break;
+      for (const commit of matching) {
+        const login = commitAuthorLogin(commit);
+        if (!login || seen.has(login.toLowerCase())) continue;
+        seen.add(login.toLowerCase());
+        logins.push(login);
+        if (logins.length === MAX_ASSIGNEES) return logins;
+      }
+      if (commits.length < API_PAGE_SIZE) break;
+    }
+    return logins;
   }
 
   async readBatch(key: string): Promise<StoredPhraseBatch | undefined> {
@@ -253,6 +324,42 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     return (await this.createOrUpdatePullRequestWithCommit(input)).pullRequestUrl;
   }
 
+  async addPullRequestAssignees(pullRequestUrl: string, logins: string[]): Promise<string[]> {
+    const number = this.pullRequestNumber(pullRequestUrl);
+    const uniqueLogins: string[] = [];
+    const seen = new Set<string>();
+    for (const candidate of logins) {
+      const login = candidate.trim();
+      const normalized = login.toLowerCase();
+      if (!login || seen.has(normalized)) continue;
+      seen.add(normalized);
+      uniqueLogins.push(login);
+      if (uniqueLogins.length === MAX_ASSIGNEES) break;
+    }
+    if (!uniqueLogins.length) return [];
+    const requestedLogins = new Set(uniqueLogins.map((login) => login.toLowerCase()));
+
+    const response = await this.request(`${this.repositoryPath}/issues/${number}/assignees`, {
+      method: "POST",
+      body: JSON.stringify({ assignees: uniqueLogins }),
+    });
+    const value: unknown = await response.json();
+    if (!isRecord(value) || !Array.isArray(value.assignees)) {
+      throw new GitHubRepositoryError("GitHub returned an invalid pull request assignee list", 500);
+    }
+    const assigned: string[] = [];
+    const assignedLogins = new Set<string>();
+    for (const assignee of value.assignees) {
+      if (!isRecord(assignee) || !nonEmptyString(assignee.login)) continue;
+      const login = assignee.login.trim();
+      const normalizedLogin = login.toLowerCase();
+      if (!requestedLogins.has(normalizedLogin) || assignedLogins.has(normalizedLogin)) continue;
+      assignedLogins.add(normalizedLogin);
+      assigned.push(login);
+    }
+    return assigned;
+  }
+
   async getPullRequestState(pullRequestUrl: string): Promise<PhrasePullRequestState> {
     const number = this.pullRequestNumber(pullRequestUrl);
     const response = await this.request(`${this.repositoryPath}/pulls/${number}`, {
@@ -332,11 +439,13 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
         409,
       );
     }
+    let pullRequestCreated = false;
     // An existing branch may acquire a ready PR after discovery. Establish or adopt
     // its draft PR before changing invalid content, including the POST/422 race.
     if (!open && branchHead && input.draft) {
       await input.recheckOwnedCommitEligibility?.(branchHead);
       const created = await this.createDraftPullRequest(input);
+      pullRequestCreated = !created.adopted;
       open = { html_url: created.pullRequestUrl, state: "open" };
     }
     if (input.draft && open?.html_url) await this.ensurePullRequestDraft(open.html_url);
@@ -358,6 +467,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       if ("finalized" in commitResult) {
         return {
           pullRequestUrl: open!.html_url!,
+          ...(pullRequestCreated ? { pullRequestCreated: true } : {}),
           toolingCommitSha,
           pullRequestFinalized: true,
           ...(commitResult.finalized === "merged" ? { pullRequestMerged: true } : {}),
@@ -367,7 +477,14 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     }
     if (!open?.html_url) {
       const created = await this.createDraftPullRequest(input);
-      if (!created.adopted) return { pullRequestUrl: created.pullRequestUrl, toolingCommitSha };
+      pullRequestCreated = !created.adopted;
+      if (!created.adopted) {
+        return {
+          pullRequestUrl: created.pullRequestUrl,
+          pullRequestCreated: true,
+          toolingCommitSha,
+        };
+      }
       open = { html_url: created.pullRequestUrl, state: "open" };
     }
     const pullRequestUrl = open.html_url!;
@@ -375,11 +492,17 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       const bodyUpdated = await this.updatePullRequestBody(pullRequestUrl, input.body, input.title);
       return {
         pullRequestUrl,
+        ...(pullRequestCreated ? { pullRequestCreated: true } : {}),
         toolingCommitSha,
         ...(!bodyUpdated ? { pullRequestFinalized: true } : {}),
       };
     } catch (bodyError) {
-      return { pullRequestUrl, toolingCommitSha, bodyError };
+      return {
+        pullRequestUrl,
+        ...(pullRequestCreated ? { pullRequestCreated: true } : {}),
+        toolingCommitSha,
+        bodyError,
+      };
     }
   }
 
@@ -717,6 +840,28 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       changedFiles.length > 0 &&
       changedFiles.every((file) => this.isExpectedFileChange(file, expectedPaths))
     );
+  }
+
+  private async listCommitsForPath(
+    path: string,
+    headCommit: string,
+    perPage: number,
+    page?: number,
+  ): Promise<unknown[]> {
+    const query = new URLSearchParams({
+      sha: headCommit,
+      path,
+      per_page: String(perPage),
+      ...(page === undefined ? {} : { page: String(page) }),
+    });
+    const response = await this.request(`${this.repositoryPath}/commits?${query.toString()}`, {
+      method: "GET",
+    });
+    const value: unknown = await response.json();
+    if (!Array.isArray(value)) {
+      throw new GitHubRepositoryError("GitHub returned an invalid path commit list", 500);
+    }
+    return value;
   }
 
   private async compareCommits(base: string, head: string): Promise<GitHubCompareResponse> {

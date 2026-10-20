@@ -36,6 +36,11 @@ on:
         required: false
         type: string
         default: ""
+      fallback-assignees:
+        description: Optional space- or comma-separated GitHub logins used when no source-change author can be assigned
+        required: false
+        type: string
+        default: ""
     secrets:
       # The caller must map each name, even when its value is in the protected environment.
       PHRASE_PLATFORM_API_TOKEN:
@@ -134,6 +139,7 @@ jobs:
           PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET: ${{ secrets.PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET }}
           EXPECTED_PHRASE_PROJECT: ${{ inputs.expected-phrase-project }}
           EXPECTED_SOURCE_FILENAME: ${{ inputs.expected-source-filename }}
+          FALLBACK_ASSIGNEES: ${{ inputs.fallback-assignees }}
           GITHUB_TOKEN: ${{ steps.create-app-token.outputs.token || github.token }}
           GITHUB_API_URL: ${{ github.api_url }}
         run: |
@@ -146,5 +152,9 @@ jobs:
           set -- --repository "$TARGET_REPOSITORY"
           if [ -n "$EXPECTED_PHRASE_PROJECT" ]; then set -- "$@" --expect-project "$EXPECTED_PHRASE_PROJECT"; fi
           if [ -n "$EXPECTED_SOURCE_FILENAME" ]; then set -- "$@" --expect-source-filename "$EXPECTED_SOURCE_FILENAME"; fi
+          IFS=', ' read -r -a fallback_assignees <<< "$FALLBACK_ASSIGNEES"
+          for assignee in "${fallback_assignees[@]:-}"; do
+            if [ -n "$assignee" ]; then set -- "$@" --fallback-assignee "$assignee"; fi
+          done
           node "$GITHUB_WORKSPACE/i18n-tooling-source/packages/i18n-pipeline/dist/cli.js" \
             tms reconcile --config "$CONFIG_PATH" "$@"

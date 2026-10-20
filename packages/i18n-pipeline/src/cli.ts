@@ -139,6 +139,7 @@ Options:
   --config <path>                  TMS JSON config path
   --expect-project <uid>           Require this Phrase project UID
   --expect-source-filename <name>  Require this Phrase source filename
+  --fallback-assignee <login>      Fallback GitHub assignee; may be repeated
   -h, --help                       Show this help`,
   version: `Usage: i18n-pipeline version
 
@@ -149,14 +150,20 @@ function helpText(command?: string): string {
   return command ? (COMMAND_HELP[command] ?? ROOT_HELP) : ROOT_HELP;
 }
 
-function parseOptions<T extends Record<string, { type: "string" | "boolean" }>>(
+type ParsedOptionValue<Option> = Option extends { multiple: true }
+  ? Option extends { type: "boolean" }
+    ? boolean[]
+    : string[]
+  : Option extends { type: "boolean" }
+    ? boolean
+    : string;
+
+function parseOptions<T extends Record<string, { type: "string" | "boolean"; multiple?: boolean }>>(
   args: string[],
   options: T,
-): { [K in keyof T]: (T[K]["type"] extends "boolean" ? boolean : string) | undefined } {
+): { [K in keyof T]: ParsedOptionValue<T[K]> | undefined } {
   const { values } = parseArgs({ args, options, strict: true, allowPositionals: false });
-  return values as unknown as {
-    [K in keyof T]: (T[K]["type"] extends "boolean" ? boolean : string) | undefined;
-  };
+  return values as unknown as { [K in keyof T]: ParsedOptionValue<T[K]> | undefined };
 }
 
 function requireRole(value: string): CatalogRole {
@@ -474,7 +481,18 @@ async function runTmsCommand(
     "retry-failed": { type: "boolean" },
     "expect-project": { type: "string" },
     "expect-source-filename": { type: "string" },
+    "fallback-assignee": { type: "string", multiple: true },
   });
+  const fallbackAssignees = values["fallback-assignee"] ?? [];
+  if (command === "submit" && fallbackAssignees.length) {
+    throw new Error("--fallback-assignee is only valid with tms reconcile");
+  }
+  const githubLogin = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
+  for (const login of fallbackAssignees) {
+    if (!githubLogin.test(login)) {
+      throw new Error(`Invalid GitHub login for --fallback-assignee: ${JSON.stringify(login)}`);
+    }
+  }
   const configPath = values.config;
   if (!configPath) throw new Error("TMS command requires --config");
   const safeConfigPath = await resolveTmsInputPath(options.cwd, configPath, "TMS config");
@@ -599,6 +617,7 @@ async function runTmsCommand(
 
   const results = await workflow.reconcile({
     ...phrasePins,
+    fallbackAssignees,
     repairScope: {
       projectUid: parsed.workflow.projectUid,
       sourceFilename: parsed.workflow.sourceCatalog.filename,

@@ -143,6 +143,7 @@ describe("repository i18n contracts", () => {
           "repository",
           "expected-phrase-project",
           "expected-source-filename",
+          "fallback-assignees",
         ],
       },
     ];
@@ -206,6 +207,13 @@ describe("repository i18n contracts", () => {
         required: false,
         default: "",
       });
+      if (jobName === "reconcile") {
+        expect(workflow.on.workflow_call.inputs["fallback-assignees"]).toMatchObject({
+          type: "string",
+          required: false,
+          default: "",
+        });
+      }
       expect(workflow.on.workflow_call.secrets.APP_CLIENT_ID).toMatchObject({ required: false });
       expect(workflow.on.workflow_call.secrets.APP_PRIVATE_KEY).toMatchObject({ required: false });
       const clientIdDescription = workflow.on.workflow_call.secrets.APP_CLIENT_ID.description;
@@ -265,6 +273,9 @@ describe("repository i18n contracts", () => {
       expect(cliStep.env?.TARGET_REPOSITORY).toBe(targetRepository);
       expect(cliStep.env?.EXPECTED_PHRASE_PROJECT).toBe("${{ inputs.expected-phrase-project }}");
       expect(cliStep.env?.EXPECTED_SOURCE_FILENAME).toBe("${{ inputs.expected-source-filename }}");
+      if (jobName === "reconcile") {
+        expect(cliStep.env?.FALLBACK_ASSIGNEES).toBe("${{ inputs.fallback-assignees }}");
+      }
       expect(cliStep.run).toContain("GitHub auth: app %s[bot]");
       expect(cliStep.run).toContain("GitHub auth: GITHUB_TOKEN (github-actions[bot])");
       expect(cliStep.run).toContain('--repository "$TARGET_REPOSITORY"');
@@ -274,6 +285,12 @@ describe("repository i18n contracts", () => {
       expect(cliStep.run).toContain(
         'if [ -n "$EXPECTED_SOURCE_FILENAME" ]; then set -- "$@" --expect-source-filename "$EXPECTED_SOURCE_FILENAME"; fi',
       );
+      if (jobName === "reconcile") {
+        expect(cliStep.run).toContain(
+          "IFS=', ' read -r -a fallback_assignees <<< \"$FALLBACK_ASSIGNEES\"",
+        );
+        expect(cliStep.run).toContain('--fallback-assignee "$assignee"');
+      }
       expect(cliStep.run!.indexOf("GitHub auth:")).toBeLessThan(cliStep.run!.indexOf("node "));
       expect(steps.every((step) => !step.run?.includes("${{"))).toBe(true);
 

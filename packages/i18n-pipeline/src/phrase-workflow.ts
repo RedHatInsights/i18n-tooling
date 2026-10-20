@@ -124,6 +124,8 @@ export interface PhraseLocaleRecord {
   pullRequestBodyPending?: boolean;
   /** Retry the translation findings comment on the next export for this open PR. */
   pullRequestCommentPending?: boolean;
+  /** Retry the initial best-effort assignee update for this newly created PR. */
+  pullRequestAssigneesPending?: boolean;
   /** A retry batch owns re-exporting this carried PR. */
   pullRequestReexportDelegated?: boolean;
 }
@@ -164,6 +166,8 @@ export type PhrasePullRequestState =
 
 export interface PhraseLocalePullRequestCreated {
   pullRequestUrl: string;
+  /** True only when this call created the PR rather than finding or adopting one. */
+  pullRequestCreated?: boolean;
   toolingCommitSha?: string;
   pullRequestFinalized?: boolean;
   pullRequestMerged?: boolean;
@@ -202,6 +206,12 @@ export interface PhraseLocalePullRequestUpdateResult {
 export interface PhraseWorkflowRepository {
   resolveCommit(ref: string): Promise<string>;
   readFile(path: string, ref: string): Promise<Uint8Array | null>;
+  listSourceChangeAuthors(input: {
+    path: string;
+    headCommit: string;
+    baseCommit?: string;
+  }): Promise<string[]>;
+  addPullRequestAssignees(pullRequestUrl: string, logins: string[]): Promise<string[]>;
   getPullRequestState(pullRequestUrl: string): Promise<PhrasePullRequestState>;
   createOrUpdatePullRequest(input: PhraseLocalePullRequest): Promise<string>;
   createOrUpdatePullRequestWithCommit(
@@ -268,6 +278,7 @@ export interface PhraseReconcileResult {
 export interface PhraseReconcileOptions {
   expectedProjectUid?: string;
   expectedSourceFilename?: string;
+  fallbackAssignees?: string[];
   repairScope?: PhraseRepairScope;
 }
 
@@ -387,7 +398,11 @@ type ImportLocaleClassification =
 
 interface PhraseReconcileContext {
   pins: PhrasePinOptions;
+  fallbackAssignees: string[];
   repairScope?: PhraseRepairScope;
+  assignmentWarnings: Map<string, { batchKey: string; phraseLocale: string; reason: string }>;
+  /** Source-change authors per batch key, resolved once per run for all of its locales. */
+  sourceChangeAuthors: Map<string, Promise<string[]>>;
   verifiedJobs: Map<string, PhraseJobPart[]>;
   jobVerificationFailures: Map<string, Map<string, unknown>>;
   verifiedJobSnapshots: Map<string, { projectUid: string; jobUids: string[] }>;
@@ -769,6 +784,43 @@ function sourceInputPath(config: PhraseWorkflowConfig): string {
   return config.frontendTemplate?.generateSourceCatalog
     ? config.frontendTemplate.path
     : config.sourceCatalog.path;
+}
+
+function previousSourceCommit(
+  record: PhraseBatchRecord,
+  candidates: readonly PhraseBatchRecord[],
+): string | undefined {
+  const createdAt = Date.parse(record.createdAt);
+  if (!Number.isFinite(createdAt)) return undefined;
+  return candidates
+    .filter((candidate) => {
+      const candidateCreatedAt = Date.parse(candidate.createdAt);
+      return (
+        candidate.key !== record.key &&
+        candidate.repository === record.repository &&
+        candidate.baseRef === record.baseRef &&
+        candidate.config.projectUid === record.config.projectUid &&
+        candidate.config.sourceCatalog.filename === record.config.sourceCatalog.filename &&
+        candidate.sourceCommit !== record.sourceCommit &&
+        Number.isFinite(candidateCreatedAt) &&
+        candidateCreatedAt < createdAt
+      );
+    })
+    .sort((left, right) => {
+      const byCreatedAt = Date.parse(right.createdAt) - Date.parse(left.createdAt);
+      return byCreatedAt || right.key.localeCompare(left.key);
+    })[0]?.sourceCommit;
+}
+
+function assignmentWarningKey(batchKey: string, phraseLocale: string): string {
+  return JSON.stringify([batchKey, phraseLocale]);
+}
+
+function isTransientAssignmentError(error: unknown): boolean {
+  return (
+    error instanceof PhraseRepositoryError &&
+    (error.status === 0 || error.status === 429 || error.status >= 500)
+  );
 }
 
 function digest(bytes: Uint8Array): string {
@@ -1337,7 +1389,10 @@ export class PhraseWorkflow {
 
     const context: PhraseReconcileContext = {
       pins: options,
+      fallbackAssignees: options.fallbackAssignees ?? [],
       repairScope: options.repairScope,
+      assignmentWarnings: new Map(),
+      sourceChangeAuthors: new Map(),
       verifiedJobs: new Map(),
       jobVerificationFailures: new Map(),
       verifiedJobSnapshots: new Map(),
@@ -1436,6 +1491,25 @@ export class PhraseWorkflow {
       }
     }
 
+    for (const stored of storedBatches) {
+      const cached = context.storedBatches.get(stored.record.key);
+      if (!cached || rejectedBatchKeys.has(cached.record.key)) continue;
+      let { record, revision } = cached;
+      for (const [phraseLocale, locale] of Object.entries(record.locales)) {
+        if (locale.pullRequestAssigneesPending !== true) {
+          continue;
+        }
+        ({ record, revision } = await this.assignPullRequestBestEffort(
+          context,
+          record,
+          revision,
+          phraseLocale,
+        ));
+        cached.record = record;
+        cached.revision = revision;
+      }
+    }
+
     const latestPullRequestRecords = new Map<string, PhraseBatchRecord>();
     const recordsByKey = new Map(storedBatches.map(({ record }) => [record.key, record]));
     for (const { record } of storedBatches) {
@@ -1492,7 +1566,160 @@ export class PhraseWorkflow {
         });
       }
     }
+    for (const warning of context.assignmentWarnings.values()) {
+      let matchingResult: PhraseReconcileResult | undefined;
+      for (let index = results.length - 1; index >= 0; index -= 1) {
+        const result = results[index]!;
+        if (result.batchKey === warning.batchKey && result.phraseLocale === warning.phraseLocale) {
+          matchingResult = result;
+          break;
+        }
+      }
+      if (matchingResult) {
+        matchingResult.reason = [matchingResult.reason, warning.reason].filter(Boolean).join("; ");
+        continue;
+      }
+      const locale = context.storedBatches.get(warning.batchKey)?.record.locales[
+        warning.phraseLocale
+      ];
+      if (locale?.phase === "pr-created") {
+        results.push({
+          batchKey: warning.batchKey,
+          phraseLocale: warning.phraseLocale,
+          phase: "pr-created",
+          ...(locale.pullRequestUrl ? { pullRequestUrl: locale.pullRequestUrl } : {}),
+          reason: warning.reason,
+        });
+      }
+    }
     return results;
+  }
+
+  /** Never throws: assignment problems become warnings on this locale's result. */
+  private async assignPullRequestBestEffort(
+    context: PhraseReconcileContext,
+    record: PhraseBatchRecord,
+    revision: string,
+    phraseLocale: string,
+  ): Promise<{ record: PhraseBatchRecord; revision: string }> {
+    let warning: string | undefined;
+    try {
+      const assignment = await this.assignPendingPullRequest(
+        context,
+        record,
+        revision,
+        phraseLocale,
+      );
+      ({ record, revision, warning } = assignment);
+    } catch (error) {
+      warning = `Could not persist locale PR assignment status for ${phraseLocale}; assignment will retry on the next reconcile: ${safeFailureReason(error)}`;
+    }
+    if (warning) {
+      context.assignmentWarnings.set(assignmentWarningKey(record.key, phraseLocale), {
+        batchKey: record.key,
+        phraseLocale,
+        reason: warning,
+      });
+    }
+    return { record, revision };
+  }
+
+  private async assignPendingPullRequest(
+    context: PhraseReconcileContext,
+    record: PhraseBatchRecord,
+    revision: string,
+    phraseLocale: string,
+  ): Promise<{ record: PhraseBatchRecord; revision: string; warning?: string }> {
+    const fallbackAssignees = context.fallbackAssignees;
+    const locale = record.locales[phraseLocale];
+    if (!locale || locale.pullRequestAssigneesPending !== true) return { record, revision };
+
+    const warningReasons: string[] = [];
+    let authorLogins: string[] = [];
+    let assignedLogins: string[] = [];
+    const transientWarning = (error: unknown) =>
+      `Could not assign locale PR for ${phraseLocale}; assignment will retry on the next reconcile: ${[
+        ...warningReasons,
+        safeFailureReason(error),
+      ].join("; ")}`;
+
+    if (!locale.pullRequestUrl) {
+      warningReasons.push("locale PR URL is missing");
+    } else {
+      try {
+        let authors = context.sourceChangeAuthors.get(record.key);
+        if (!authors) {
+          const baseCommit = previousSourceCommit(
+            record,
+            [...context.storedBatches.values()].map(({ record: candidate }) => candidate),
+          );
+          authors = this.dependencies.repository.listSourceChangeAuthors({
+            path: sourceInputPath(record.config),
+            headCommit: record.sourceCommit,
+            ...(baseCommit ? { baseCommit } : {}),
+          });
+          context.sourceChangeAuthors.set(record.key, authors);
+        }
+        authorLogins = await authors;
+      } catch (error) {
+        if (isTransientAssignmentError(error)) {
+          return { record, revision, warning: transientWarning(error) };
+        }
+        warningReasons.push(safeFailureReason(error));
+      }
+
+      if (authorLogins.length) {
+        try {
+          assignedLogins = await this.dependencies.repository.addPullRequestAssignees(
+            locale.pullRequestUrl,
+            authorLogins,
+          );
+        } catch (error) {
+          if (isTransientAssignmentError(error)) {
+            return { record, revision, warning: transientWarning(error) };
+          }
+          warningReasons.push(safeFailureReason(error));
+        }
+      }
+
+      if (!assignedLogins.length && fallbackAssignees.length) {
+        try {
+          assignedLogins = await this.dependencies.repository.addPullRequestAssignees(
+            locale.pullRequestUrl,
+            fallbackAssignees,
+          );
+        } catch (error) {
+          if (isTransientAssignmentError(error)) {
+            return { record, revision, warning: transientWarning(error) };
+          }
+          warningReasons.push(safeFailureReason(error));
+        }
+      }
+
+      if (
+        !assignedLogins.length &&
+        !warningReasons.length &&
+        (authorLogins.length > 0 || fallbackAssignees.length > 0)
+      ) {
+        warningReasons.push("GitHub did not assign any of the requested users");
+      }
+    }
+
+    const warning = warningReasons.length
+      ? `Could not assign locale PR for ${phraseLocale}: ${warningReasons.join("; ")}`
+      : undefined;
+    const updatedLocale = { ...locale };
+    delete updatedLocale.pullRequestAssigneesPending;
+    const updatedRecord: PhraseBatchRecord = {
+      ...record,
+      locales: { ...record.locales, [phraseLocale]: updatedLocale },
+    };
+    const updatedRevision = await this.dependencies.state.updateBatch(updatedRecord, revision);
+    return {
+      record: updatedRecord,
+      revision: updatedRevision,
+      ...(warning ? { warning } : {}),
+    };
   }
 
   private async createSubmission(
@@ -2893,6 +3120,7 @@ export class PhraseWorkflow {
             pullRequestUrl: created.pullRequestUrl,
             pullRequestBranch: branch,
             pullRequestBatchKey,
+            ...(created.pullRequestCreated ? { pullRequestAssigneesPending: true } : {}),
             ...(created.toolingCommitSha ? { toolingCommitSha: created.toolingCommitSha } : {}),
             ...(created.pullRequestFinalized ? { pullRequestFinalized: true } : {}),
             ...(created.pullRequestMerged ? { pullRequestMerged: true } : {}),
@@ -2904,6 +3132,23 @@ export class PhraseWorkflow {
           if (created.pullRequestFinalized) delete localeRecord.pullRequestCommentPending;
           record.locales[target.phraseLocale] = localeRecord;
           revision = await this.dependencies.state.updateBatch(record, revision);
+          const cached = context.storedBatches.get(record.key);
+          if (cached) {
+            cached.record = record;
+            cached.revision = revision;
+          }
+          if (created.pullRequestCreated) {
+            ({ record, revision } = await this.assignPullRequestBestEffort(
+              context,
+              record,
+              revision,
+              target.phraseLocale,
+            ));
+            if (cached) {
+              cached.record = record;
+              cached.revision = revision;
+            }
+          }
           if (created.pullRequestFinalized) {
             if (created.bodyError) {
               push({ phase: "retrying", reason: safeFailureReason(created.bodyError) });
