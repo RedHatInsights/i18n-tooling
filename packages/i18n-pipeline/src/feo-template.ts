@@ -489,12 +489,14 @@ export function inlineFeoLocale(
     const content = existing
       ? { [locale]: localeMap ?? ownTarget }
       : { locales: { [locale]: ownTarget } };
+    // Keep empty lines: inside a block scalar they are part of a multiline translation.
     const block = stringify(content, { lineWidth: 0 })
+      .replace(/\n$/, "")
       .split("\n")
-      .filter(Boolean)
-      .map(
-        (line, index) =>
-          `${" ".repeat(indent)}${line}${index === 0 && headerComment ? ` ${headerComment}` : ""}\n`,
+      .map((line, index) =>
+        line
+          ? `${" ".repeat(indent)}${line}${index === 0 && headerComment ? ` ${headerComment}` : ""}\n`
+          : "\n",
       )
       .join("");
     const replacementRange = pair && blockRange(pair);
