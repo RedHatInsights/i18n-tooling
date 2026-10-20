@@ -213,7 +213,7 @@ Phrase documents Service Accounts using OAuth client credentials. A Service Acco
 The pilot needs a Phrase project template that defines:
 
 - Source locale `en`.
-- Target locales `fr`, `ko`, `ja`, and `zh-CN` using Phrase's exact language codes.
+- Target locales `fr`, `ko`, `ja`, and `zh-CN`. Phrase's own codes for them are `fr`, `ko`, `ja`, and `zh_cn`; `phrase-tms.json` maps each `phraseLocale` to the canonical `repositoryLocale`.
 - ICU-compatible file settings.
 - Translation memory and term bases.
 - Translation and review workflow steps.
