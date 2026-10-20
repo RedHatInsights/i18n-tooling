@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 import { isCliEntryPoint, runCli } from "../src/cli.js";
+import { PhraseWorkflow, type PhraseReconcileResult } from "../src/phrase-workflow.js";
 
 let projectRoot: string | undefined;
 let outsideRoot: string | undefined;
@@ -28,6 +29,42 @@ function phraseTmsConfig(sourceCatalogPath = "locales/en.json"): string {
     sourceCatalog: { path: sourceCatalogPath, adapter: "formatjs-json", locale: "en" },
     targetLocales: [{ phraseLocale: "fr", repositoryLocale: "fr", outputPath: "locales/fr.json" }],
   });
+}
+
+async function prepareReconcileProject(): Promise<void> {
+  projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-reconcile-result-"));
+  await mkdir(join(projectRoot, "locales"), { recursive: true });
+  await writeFile(join(projectRoot, "package.json"), "{}\n");
+  await writeFile(
+    join(projectRoot, "locales/en.json"),
+    JSON.stringify({ greeting: { defaultMessage: "Hello" } }),
+  );
+  await writeFile(join(projectRoot, "phrase.json"), phraseTmsConfig());
+}
+
+async function runReconcileWithResults(
+  results: PhraseReconcileResult[],
+  githubActions?: string,
+): Promise<{ exitCode: number; stdout: string[]; stderr: string[] }> {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const reconcile = vi.spyOn(PhraseWorkflow.prototype, "reconcile").mockResolvedValue(results);
+  try {
+    const exitCode = await runCli(["tms", "reconcile", "--config", "phrase.json"], {
+      cwd: projectRoot!,
+      env: {
+        PHRASE_PLATFORM_API_TOKEN: "platform-token",
+        GITHUB_TOKEN: "run-token",
+        GITHUB_REPOSITORY: "example/app",
+        ...(githubActions ? { GITHUB_ACTIONS: githubActions } : {}),
+      },
+      stdout: (message) => stdout.push(message),
+      stderr: (message) => stderr.push(message),
+    });
+    return { exitCode, stdout, stderr };
+  } finally {
+    reconcile.mockRestore();
+  }
 }
 
 function generatedSourceTmsConfig(): string {
@@ -1715,6 +1752,87 @@ objects:
     expect(locale.pullRequestAssigneesPending).toBeUndefined();
     expect(output.join("\n")).toContain("Could not assign locale PR for fr");
     expect(output.join("\n")).toContain("403");
+  });
+
+  it("returns success for invalid translations but fails for pipeline errors", async () => {
+    await prepareReconcileProject();
+    const invalidTranslation: PhraseReconcileResult = {
+      batchKey: "a".repeat(64),
+      phraseLocale: "fr",
+      phase: "invalid-translation",
+      pullRequestUrl: "https://github.com/example/app/pull/19",
+      reason: "ICU argument mismatch details",
+    };
+
+    const invalidOnly = await runReconcileWithResults([invalidTranslation]);
+    expect(invalidOnly.exitCode).toBe(0);
+    expect(invalidOnly.stdout).toContain(
+      "aaaaaaaaaaaa fr: invalid-translation — https://github.com/example/app/pull/19 — ICU argument mismatch details",
+    );
+
+    const withFailed = await runReconcileWithResults([
+      invalidTranslation,
+      { batchKey: "b".repeat(64), phase: "failed", reason: "import failed" },
+    ]);
+    expect(withFailed.exitCode).toBe(1);
+
+    const withRetrying = await runReconcileWithResults([
+      invalidTranslation,
+      { batchKey: "c".repeat(64), phase: "retrying", reason: "Phrase API unavailable" },
+    ]);
+    expect(withRetrying.exitCode).toBe(1);
+  });
+
+  it("prints one escaped translation warning annotation per invalid locale in Actions", async () => {
+    await prepareReconcileProject();
+    const annotationBreak =
+      "https://github.com/example/app/pull/20?note=100%\r\n::warning title=ignored::";
+    const result = await runReconcileWithResults(
+      [
+        {
+          batchKey: "a".repeat(64),
+          phraseLocale: "fr",
+          phase: "invalid-translation",
+          pullRequestUrl: "https://github.com/example/app/pull/19",
+          reason: "full error details stay in the report comment",
+        },
+        {
+          batchKey: "b".repeat(64),
+          phraseLocale: "de",
+          phase: "invalid-translation",
+          pullRequestUrl: annotationBreak,
+          reason: "another full error list",
+        },
+      ],
+      "true",
+    );
+    const annotations = result.stdout.filter((line) => line.startsWith("::warning"));
+
+    expect(result.exitCode).toBe(0);
+    expect(annotations).toEqual([
+      "::warning title=i18n-pipeline translation check::fr translation has validation errors; see the 🌐 Translation check comment on https://github.com/example/app/pull/19. Fix it in Phrase.",
+      "::warning title=i18n-pipeline translation check::de translation has validation errors; see the 🌐 Translation check comment on https://github.com/example/app/pull/20?note=100%25%0D%0A::warning title=ignored::. Fix it in Phrase.",
+    ]);
+    expect(annotations.join("\n")).not.toContain("full error");
+  });
+
+  it("does not print translation warning annotations outside Actions", async () => {
+    await prepareReconcileProject();
+    const result = await runReconcileWithResults([
+      {
+        batchKey: "a".repeat(64),
+        phraseLocale: "fr",
+        phase: "invalid-translation",
+        pullRequestUrl: "https://github.com/example/app/pull/19",
+        reason: "ICU argument mismatch details",
+      },
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.some((line) => line.startsWith("::warning"))).toBe(false);
+    expect(result.stdout).toContain(
+      "aaaaaaaaaaaa fr: invalid-translation — https://github.com/example/app/pull/19 — ICU argument mismatch details",
+    );
   });
 
   it("processes shared batches unpinned while repairing only the loaded config's stuck batch", async () => {

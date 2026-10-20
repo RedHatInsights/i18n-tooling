@@ -28,6 +28,8 @@ The FormatJS adapter retains string/object descriptions and other descriptor met
 
 `check`, `validate-project`, and Phrase reconciliation also check each translation against its source and target locale. Errors fail validation; Phrase reconciliation opens a draft locale PR and puts a concise findings status line in its description. A 🌐 Translation check comment contains the structured error and warning tables; the first export posts a report, and later exports add one when findings, the batch, or the final job change. Jobs stay `COMPLETED`. Invalid exports do not update generated Frontend YAML; the PR description and report warn when retained YAML may reflect an earlier valid export. Failed downloads, comment delivery, and other API errors remain retryable without fabricating catalog content.
 
+In `tms reconcile`, translation-validation findings do not fail the command: GitHub Actions emits warning annotations alongside the PR's 🌐 Translation check comment, and only pipeline failures exit 1.
+
 | Rule                             | Severity | Locales        | Finding                                                                                                                              |
 | -------------------------------- | -------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `missing-exact-plural-selector`  | error    | all            | The translation dropped a source `=N` branch.                                                                                        |
