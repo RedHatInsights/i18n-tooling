@@ -1,0 +1,184 @@
+{
+  "provider": "phrase",
+  "project": {
+    "uid": "project-uid",
+    "region": "eu"
+  },
+  "sourceCatalog": {
+    "path": "deploy/locales/insights-rbac-ui-feo-frontend-en.json",
+    "filename": "insights-rbac-ui-feo-frontend-en.json",
+    "adapter": "formatjs-json",
+    "locale": "en"
+  },
+  "frontendTemplate": {
+    "path": "deploy/frontend.yaml",
+    "generateSourceCatalog": true
+  },
+  "targetLocales": [
+    {
+      "phraseLocale": "ar",
+      "repositoryLocale": "ar",
+      "outputPath": "deploy/locales/ar.json"
+    },
+    {
+      "phraseLocale": "bg",
+      "repositoryLocale": "bg",
+      "outputPath": "deploy/locales/bg.json"
+    },
+    {
+      "phraseLocale": "cs",
+      "repositoryLocale": "cs",
+      "outputPath": "deploy/locales/cs.json"
+    },
+    {
+      "phraseLocale": "da",
+      "repositoryLocale": "da",
+      "outputPath": "deploy/locales/da.json"
+    },
+    {
+      "phraseLocale": "de",
+      "repositoryLocale": "de",
+      "outputPath": "deploy/locales/de.json"
+    },
+    {
+      "phraseLocale": "el",
+      "repositoryLocale": "el",
+      "outputPath": "deploy/locales/el.json"
+    },
+    {
+      "phraseLocale": "es",
+      "repositoryLocale": "es",
+      "outputPath": "deploy/locales/es.json"
+    },
+    {
+      "phraseLocale": "et",
+      "repositoryLocale": "et",
+      "outputPath": "deploy/locales/et.json"
+    },
+    {
+      "phraseLocale": "fi",
+      "repositoryLocale": "fi",
+      "outputPath": "deploy/locales/fi.json"
+    },
+    {
+      "phraseLocale": "fr",
+      "repositoryLocale": "fr",
+      "outputPath": "deploy/locales/fr.json"
+    },
+    {
+      "phraseLocale": "ga",
+      "repositoryLocale": "ga",
+      "outputPath": "deploy/locales/ga.json"
+    },
+    {
+      "phraseLocale": "hr",
+      "repositoryLocale": "hr",
+      "outputPath": "deploy/locales/hr.json"
+    },
+    {
+      "phraseLocale": "hu",
+      "repositoryLocale": "hu",
+      "outputPath": "deploy/locales/hu.json"
+    },
+    {
+      "phraseLocale": "id",
+      "repositoryLocale": "id",
+      "outputPath": "deploy/locales/id.json"
+    },
+    {
+      "phraseLocale": "it",
+      "repositoryLocale": "it",
+      "outputPath": "deploy/locales/it.json"
+    },
+    {
+      "phraseLocale": "ja",
+      "repositoryLocale": "ja",
+      "outputPath": "deploy/locales/ja.json"
+    },
+    {
+      "phraseLocale": "ko",
+      "repositoryLocale": "ko",
+      "outputPath": "deploy/locales/ko.json"
+    },
+    {
+      "phraseLocale": "lt",
+      "repositoryLocale": "lt",
+      "outputPath": "deploy/locales/lt.json"
+    },
+    {
+      "phraseLocale": "lv",
+      "repositoryLocale": "lv",
+      "outputPath": "deploy/locales/lv.json"
+    },
+    {
+      "phraseLocale": "mt",
+      "repositoryLocale": "mt",
+      "outputPath": "deploy/locales/mt.json"
+    },
+    {
+      "phraseLocale": "nl",
+      "repositoryLocale": "nl",
+      "outputPath": "deploy/locales/nl.json"
+    },
+    {
+      "phraseLocale": "pl",
+      "repositoryLocale": "pl",
+      "outputPath": "deploy/locales/pl.json"
+    },
+    {
+      "phraseLocale": "pt",
+      "repositoryLocale": "pt",
+      "outputPath": "deploy/locales/pt.json"
+    },
+    {
+      "phraseLocale": "ro",
+      "repositoryLocale": "ro",
+      "outputPath": "deploy/locales/ro.json"
+    },
+    {
+      "phraseLocale": "sk",
+      "repositoryLocale": "sk",
+      "outputPath": "deploy/locales/sk.json"
+    },
+    {
+      "phraseLocale": "sl",
+      "repositoryLocale": "sl",
+      "outputPath": "deploy/locales/sl.json"
+    },
+    {
+      "phraseLocale": "sv",
+      "repositoryLocale": "sv",
+      "outputPath": "deploy/locales/sv.json"
+    },
+    {
+      "phraseLocale": "th",
+      "repositoryLocale": "th",
+      "outputPath": "deploy/locales/th.json"
+    },
+    {
+      "phraseLocale": "tr",
+      "repositoryLocale": "tr",
+      "outputPath": "deploy/locales/tr.json"
+    },
+    {
+      "phraseLocale": "uk",
+      "repositoryLocale": "uk",
+      "outputPath": "deploy/locales/uk.json"
+    },
+    {
+      "phraseLocale": "vi",
+      "repositoryLocale": "vi",
+      "outputPath": "deploy/locales/vi.json"
+    },
+    {
+      "phraseLocale": "zh",
+      "repositoryLocale": "zh",
+      "outputPath": "deploy/locales/zh.json"
+    },
+    {
+      "phraseLocale": "hi",
+      "repositoryLocale": "hi",
+      "outputPath": "deploy/locales/hi.json"
+    }
+  ]
+}

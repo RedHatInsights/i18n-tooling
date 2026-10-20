@@ -1474,7 +1474,7 @@ objects:
     ["en", "canonical BCP 47"],
   ])("rejects FEO locale id %s in the catalog validation config", (locale, hint) => {
     const run = () => feoLocalesConfig({ [locale]: "deploy/locales/x.json" });
-    expect(run).toThrow("must be a non-English FEO locale tag; ");
+    expect(run).toThrow(`locales key ${JSON.stringify(locale)} is not a canonical FEO locale id; `);
     expect(run).toThrow(hint);
   });
 
@@ -1487,6 +1487,47 @@ objects:
     },
   );
 
+  it("limits feo.locales to the operator's 32 locales per Frontend", () => {
+    const locales =
+      "ar bg cs da de el es et fi fr ga hr hu id it ja ko lt lv mt nl pl pt ro sk sl sv th tr uk vi zh hi".split(
+        " ",
+      );
+    const config = (count: number) =>
+      feoLocalesConfig(
+        Object.fromEntries(locales.slice(0, count).map((l) => [l, `deploy/locales/${l}.json`])),
+      );
+    expect(() => config(32)).not.toThrow();
+    expect(() => config(33)).toThrow("lists 33 locales; a Frontend holds at most 32");
+  });
+
+  it("warns about, and omits, FEO translations over the operator's length limit", async () => {
+    await createFeoProject();
+    const frPath = join(projectRoot!, "deploy/locales/fr.json");
+    const fr = JSON.parse(await readFile(frPath, "utf8")) as Record<string, string>;
+    const [overlongKey] = Object.keys(fr);
+    fr[overlongKey!] = "a".repeat(4097);
+    await writeFile(frPath, `${JSON.stringify(fr, null, 2)}\n`);
+    await runFeo([
+      "inline",
+      "--template",
+      "deploy/frontend.yaml",
+      "--source",
+      "deploy/locales/translation-template.json",
+      "--target",
+      "deploy/locales/fr.json",
+      "--locale",
+      "fr",
+    ]);
+
+    const result = await runValidation(feoValidationConfig());
+
+    expect(result.exitCode).toBe(0);
+    expect(validationWarnings(result.output).join("\n")).toContain(
+      `FEO locale "fr" has translations over the 4096-character limit, omitted from ` +
+        `spec.locales so they fall back to English: ${overlongKey} (in "deploy/locales/fr.json").`,
+    );
+  });
+
   it("reports a non-canonical spec.locales block in the template with the canonical spelling", async () => {
     await createFeoProject();
     const path = join(projectRoot!, "deploy/frontend.yaml");
@@ -1497,8 +1538,8 @@ objects:
 
     expect(result.exitCode).toBe(1);
     expect(result.errors.join("\n")).toContain(
-      'FEO template "deploy/frontend.yaml" has spec.locales for "fr-fr", which is not a valid ' +
-        'FEO locale id; use "fr-FR"',
+      'FEO template "deploy/frontend.yaml" spec.locales block "fr-fr" is not a canonical FEO ' +
+        'locale id; use "fr-FR". Rename the block in the template',
     );
     expect(result.errors.join("\n")).not.toContain('spec.locales for "fr-fr", but its');
   });
@@ -1516,9 +1557,9 @@ objects:
           },
         ],
       }),
-    ).toThrow("must be a non-English FEO locale tag");
+    ).toThrow("is not a canonical FEO locale id");
     expect(() => feoLocalesConfig({ "zh-cn": "deploy/locales/zh-CN.json" })).toThrow(
-      'must be a non-English FEO locale tag; use "zh-CN"',
+      'is not a canonical FEO locale id; use "zh-CN"',
     );
     expect(() =>
       parseCatalogValidationConfig({

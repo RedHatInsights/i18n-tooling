@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "checks": [],
+  "feo": [
+    {
+      "template": "deploy/frontend.yaml",
+      "source": "deploy/locales/translation-template.json",
+      "locales": {
+        "ar": "deploy/locales/ar.json",
+        "bg": "deploy/locales/bg.json",
+        "cs": "deploy/locales/cs.json",
+        "da": "deploy/locales/da.json",
+        "de": "deploy/locales/de.json",
+        "el": "deploy/locales/el.json",
+        "es": "deploy/locales/es.json",
+        "et": "deploy/locales/et.json",
+        "fi": "deploy/locales/fi.json",
+        "fr": "deploy/locales/fr.json",
+        "ga": "deploy/locales/ga.json",
+        "hr": "deploy/locales/hr.json",
+        "hu": "deploy/locales/hu.json",
+        "id": "deploy/locales/id.json",
+        "it": "deploy/locales/it.json",
+        "ja": "deploy/locales/ja.json",
+        "ko": "deploy/locales/ko.json",
+        "lt": "deploy/locales/lt.json",
+        "lv": "deploy/locales/lv.json",
+        "mt": "deploy/locales/mt.json",
+        "nl": "deploy/locales/nl.json",
+        "pl": "deploy/locales/pl.json",
+        "pt": "deploy/locales/pt.json",
+        "ro": "deploy/locales/ro.json",
+        "sk": "deploy/locales/sk.json",
+        "sl": "deploy/locales/sl.json",
+        "sv": "deploy/locales/sv.json",
+        "th": "deploy/locales/th.json",
+        "tr": "deploy/locales/tr.json",
+        "uk": "deploy/locales/uk.json",
+        "vi": "deploy/locales/vi.json",
+        "zh": "deploy/locales/zh.json",
+        "hi": "deploy/locales/hi.json"
+      }
+    }
+  ]
+}

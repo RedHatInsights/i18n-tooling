@@ -516,7 +516,9 @@ objects:
     );
 
     expect(exitCode).toBe(1);
-    expect(errors.join("\n")).toContain(`Invalid target locale: ${locale}`);
+    expect(errors.join("\n")).toContain(
+      `Target locale ${JSON.stringify(locale)} is not a canonical`,
+    );
     expect(errors.join("\n")).toContain(hint);
     expect(await readFile(join(projectRoot, "frontend.yaml"), "utf8")).toBe(template);
   });

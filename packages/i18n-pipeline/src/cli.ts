@@ -25,6 +25,7 @@ import {
 } from "./index.js";
 import { GitHubPhraseRepository } from "./github-phrase-repository.js";
 import { PhraseClient, type PhraseClientOptions } from "./phrase-client.js";
+import { overlongFeoTranslationsWarning } from "./feo-locale.js";
 import { parsePhraseTmsConfig, targetAdapterId } from "./phrase-config.js";
 import { PhraseWorkflow, type PhraseReconcileResult } from "./phrase-workflow.js";
 import {
@@ -737,6 +738,8 @@ async function runFeoCommand(
       string
     >;
     generated = inlineFeoLocale(template, source, target, values.locale);
+    const overlong = overlongFeoTranslationsWarning(values.locale, target);
+    if (overlong) stdout(`Warning: ${overlong}.`);
   }
   if (values.check) {
     const current = await readFile(path, "utf8").catch(() => "");

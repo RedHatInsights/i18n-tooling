@@ -220,7 +220,7 @@ The pilot needs a Phrase project template that defines:
 - Final workflow step used by APC export.
 - Naming and metadata convention linking project/job IDs to source commit and repository.
 
-Do not assume the Phrase language code exactly matches the repository tag. Verify whether the Phrase project uses `zh-CN`, `zh`, or another provider-specific code, then define an explicit gateway mapping to the repository's canonical `zh-CN`.
+Phrase language codes need not match the repository locale, as `zh_cn` for `zh-CN` shows. Map each `phraseLocale` explicitly to the canonical `repositoryLocale`; for a project other than the shared HCC project, read its codes from the project rather than assuming these.
 
 ### 6. Monitored repository layout
 
