@@ -158,6 +158,7 @@ class FakeGitHub {
     number,
     { branch: string; state: "open" | "closed"; merged: boolean }
   >();
+  readonly issueComments = new Map<number, { body: string; user: { type: "Bot" } }[]>();
   private readonly refs = new Map<string, string>();
   private readonly filesByCommit = new Map<string, Map<string, Uint8Array>>();
   private readonly commitTrees = new Map<string, string>();
@@ -248,7 +249,22 @@ class FakeGitHub {
       const number = this.nextPullRequest++;
       const pullRequest = { branch: body.head, state: "open" as const, merged: false };
       this.pullRequests.set(number, pullRequest);
+      this.issueComments.set(number, []);
       return jsonResponse(this.pullRequestResponse(number, pullRequest), 201);
+    }
+    if (path.startsWith(`${root}/issues/`) && path.endsWith("/comments")) {
+      const number = Number(path.slice(`${root}/issues/`.length, path.lastIndexOf("/comments")));
+      const pullRequest = this.pullRequests.get(number);
+      if (!pullRequest) return jsonResponse({}, 404);
+      if (method === "GET") return jsonResponse(this.issueComments.get(number) ?? []);
+      if (method === "POST") {
+        if (pullRequest.state !== "open") return jsonResponse({}, 409);
+        const body = readBody<{ body: string }>(init);
+        const comments = this.issueComments.get(number) ?? [];
+        comments.push({ body: body.body, user: { type: "Bot" } });
+        this.issueComments.set(number, comments);
+        return jsonResponse({ id: comments.length, body: body.body }, 201);
+      }
     }
     if (path.startsWith(`${root}/pulls/`)) {
       const number = Number(path.slice(`${root}/pulls/`.length));

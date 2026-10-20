@@ -144,6 +144,12 @@ describe("Phrase consumer example", () => {
       async updatePullRequestBody() {
         return true;
       },
+      async findLatestBotPullRequestComment() {
+        return undefined;
+      },
+      async createPullRequestComment() {
+        return true;
+      },
     };
     const workflow = new PhraseWorkflow({
       phrase,
@@ -327,6 +333,12 @@ describe("Phrase consumer example", () => {
         return { changed: false, toolingCommitSha: "tooling-commit", bodyUpdated: false };
       },
       async updatePullRequestBody() {
+        return true;
+      },
+      async findLatestBotPullRequestComment() {
+        return undefined;
+      },
+      async createPullRequestComment() {
         return true;
       },
     };

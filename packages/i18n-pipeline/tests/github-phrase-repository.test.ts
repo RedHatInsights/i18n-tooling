@@ -1462,4 +1462,86 @@ describe("GitHubPhraseRepository", () => {
     expect(closedCalls).toBe(2);
     expect(closedPatches).toBe(0);
   });
+
+  it("paginates issue comments and returns the latest marked Bot comment", async () => {
+    const marker = "<!-- i18n-pipeline:translation-findings";
+    const commentRequests: string[] = [];
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async (input) => {
+        const url = input instanceof Request ? input.url : String(input);
+        commentRequests.push(url);
+        const page = Number(new URL(url).searchParams.get("page"));
+        if (page === 1) {
+          return response([
+            { body: `${marker} digest=user`, user: { login: "reviewer", type: "User" } },
+            ...Array.from({ length: 99 }, (_, index) => ({
+              body: `unrelated ${index}`,
+              user: { login: "ci[bot]", type: "Bot" },
+            })),
+          ]);
+        }
+        if (page === 2) {
+          return response([
+            { body: `${marker} digest=older`, user: { login: "ci[bot]", type: "Bot" } },
+            { body: `${marker} digest=newest`, user: { login: "ci[bot]", type: "Bot" } },
+          ]);
+        }
+        throw new Error(`Unexpected GitHub request: ${url}`);
+      },
+    });
+
+    await expect(
+      repository.findLatestBotPullRequestComment("https://github.com/example/app/pull/7", marker),
+    ).resolves.toBe(`${marker} digest=newest`);
+    expect(commentRequests).toHaveLength(2);
+    expect(commentRequests.map((url) => new URL(url).searchParams.get("page"))).toEqual(["1", "2"]);
+    expect(commentRequests[0]).toContain("/repos/example/app/issues/7/comments?");
+    expect(new URL(commentRequests[0]!).searchParams.has("direction")).toBe(false);
+  });
+
+  it("creates issue comments only while the pull request is open", async () => {
+    let postedBody: unknown;
+    const calls: Array<{ url: string; method: string }> = [];
+    let pullRequestState: "open" | "closed" = "open";
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async (input, init) => {
+        const url = input instanceof Request ? input.url : String(input);
+        const method = (init?.method ?? "GET").toUpperCase();
+        calls.push({ url, method });
+        if (url.endsWith("/pulls/7")) {
+          return response({
+            state: pullRequestState,
+            head: { sha: baseCommitSha },
+          });
+        }
+        if (url.endsWith("/issues/7/comments") && method === "POST") {
+          postedBody = JSON.parse(String(init?.body));
+          return response({ id: 99 }, 201);
+        }
+        throw new Error(`Unexpected GitHub request: ${url}`);
+      },
+    });
+    const pullRequestUrl = "https://github.com/example/app/pull/7";
+
+    await expect(repository.createPullRequestComment(pullRequestUrl, "report body")).resolves.toBe(
+      true,
+    );
+    expect(postedBody).toEqual({ body: "report body" });
+    expect(calls.map(({ method, url }) => [method, new URL(url).pathname])).toEqual([
+      ["GET", "/repos/example/app/pulls/7"],
+      ["POST", "/repos/example/app/issues/7/comments"],
+    ]);
+
+    pullRequestState = "closed";
+    await expect(repository.createPullRequestComment(pullRequestUrl, "ignored")).resolves.toBe(
+      false,
+    );
+    expect(calls).toHaveLength(3);
+  });
 });

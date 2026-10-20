@@ -273,11 +273,17 @@ class FakeRepository implements PhraseWorkflowRepository {
   readonly branchCommits = new Map<string, { sha: string; paths: string[] }[]>();
   readonly pullRequestBranches = new Map<string, string>();
   readonly pullRequestBodies = new Map<string, string>();
+  readonly pullRequestComments: Array<{
+    pullRequestUrl: string;
+    body: string;
+    authorType: "Bot" | "User";
+  }> = [];
   baseCommit = "resolved-base-commit";
   baseSourceBytes = sourceBytes;
   pinnedSourceBytes = sourceBytes;
   pullRequestError?: Error;
   bodyUpdateError?: Error;
+  commentError?: Error;
   refUpdateError?: Error;
   preverifiedRefUpdateHeadSha?: string;
   closeOnNextOpenPullRequestUpdate = false;
@@ -451,6 +457,28 @@ class FakeRepository implements PhraseWorkflowRepository {
     return true;
   }
 
+  async findLatestBotPullRequestComment(
+    pullRequestUrl: string,
+    bodyPrefix: string,
+  ): Promise<string | undefined> {
+    return this.pullRequestComments
+      .slice()
+      .reverse()
+      .find(
+        (comment) =>
+          comment.pullRequestUrl === pullRequestUrl &&
+          comment.authorType === "Bot" &&
+          comment.body.startsWith(bodyPrefix),
+      )?.body;
+  }
+
+  async createPullRequestComment(pullRequestUrl: string, body: string): Promise<boolean> {
+    if (this.commentError) throw this.commentError;
+    if ((this.pullRequestStates.get(pullRequestUrl) ?? "open") !== "open") return false;
+    this.pullRequestComments.push({ pullRequestUrl, body, authorType: "Bot" });
+    return true;
+  }
+
   pushHumanCommit(branch: string, paths: string[] = ["reviewer.md"]) {
     const sha = `human-${++this.commitNumber}`;
     this.branchHeads.set(branch, sha);
@@ -481,6 +509,42 @@ class FakeRepository implements PhraseWorkflowRepository {
     for (const file of files ?? []) storedFiles.set(file.path, new Uint8Array(file.content));
     this.branchFiles.set(branch, storedFiles);
   }
+}
+
+async function makeFindingsScenario(
+  sourceMessages: Record<string, unknown>,
+  targetMessages: Record<string, unknown>,
+  workflowConfig: PhraseWorkflowConfig = config,
+  frontendTemplate?: string,
+) {
+  const scenarioSourceBytes = new TextEncoder().encode(JSON.stringify(sourceMessages));
+  const phrase = new FakePhrase();
+  phrase.targetBytes = new TextEncoder().encode(JSON.stringify(targetMessages));
+  const state = new MemoryStateStore();
+  const repository = new FakeRepository();
+  repository.baseSourceBytes = scenarioSourceBytes;
+  repository.pinnedSourceBytes = scenarioSourceBytes;
+  if (frontendTemplate) {
+    repository.onReadFile = (path) =>
+      path === workflowConfig.frontendTemplate?.path
+        ? new TextEncoder().encode(frontendTemplate)
+        : scenarioSourceBytes;
+  }
+  const workflow = new PhraseWorkflow({
+    phrase,
+    state,
+    repository,
+    catalogAdapters: new CatalogAdapterRegistry(),
+  });
+  const batch = await workflow.submit({
+    repository: "example/app",
+    baseRef: "phrase-pilot",
+    sourceCommit: "abc123",
+    sourceBytes: scenarioSourceBytes,
+    config: workflowConfig,
+  });
+  phrase.jobStatus = "COMPLETED";
+  return { batch, phrase, repository, state, workflow };
 }
 
 const japaneseConfig: PhraseWorkflowConfig = {
@@ -2457,8 +2521,256 @@ describe("PhraseWorkflow submission", () => {
 
     expect(result?.phase).toBe("pr-created");
     expect(repository.pullRequests[0]?.body).toContain(
-      'Translation warnings (review before merging):\n- "greeting": a regular space precedes',
+      "⚠️ 1 warning — see the latest 🌐 Translation check comment.",
     );
+  });
+
+  it("renders the exact error and warning report comment", async () => {
+    const scenario = await makeFindingsScenario(
+      { greeting: { defaultMessage: "Hello {name}", description: "Greeting" } },
+      { greeting: "Bonjour !" },
+    );
+
+    const [result] = await scenario.workflow.reconcile();
+    const report = scenario.repository.pullRequestComments[0]?.body;
+
+    expect(result?.phase).toBe("failed");
+    expect(report).toBe(
+      [
+        "<!-- i18n-pipeline:translation-findings digest=b136d1e56363762a2337ae834338591e8e24ce1d6aa087f87d320ad7e122b708 -->",
+        "## 🌐 Translation check · `fr`",
+        "",
+        "> [!CAUTION]",
+        "> **❌ 1 error** blocks merging. **⚠️ 1 warning** needs a reviewer's judgment.",
+        "",
+        "### ❌ Errors — must be fixed before merging",
+        "",
+        "| # | Message | Problem | English source | Translation |",
+        "| :-: | --- | --- | --- | --- |",
+        "| **E1** | `greeting` | Argument {name} is missing from the translation. | `Hello {name}` | `Bonjour !` |",
+        "",
+        "### ⚠️ Warnings — review before merging",
+        "",
+        "| # | Message | Problem | English source | Translation |",
+        "| :-: | --- | --- | --- | --- |",
+        "| **W1** | `greeting` | A regular space precedes : ; ! ? or » (or follows «), so the line can break before the punctuation. Use a non-breaking space (U+00A0, or narrow U+202F). | `Hello {name}` | `Bonjour !` |",
+        "",
+        "<details>",
+        "<summary>ℹ️ Batch details</summary>",
+        "",
+        "| | |",
+        "| --- | --- |",
+        "| Phrase project | `project-uid` |",
+        `| Batch | \`${scenario.batch.key.slice(0, 12)}\` |`,
+        "| Source commit | `abc123` |",
+        "| Final job | `job-fr` |",
+        "",
+        "</details>",
+        "",
+        "<sub>🤖 Posted by i18n-pipeline. A new run with changed findings adds a new report; this PR stays a draft and is never marked ready automatically.</sub>",
+      ].join("\n"),
+    );
+  });
+
+  it("renders warning-only and clean reports with the matching summary boxes", async () => {
+    const warningScenario = await makeFindingsScenario(
+      { greeting: { defaultMessage: "Hello {name}", description: "Greeting" } },
+      { greeting: "Bonjour {name} !" },
+    );
+    const [warningResult] = await warningScenario.workflow.reconcile();
+    const warningReport = warningScenario.repository.pullRequestComments[0]?.body ?? "";
+    expect(warningResult?.phase).toBe("pr-created");
+    expect(warningReport).toContain(
+      "> [!WARNING]\n> **⚠️ 1 warning** needs a reviewer's judgment.",
+    );
+    expect(warningReport).not.toContain("### ❌ Errors");
+    expect(warningReport).toContain("### ⚠️ Warnings — review before merging");
+
+    const cleanScenario = await makeFindingsScenario(
+      { greeting: { defaultMessage: "Hello {name}", description: "Greeting" } },
+      { greeting: "Bonjour {name}" },
+    );
+    const [cleanResult] = await cleanScenario.workflow.reconcile();
+    const cleanReport = cleanScenario.repository.pullRequestComments[0]?.body ?? "";
+    expect(cleanResult?.phase).toBe("pr-created");
+    expect(cleanScenario.repository.pullRequestComments).toHaveLength(1);
+    expect(cleanReport).toContain("> [!TIP]\n> **✅ No translation errors or warnings.**");
+    expect(cleanReport).not.toContain("| # | Message |");
+    expect(cleanScenario.repository.pullRequests[0]?.body).toContain(
+      "✅ No translation errors or warnings.",
+    );
+  });
+
+  it("includes the generated-YAML note in FEO reports and keeps it in the PR description", async () => {
+    const template =
+      "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n        - id: roles\n          title: Roles\n";
+    const feoConfig: PhraseWorkflowConfig = {
+      ...config,
+      targetAdapter: "icu-json",
+      frontendTemplate: { path: "deploy/frontend.yaml" },
+    };
+    const scenario = await makeFindingsScenario(
+      { "searchEntries.roles.title": { defaultMessage: "Roles" } },
+      { "searchEntries.roles.title": "Rôles {missing}" },
+      feoConfig,
+      template,
+    );
+    const [firstResult] = await scenario.workflow.reconcile();
+    const note =
+      "Generated Frontend YAML was not updated for this export. Any existing locale block may reflect an earlier valid export and must not be merged with this catalog.";
+    const firstReport = scenario.repository.pullRequestComments[0]?.body ?? "";
+
+    expect(firstResult?.phase).toBe("failed");
+    expect(firstReport).toContain(`> [!NOTE]\n> ${note}`);
+    expect(firstReport).toContain(
+      `> [!CAUTION]\n> **❌ 1 error** blocks merging.\n\n> [!NOTE]\n> ${note}`,
+    );
+    expect(scenario.repository.pullRequests[0]?.body).toContain(note);
+
+    scenario.phrase.targetBytes = new TextEncoder().encode(
+      JSON.stringify({ "searchEntries.roles.title": "Salut {missing}" }),
+    );
+    await scenario.workflow.reconcile();
+    expect(scenario.repository.pullRequestComments).toHaveLength(2);
+    expect(scenario.repository.pullRequestComments[1]?.body).toContain(`> [!NOTE]\n> ${note}`);
+  });
+
+  it("numbers error and warning rows independently", async () => {
+    const scenario = await makeFindingsScenario(
+      {
+        aWarning: { defaultMessage: "Goodbye" },
+        bWarning: { defaultMessage: "Welcome" },
+        requestCount: {
+          defaultMessage: "{count, plural, one {# request} other {# requests}}",
+        },
+        zName: { defaultMessage: "Hello {name}" },
+      },
+      {
+        aWarning: "Au revoir !",
+        bWarning: "Bienvenue !",
+        requestCount: "{count, plural, one {# demande} other {demandes}}",
+        zName: "Bonjour",
+      },
+    );
+
+    await scenario.workflow.reconcile();
+    const report = scenario.repository.pullRequestComments[0]?.body ?? "";
+
+    expect(report).toContain("| **E1** |");
+    expect(report).toContain("| **E2** |");
+    expect(report).not.toContain("| **E3** |");
+    expect(report).toContain("| **W1** |");
+    expect(report).toContain("| **W2** |");
+    expect(report).not.toContain("| **W3** |");
+  });
+
+  it("escapes table pipes and backticks, replaces newlines, and truncates patterns", async () => {
+    const sourcePattern = `Source | \`quoted\`\n${"s".repeat(350)}`;
+    const translationPattern = `Translation | \`value\`\n${"t".repeat(350)}`;
+    const scenario = await makeFindingsScenario(
+      { "draft|id`quoted": { defaultMessage: sourcePattern } },
+      { "extra|id": translationPattern },
+    );
+
+    await scenario.workflow.reconcile();
+    const report = scenario.repository.pullRequestComments[0]?.body ?? "";
+    const expectedSourceValue = `Source | \`quoted\` ${"s".repeat(350)}`;
+    const expectedTranslationValue = `Translation | \`value\` ${"t".repeat(350)}`;
+    const expectedSource = `${[...expectedSourceValue].slice(0, 299).join("")}…`;
+    const expectedTranslation = `${[...expectedTranslationValue].slice(0, 299).join("")}…`;
+
+    expect(report).toContain("``draft\\|id`quoted``");
+    expect(report).toContain(`\`\`${expectedSource.replace("|", "\\|")}\`\``);
+    expect(report).toContain("`extra\\|id`");
+    expect(report).toContain(`\`\`${expectedTranslation.replace("|", "\\|")}\`\``);
+    expect(report).not.toContain(`quoted\n${"s".repeat(10)}`);
+  });
+
+  it("caps each findings table at MAX_PULL_REQUEST_FINDINGS and reports omitted rows", async () => {
+    const sourceMessages = Object.fromEntries(
+      Array.from({ length: 52 }, (_, index) => [
+        `missing-${String(index).padStart(2, "0")}`,
+        { defaultMessage: `Source ${index}` },
+      ]),
+    );
+    const scenario = await makeFindingsScenario(sourceMessages, {});
+
+    await scenario.workflow.reconcile();
+    const report = scenario.repository.pullRequestComments[0]?.body ?? "";
+
+    expect(report).toContain("| **E50** |");
+    expect(report).not.toContain("| **E51** |");
+    expect(report).toContain("…and 2 more");
+    expect(report.indexOf("…and 2 more")).toBeGreaterThan(report.indexOf("| **E50** |"));
+  });
+
+  it("deduplicates identical reports and posts changed and clean findings", async () => {
+    const scenario = await makeFindingsScenario(
+      { greeting: { defaultMessage: "Hello {name}", description: "Greeting" } },
+      { greeting: "Bonjour" },
+    );
+
+    await scenario.workflow.reconcile();
+    await scenario.workflow.reconcile();
+    expect(scenario.repository.pullRequestComments).toHaveLength(1);
+
+    scenario.phrase.targetBytes = new TextEncoder().encode(JSON.stringify({ greeting: "Salut" }));
+    await scenario.workflow.reconcile();
+    expect(scenario.repository.pullRequestComments).toHaveLength(2);
+
+    scenario.phrase.targetBytes = new TextEncoder().encode(
+      JSON.stringify({ greeting: "Salut {name}" }),
+    );
+    const [cleanResult] = await scenario.workflow.reconcile();
+    expect(cleanResult?.phase).toBe("pr-created");
+    expect(scenario.repository.pullRequestComments).toHaveLength(3);
+    expect(scenario.repository.pullRequestComments[2]?.body).toContain(
+      "> [!TIP]\n> **✅ No translation errors or warnings.**",
+    );
+  });
+
+  it.each(["closed", "merged"] as const)(
+    "does not post another report after the PR is %s",
+    async (pullRequestState) => {
+      const scenario = await makeFindingsScenario(
+        { greeting: { defaultMessage: "Hello {name}", description: "Greeting" } },
+        { greeting: "Bonjour" },
+      );
+      const [created] = await scenario.workflow.reconcile();
+      const commentCount = scenario.repository.pullRequestComments.length;
+      scenario.repository.pullRequestStates.set(created!.pullRequestUrl!, pullRequestState);
+
+      await scenario.workflow.reconcile();
+
+      expect(commentCount).toBe(1);
+      expect(scenario.repository.pullRequestComments).toHaveLength(commentCount);
+    },
+  );
+
+  it("keeps a committed export retryable when report comment delivery fails", async () => {
+    const scenario = await makeFindingsScenario(
+      { greeting: { defaultMessage: "Hello {name}", description: "Greeting" } },
+      { greeting: "Bonjour" },
+    );
+    scenario.repository.commentError = new PhraseRepositoryError("comment API failed", 500);
+
+    const [failed] = await scenario.workflow.reconcile();
+    const storedAfterFailure = await scenario.state.readBatch(scenario.batch.key);
+    const branch = storedAfterFailure?.record.locales.fr?.pullRequestBranch;
+
+    expect(failed?.phase).toBe("retrying");
+    expect(storedAfterFailure?.record.locales.fr?.phase).toBe("pr-created");
+    expect(storedAfterFailure?.record.locales.fr?.toolingCommitSha).toBeDefined();
+    expect(storedAfterFailure?.record.locales.fr?.pullRequestCommentPending).toBe(true);
+    expect(scenario.repository.commitCount(branch!)).toBe(1);
+
+    scenario.repository.commentError = undefined;
+    const [retried] = await scenario.workflow.reconcile();
+    const storedAfterRetry = await scenario.state.readBatch(scenario.batch.key);
+    expect(retried?.phase).toBe("failed");
+    expect(scenario.repository.pullRequestComments).toHaveLength(1);
+    expect(storedAfterRetry?.record.locales.fr?.pullRequestCommentPending).toBeUndefined();
+    expect(scenario.repository.commitCount(branch!)).toBe(1);
   });
 
   it("reconciles a completed final job into a validated locale pull request", async () => {
@@ -2911,8 +3223,8 @@ describe("PhraseWorkflow submission", () => {
 
     expect(results[0]?.phase).toBe("pr-created");
     expect(repository.pullRequests).toHaveLength(1);
-    expect(repository.pullRequestBodies.get("https://github.com/example/app/pull/42")).toContain(
-      'the source "one" branch of plural {count} shows the count',
+    expect(repository.pullRequestComments.at(-1)?.body).toContain(
+      'The source "one" branch of plural {count} shows the count',
     );
   });
 
@@ -3372,7 +3684,10 @@ describe("PhraseWorkflow submission", () => {
       expect.stringContaining("ICU argument mismatches"),
     ]);
     expect(repository.pullRequestBodies.get(failed[0]!.pullRequestUrl!)).toContain(
-      "Translation errors (do not merge)",
+      "❌ 1 error — see the latest 🌐 Translation check comment.",
+    );
+    expect(repository.pullRequestComments.at(-1)?.body).toContain(
+      "Argument {name} is missing from the translation.",
     );
     expect(repository.commitCount(branch!)).toBe(2);
     expect(repository.pullRequests).toHaveLength(1);
@@ -3463,7 +3778,7 @@ describe("PhraseWorkflow submission", () => {
     expect(stored?.record.locales.zh_cn?.phase).toBe("pr-created");
     expect(repository.pullRequests).toHaveLength(1);
     expect(repository.pullRequests[0]?.draft).toBe(true);
-    expect(repository.pullRequests[0]?.body).toContain("Use # where the number belongs");
+    expect(repository.pullRequestComments[0]?.body).toContain("Use # where the number belongs");
   });
 
   it("keeps invalid FEO catalogs visible without writing generated YAML until fixed", async () => {
@@ -3543,9 +3858,7 @@ describe("PhraseWorkflow submission", () => {
       path === "deploy/frontend.yaml" && ref === head ? null : validRead(path, ref, call);
     expect((await workflow.reconcile())[0]?.phase).toBe("failed");
     expect(repository.commitCount(pr.branch)).toBe(commits);
-    expect(repository.pullRequestBodies.get(invalid!.pullRequestUrl!)).toContain(
-      "Missing Frontend template",
-    );
+    expect(repository.pullRequestComments.at(-1)?.body).toContain("Missing Frontend template");
     repository.onReadFile = validRead;
     expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
     expect(repository.commitCount(pr.branch)).toBe(commits);
@@ -5598,8 +5911,8 @@ describe("PhraseWorkflow submission", () => {
     expect(result?.reason).toContain('"items": plural {count} lost exact branch =1');
     expect(repository.pullRequests).toHaveLength(1);
     expect(repository.pullRequests[0]?.draft).toBe(true);
-    expect(repository.pullRequests[0]?.body).toContain(
-      '"items": plural {count} lost exact branch =1',
+    expect(repository.pullRequestComments[0]?.body).toContain(
+      "Plural {count} lost exact branch =1.",
     );
   });
 
@@ -5749,8 +6062,8 @@ describe("PhraseWorkflow submission", () => {
       expect(pr).toBeDefined();
       expect(pr.draft).toBe(true);
       expect(pr.content).toEqual(phrase.targetBytes);
-      expect(pr.body).toContain("Translation errors (do not merge)");
-      expect(pr.body).toContain(diagnostic);
+      expect(pr.body).toContain("❌ 1 error — see the latest 🌐 Translation check comment.");
+      expect(repository.pullRequestComments.at(-1)?.body).toContain(diagnostic);
       expect(invalid?.phase).toBe("failed");
       expect(invalid?.pullRequestUrl).toBe("https://github.com/example/app/pull/42");
       expect((await state.readBatch(batch.key))?.record.locales.fr?.phase).toBe("pr-created");
@@ -5837,12 +6150,15 @@ describe("PhraseWorkflow submission", () => {
     expect((await workflow.reconcile())[0]?.phase).toBe("failed");
     const pr = repository.pullRequests[0]!;
     expect(pr.draft).toBe(true);
-    expect(pr.body).toContain("Translation errors (do not merge)");
-    expect(pr.body).toContain("missing IDs");
-    expect(pr.body).toContain("Translation warnings (review before merging)");
-    expect(pr.body).toContain("additional detail omitted");
-    expect(pr.body.includes("\uFFFD")).toBe(false);
-    expect(new TextEncoder().encode(pr.body).length).toBeLessThan(65_536);
+    expect(pr.body).toContain(
+      "❌ 1 error · ⚠️ 1 warning — see the latest 🌐 Translation check comment.",
+    );
+    expect(pr.body).not.toContain("missing IDs");
+    expect(repository.pullRequestComments[0]?.body).toContain("…and 1 more");
+    expect(repository.pullRequestComments[0]?.body.includes("\uFFFD")).toBe(false);
+    expect(new TextEncoder().encode(repository.pullRequestComments[0]?.body).length).toBeLessThan(
+      65_536,
+    );
   });
 
   it("repairs a draft with ICU argument mismatches from the same completed Phrase job", async () => {
@@ -5882,7 +6198,9 @@ describe("PhraseWorkflow submission", () => {
     expect(failed?.record.locales.fr?.phase).toBe("pr-created");
     expect(repository.pullRequests).toHaveLength(1);
     expect(repository.pullRequests[0]?.draft).toBe(true);
-    expect(repository.pullRequests[0]?.body).toContain("ICU argument mismatches");
+    expect(repository.pullRequestComments[0]?.body).toContain(
+      "Argument {name} is missing from the translation.",
+    );
 
     phrase.targetBytes = new TextEncoder().encode(
       JSON.stringify({
