@@ -55,8 +55,6 @@ If English changes, re-run `feo extract`, resubmit the source through the normal
 
 ## Phrase for FEO
 
-**Blocked for now.** Do not add the FEO Phrase config or its i18n-hub entry. FEO translations must not reach a repository until the Frontend operator accepts and serves `spec.locales`: [RHCLOUD-52083](https://issues.redhat.com/browse/RHCLOUD-52083) and [RHCLOUD-52085](https://issues.redhat.com/browse/RHCLOUD-52085). The FEO track still adds stable IDs, the source catalog, and the `feo` validation entry. List "FEO Phrase delivery: blocked by RHCLOUD-52083 and RHCLOUD-52085" in the report and the PR follow-ups. The rest of this section describes the setup for when the block is lifted.
-
 When the Phrase track is also selected, the FEO catalog gets its own Phrase config, `i18n/phrase-tms-feo.json`, next to the app's. It follows [phrase.md](phrase.md#config-both-modes), with these differences:
 
 - `state.branch` is `i18n-tms-state-feo`. Every config in a repository needs its own state branch.
