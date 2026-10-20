@@ -221,10 +221,11 @@ describe("GitHubPhraseRepository", () => {
     "adopts a ready PR (%s) without converting a valid update",
     async (discovery) => {
       const harness = openPullRequestHarness("b".repeat(40), { discovery });
-      await harness.repository.createOrUpdatePullRequestWithCommit({
+      const created = await harness.repository.createOrUpdatePullRequestWithCommit({
         ...pullRequest,
         draft: false,
       });
+      expect(created.pullRequestCreated).toBeUndefined();
       expect(harness.calls.some(({ url }) => url.endsWith("/graphql"))).toBe(false);
       expect(harness.currentContent).toBe(new TextDecoder().decode(pullRequest.content));
     },
@@ -232,7 +233,11 @@ describe("GitHubPhraseRepository", () => {
 
   it("creates a draft for an existing branch before writing invalid content", async () => {
     const harness = openPullRequestHarness("b".repeat(40), { discovery: "create" });
-    await harness.repository.createOrUpdatePullRequestWithCommit({ ...pullRequest, draft: true });
+    const created = await harness.repository.createOrUpdatePullRequestWithCommit({
+      ...pullRequest,
+      draft: true,
+    });
+    expect(created.pullRequestCreated).toBe(true);
     const creation = harness.calls.findIndex(
       ({ url, method }) => url.endsWith("/pulls") && method === "POST",
     );
@@ -1543,5 +1548,202 @@ describe("GitHubPhraseRepository", () => {
       false,
     );
     expect(calls).toHaveLength(3);
+  });
+
+  it("intersects paginated path history with the compare range in newest-first order", async () => {
+    const baseCommit = "e".repeat(40);
+    const headCommit = "f".repeat(40);
+    const calls: string[] = [];
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async (input) => {
+        const url = input instanceof Request ? input.url : String(input);
+        calls.push(url);
+        const parsed = new URL(url);
+        const page = Number(parsed.searchParams.get("page"));
+        if (parsed.pathname.includes("/compare/")) {
+          return response({
+            commits:
+              page === 1
+                ? Array.from({ length: 100 }, (_, index) => ({ sha: `range-${index}` }))
+                : [{ sha: "range-old" }],
+          });
+        }
+        if (parsed.pathname.endsWith("/commits")) {
+          if (page === 1) {
+            return response([
+              { sha: "range-0", author: { login: "newest" } },
+              { sha: "outside-a", author: { login: "outside" } },
+              { sha: "range-1", author: { login: "middle" } },
+              ...Array.from({ length: 97 }, (_, index) => ({
+                sha: `outside-${index}`,
+                author: { login: `outside-${index}` },
+              })),
+            ]);
+          }
+          return response([{ sha: "range-old", author: { login: "oldest" } }]);
+        }
+        throw new Error(`Unexpected GitHub request: ${url}`);
+      },
+    });
+
+    await expect(
+      repository.listSourceChangeAuthors({
+        path: "locales/en.json",
+        headCommit,
+        baseCommit,
+      }),
+    ).resolves.toEqual(["newest", "middle", "oldest"]);
+    const compareCalls = calls.filter((url) => new URL(url).pathname.includes("/compare/"));
+    const pathCalls = calls.filter((url) => new URL(url).pathname.endsWith("/commits"));
+    expect(compareCalls).toHaveLength(2);
+    expect(pathCalls).toHaveLength(2);
+    expect(new URL(pathCalls[0]!).searchParams.get("path")).toBe("locales/en.json");
+    expect(pathCalls.map((url) => new URL(url).searchParams.get("page"))).toEqual(["1", "2"]);
+  });
+
+  it("skips unlinked authors and bots, deduplicates logins, and caps results at ten", async () => {
+    const commits = Array.from({ length: 20 }, (_, index) => ({ sha: `range-${index}` }));
+    const history = [
+      { sha: "range-0", author: null },
+      { sha: "range-1", author: { login: "ci", type: "Bot" } },
+      { sha: "range-2", author: { login: "renovate[bot]", type: "User" } },
+      ...Array.from({ length: 8 }, (_, index) => ({
+        sha: `range-${index + 3}`,
+        author: { login: `user-${index}`, type: "User" },
+      })),
+      { sha: "range-11", author: { login: "USER-0", type: "User" } },
+      { sha: "range-12", author: { login: "user-8", type: "User" } },
+      { sha: "range-13", author: { login: "user-9", type: "User" } },
+      { sha: "range-14", author: { login: "user-10", type: "User" } },
+    ];
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async (input) => {
+        const url = input instanceof Request ? input.url : String(input);
+        const parsed = new URL(url);
+        if (parsed.pathname.includes("/compare/")) return response({ commits });
+        if (parsed.pathname.endsWith("/commits")) return response(history);
+        throw new Error(`Unexpected GitHub request: ${url}`);
+      },
+    });
+
+    await expect(
+      repository.listSourceChangeAuthors({
+        path: "locales/en.json",
+        headCommit: "f".repeat(40),
+        baseCommit: "e".repeat(40),
+      }),
+    ).resolves.toEqual(Array.from({ length: 10 }, (_, index) => `user-${index}`));
+  });
+
+  it("bounds compare and path-history pagination to five pages each", async () => {
+    const calls: string[] = [];
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async (input) => {
+        const url = input instanceof Request ? input.url : String(input);
+        calls.push(url);
+        const parsed = new URL(url);
+        const page = Number(parsed.searchParams.get("page"));
+        if (parsed.pathname.includes("/compare/")) {
+          return response({
+            commits: [
+              { sha: `range-${page}` },
+              ...Array.from({ length: 99 }, (_, index) => ({ sha: `compare-${page}-${index}` })),
+            ],
+          });
+        }
+        if (parsed.pathname.endsWith("/commits")) {
+          return response([
+            { sha: `range-${page}`, author: null },
+            ...Array.from({ length: 99 }, (_, index) => ({
+              sha: `outside-${page}-${index}`,
+              author: null,
+            })),
+          ]);
+        }
+        throw new Error(`Unexpected GitHub request: ${url}`);
+      },
+    });
+
+    await expect(
+      repository.listSourceChangeAuthors({
+        path: "locales/en.json",
+        headCommit: "f".repeat(40),
+        baseCommit: "e".repeat(40),
+      }),
+    ).resolves.toEqual([]);
+    expect(calls.filter((url) => new URL(url).pathname.includes("/compare/"))).toHaveLength(5);
+    expect(calls.filter((url) => new URL(url).pathname.endsWith("/commits"))).toHaveLength(5);
+  });
+
+  it("uses only the newest path commit when no base commit exists", async () => {
+    const calls: string[] = [];
+    let author: unknown = { login: "source-author", type: "User" };
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async (input) => {
+        const url = input instanceof Request ? input.url : String(input);
+        calls.push(url);
+        const parsed = new URL(url);
+        if (parsed.pathname.endsWith("/commits")) {
+          return response([{ sha: "newest", author }]);
+        }
+        throw new Error(`Unexpected GitHub request: ${url}`);
+      },
+    });
+
+    await expect(
+      repository.listSourceChangeAuthors({ path: "locales/en.json", headCommit: "f".repeat(40) }),
+    ).resolves.toEqual(["source-author"]);
+    author = { login: "ci[bot]", type: "User" };
+    await expect(
+      repository.listSourceChangeAuthors({ path: "locales/en.json", headCommit: "f".repeat(40) }),
+    ).resolves.toEqual([]);
+    expect(calls.map((url) => new URL(url).searchParams.get("per_page"))).toEqual(["1", "1"]);
+    expect(calls.every((url) => !new URL(url).searchParams.has("page"))).toBe(true);
+  });
+
+  it("posts assignees and returns the logins GitHub actually assigned", async () => {
+    let request: { url: string; method: string; body: unknown } | undefined;
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async (input, init) => {
+        const url = input instanceof Request ? input.url : String(input);
+        request = {
+          url,
+          method: (init?.method ?? "GET").toUpperCase(),
+          body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        };
+        return response(
+          { assignees: [{ login: "existing-maintainer" }, { login: "alice" }, { login: "bob" }] },
+          201,
+        );
+      },
+    });
+
+    await expect(
+      repository.addPullRequestAssignees("https://github.com/example/app/pull/7", [
+        "alice",
+        "ALICE",
+        "bob",
+      ]),
+    ).resolves.toEqual(["alice", "bob"]);
+    expect(request).toEqual({
+      url: expect.stringContaining("/repos/example/app/issues/7/assignees"),
+      method: "POST",
+      body: { assignees: ["alice", "bob"] },
+    });
   });
 });

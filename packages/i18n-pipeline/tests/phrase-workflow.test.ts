@@ -278,6 +278,17 @@ class FakeRepository implements PhraseWorkflowRepository {
     body: string;
     authorType: "Bot" | "User";
   }> = [];
+  readonly sourceAuthorRequests: Array<{
+    path: string;
+    headCommit: string;
+    baseCommit?: string;
+  }> = [];
+  sourceChangeAuthors: string[] = [];
+  readonly sourceAuthorErrors: Error[] = [];
+  readonly assigneeRequests: Array<{ pullRequestUrl: string; logins: string[] }> = [];
+  readonly assigneeResponses: string[][] = [];
+  readonly assigneeErrors: Error[] = [];
+  readonly assignedLogins = new Map<string, string[]>();
   baseCommit = "resolved-base-commit";
   baseSourceBytes = sourceBytes;
   pinnedSourceBytes = sourceBytes;
@@ -299,6 +310,24 @@ class FakeRepository implements PhraseWorkflowRepository {
       if (headSha === ref) return this.branchFiles.get(branch)?.get(path) ?? null;
     }
     return ref === "abc123" ? this.pinnedSourceBytes : this.baseSourceBytes;
+  }
+
+  async listSourceChangeAuthors(input: { path: string; headCommit: string; baseCommit?: string }) {
+    this.sourceAuthorRequests.push(input);
+    const error = this.sourceAuthorErrors.shift();
+    if (error) throw error;
+    return [...this.sourceChangeAuthors];
+  }
+
+  async addPullRequestAssignees(pullRequestUrl: string, logins: string[]) {
+    this.assigneeRequests.push({ pullRequestUrl, logins: [...logins] });
+    const error = this.assigneeErrors.shift();
+    if (error) throw error;
+    const assigned = this.assigneeResponses.shift() ?? [...logins];
+    this.assignedLogins.set(pullRequestUrl, [
+      ...new Set([...(this.assignedLogins.get(pullRequestUrl) ?? []), ...assigned]),
+    ]);
+    return assigned;
   }
 
   async resolveCommit(ref: string) {
@@ -350,7 +379,7 @@ class FakeRepository implements PhraseWorkflowRepository {
     this.pullRequests.push({ ...storedInput, draft: true });
     this.pullRequestBranches.set(pullRequestUrl, input.branch);
     this.pullRequestBodies.set(pullRequestUrl, input.body);
-    return { pullRequestUrl, toolingCommitSha };
+    return { pullRequestUrl, pullRequestCreated: true, toolingCommitSha };
   }
 
   async updateOpenPullRequest(
@@ -6669,5 +6698,210 @@ describe("PhraseWorkflow submission", () => {
     expect(stored?.record.phase).toBe("superseded");
     expect(phrase.targetDownloadCalls).toBe(0);
     expect(repository.pullRequests).toHaveLength(0);
+  });
+});
+
+describe("new locale PR assignees", () => {
+  const sourceMessages = {
+    greeting: { defaultMessage: "Hello {name}", description: "Greeting" },
+  };
+  const translatedMessages = { greeting: "Bonjour {name}" };
+
+  it("resolves source-change authors once per batch for all new locale PRs", async () => {
+    const scenario = makeJapaneseWorkflowScenario();
+    await scenario.workflow.submit(scenario.input);
+    scenario.repository.sourceChangeAuthors = ["source-author"];
+
+    const results = await scenario.workflow.reconcile();
+
+    expect(results.map((result) => result.phase)).toEqual(["pr-created", "pr-created"]);
+    expect(scenario.repository.sourceAuthorRequests).toHaveLength(1);
+    expect(scenario.repository.assigneeRequests.map((request) => request.logins)).toEqual([
+      ["source-author"],
+      ["source-author"],
+    ]);
+  });
+
+  it("assigns the source-change authors when it creates a locale PR", async () => {
+    const scenario = await makeFindingsScenario(sourceMessages, translatedMessages);
+    scenario.repository.sourceChangeAuthors = ["source-author", "second-author"];
+
+    const [result] = await scenario.workflow.reconcile({
+      fallbackAssignees: ["hub-fallback"],
+    });
+    const stored = await scenario.state.readBatch(scenario.batch.key);
+
+    expect(result?.phase).toBe("pr-created");
+    expect(scenario.repository.sourceAuthorRequests).toEqual([
+      { path: "locales/translation-template.json", headCommit: "abc123" },
+    ]);
+    expect(scenario.repository.assigneeRequests).toEqual([
+      {
+        pullRequestUrl: result?.pullRequestUrl,
+        logins: ["source-author", "second-author"],
+      },
+    ]);
+    expect(stored?.record.locales.fr?.phase).toBe("pr-created");
+    expect(stored?.record.locales.fr?.pullRequestAssigneesPending).toBeUndefined();
+  });
+
+  it("uses the fallback list when no source-change authors are found", async () => {
+    const scenario = await makeFindingsScenario(sourceMessages, translatedMessages);
+
+    await scenario.workflow.reconcile({ fallbackAssignees: ["hub-fallback", "team-owner"] });
+
+    expect(scenario.repository.assigneeRequests).toEqual([
+      {
+        pullRequestUrl: "https://github.com/example/app/pull/42",
+        logins: ["hub-fallback", "team-owner"],
+      },
+    ]);
+  });
+
+  it("uses the fallback list when GitHub assigns none of the source authors", async () => {
+    const scenario = await makeFindingsScenario(sourceMessages, translatedMessages);
+    scenario.repository.sourceChangeAuthors = ["source-author"];
+    scenario.repository.assigneeResponses.push([], ["hub-fallback"]);
+
+    await scenario.workflow.reconcile({ fallbackAssignees: ["hub-fallback"] });
+
+    expect(scenario.repository.assigneeRequests).toEqual([
+      {
+        pullRequestUrl: "https://github.com/example/app/pull/42",
+        logins: ["source-author"],
+      },
+      {
+        pullRequestUrl: "https://github.com/example/app/pull/42",
+        logins: ["hub-fallback"],
+      },
+    ]);
+  });
+
+  it("does not assign again while updating an existing open PR", async () => {
+    const scenario = await makeFindingsScenario(sourceMessages, translatedMessages);
+    scenario.repository.sourceChangeAuthors = ["source-author"];
+    const [created] = await scenario.workflow.reconcile();
+    scenario.repository.assignedLogins.set(created!.pullRequestUrl!, []);
+
+    const [updated] = await scenario.workflow.reconcile();
+
+    expect(updated?.phase).toBe("pr-created");
+    expect(scenario.repository.assignedLogins.get(created!.pullRequestUrl!)).toEqual([]);
+    expect(scenario.repository.assigneeRequests).toHaveLength(1);
+    expect(scenario.repository.sourceAuthorRequests).toHaveLength(1);
+  });
+
+  it("keeps a transient assignment pending and retries it on the next reconcile", async () => {
+    const scenario = await makeFindingsScenario(sourceMessages, translatedMessages);
+    scenario.repository.sourceChangeAuthors = ["source-author"];
+    scenario.repository.sourceAuthorErrors.push(
+      new PhraseRepositoryError("GitHub API returned HTTP 503", 503),
+    );
+
+    const [first] = await scenario.workflow.reconcile();
+    const afterFailure = await scenario.state.readBatch(scenario.batch.key);
+
+    expect(first?.phase).toBe("pr-created");
+    expect(first?.reason).toContain("503");
+    expect(afterFailure?.record.locales.fr?.phase).toBe("pr-created");
+    expect(afterFailure?.record.locales.fr?.pullRequestAssigneesPending).toBe(true);
+
+    const [retry] = await scenario.workflow.reconcile();
+    const afterRetry = await scenario.state.readBatch(scenario.batch.key);
+    await scenario.workflow.reconcile();
+
+    expect(retry?.phase).toBe("pr-created");
+    expect(afterRetry?.record.locales.fr?.phase).toBe("pr-created");
+    expect(afterRetry?.record.locales.fr?.pullRequestAssigneesPending).toBeUndefined();
+    expect(scenario.repository.assigneeRequests).toHaveLength(1);
+    expect(scenario.repository.sourceAuthorRequests).toHaveLength(2);
+  });
+
+  it("clears a final 4xx assignment failure without retrying or changing the result phase", async () => {
+    const scenario = await makeFindingsScenario(sourceMessages, translatedMessages);
+    scenario.repository.sourceAuthorErrors.push(
+      new PhraseRepositoryError("GitHub API returned HTTP 403", 403),
+    );
+
+    const [first] = await scenario.workflow.reconcile();
+    const afterFailure = await scenario.state.readBatch(scenario.batch.key);
+    await scenario.workflow.reconcile();
+
+    expect(first?.phase).toBe("pr-created");
+    expect(first?.reason).toContain("403");
+    expect(afterFailure?.record.locales.fr?.phase).toBe("pr-created");
+    expect(afterFailure?.record.locales.fr?.pullRequestAssigneesPending).toBeUndefined();
+    expect(scenario.repository.sourceAuthorRequests).toHaveLength(1);
+    expect(scenario.repository.assigneeRequests).toHaveLength(0);
+  });
+
+  it("chooses the latest earlier batch for the same repository, ref, project, and filename", async () => {
+    const scenario = await makeFindingsScenario(sourceMessages, translatedMessages);
+    const current = await scenario.state.readBatch(scenario.batch.key);
+    if (!current) throw new Error("Expected the current Phrase batch");
+    const currentRecord = {
+      ...current.record,
+      sourceCommit: "current-source",
+      createdAt: "2026-10-20T00:00:00.000Z",
+    };
+    scenario.state.records.set(currentRecord.key, {
+      record: currentRecord,
+      revision: current.revision,
+    });
+    const previousRecord = (
+      key: string,
+      sourceCommit: string,
+      createdAt: string,
+      overrides: Partial<PhraseBatchRecord> = {},
+    ): PhraseBatchRecord => ({
+      ...currentRecord,
+      key,
+      phase: "completed",
+      sourceCommit,
+      createdAt,
+      jobs: [],
+      locales: {},
+      ...overrides,
+    });
+    const unrelatedProject = previousRecord(
+      "wrong-project",
+      "wrong-project",
+      "2026-10-19T23:00:00Z",
+      {
+        config: { ...currentRecord.config, projectUid: "other-project" },
+      },
+    );
+    const unrelatedFilename = previousRecord(
+      "wrong-filename",
+      "wrong-filename",
+      "2026-10-19T22:00:00Z",
+      {
+        config: {
+          ...currentRecord.config,
+          sourceCatalog: { ...currentRecord.config.sourceCatalog, filename: "other.json" },
+        },
+      },
+    );
+    const candidates = [
+      previousRecord("older-match", "older-source", "2026-10-17T00:00:00Z"),
+      previousRecord("latest-match", "latest-source", "2026-10-18T00:00:00Z"),
+      previousRecord("same-source", "current-source", "2026-10-19T23:00:00Z"),
+      previousRecord("wrong-repository", "wrong-repository", "2026-10-19T22:00:00Z", {
+        repository: "other/app",
+      }),
+      previousRecord("wrong-ref", "wrong-ref", "2026-10-19T21:00:00Z", { baseRef: "main" }),
+      unrelatedProject,
+      unrelatedFilename,
+      previousRecord("future", "future-source", "2026-10-21T00:00:00Z"),
+    ];
+    for (const candidate of candidates) await scenario.state.createBatch(candidate);
+
+    await scenario.workflow.reconcile();
+
+    expect(scenario.repository.sourceAuthorRequests[0]).toEqual({
+      path: "locales/translation-template.json",
+      headCommit: "current-source",
+      baseCommit: "latest-source",
+    });
   });
 });

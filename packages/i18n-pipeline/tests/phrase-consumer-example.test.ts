@@ -124,6 +124,12 @@ describe("Phrase consumer example", () => {
       async readFile() {
         return sourceBytes;
       },
+      async listSourceChangeAuthors() {
+        return [];
+      },
+      async addPullRequestAssignees(_pullRequestUrl, logins) {
+        return logins;
+      },
       async getPullRequestState() {
         return { state: "open", headSha: "tooling-commit" };
       },
@@ -135,6 +141,7 @@ describe("Phrase consumer example", () => {
         pullRequests.push(input);
         return {
           pullRequestUrl: "https://github.com/example/consumer/pull/1",
+          pullRequestCreated: true,
           toolingCommitSha: "tooling-commit",
         };
       },
@@ -315,6 +322,12 @@ describe("Phrase consumer example", () => {
       async readFile() {
         return textSourceBytes;
       },
+      async listSourceChangeAuthors() {
+        return [];
+      },
+      async addPullRequestAssignees(_pullRequestUrl, logins) {
+        return logins;
+      },
       async getPullRequestState() {
         return { state: "open", headSha: "tooling-commit" };
       },
@@ -326,6 +339,7 @@ describe("Phrase consumer example", () => {
         pullRequests.push(input);
         return {
           pullRequestUrl: "https://github.com/example/consumer/pull/2",
+          pullRequestCreated: true,
           toolingCommitSha: "tooling-commit",
         };
       },

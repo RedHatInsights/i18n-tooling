@@ -840,6 +840,7 @@ objects:
     ).toBe(0);
     expect(help[1]).toContain("--expect-project <uid>");
     expect(help[1]).toContain("--expect-source-filename <name>");
+    expect(help[1]).toContain("--fallback-assignee <login>");
     expect(
       await runCli(["tms", "--help"], {
         stdout: (message) => help.push(message),
@@ -1555,6 +1556,165 @@ objects:
       "Phrase auth: service account (PHRASE_SERVICE_ACCOUNT_CLIENT_ID/_SECRET)",
     );
     expect(output.join("\n")).not.toContain("client-secret");
+  });
+
+  it("rejects invalid fallback GitHub logins as a reconcile usage error", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-fallback-invalid-"));
+    const errors: string[] = [];
+    const calls: string[] = [];
+
+    const exitCode = await runCli(
+      [
+        "tms",
+        "reconcile",
+        "--config",
+        "missing.json",
+        "--fallback-assignee",
+        "valid-login",
+        "--fallback-assignee",
+        "not/a/login",
+      ],
+      {
+        cwd: projectRoot,
+        env: {
+          PHRASE_PLATFORM_API_TOKEN: "phrase-token",
+          GITHUB_TOKEN: "github-token",
+          GITHUB_REPOSITORY: "example/app",
+        },
+        fetch: async (input) => {
+          calls.push(input instanceof Request ? input.url : String(input));
+          return new Response("{}", { status: 500 });
+        },
+        stdout: () => undefined,
+        stderr: (message) => errors.push(message),
+      },
+    );
+
+    expect(exitCode).toBe(1);
+    expect(errors[0]).toContain('Invalid GitHub login for --fallback-assignee: "not/a/login"');
+    expect(errors[0]).toContain("Usage: i18n-pipeline tms <submit|reconcile> [options]");
+    expect(calls).toEqual([]);
+  });
+
+  it("passes repeated fallback logins to the workflow without failing a locale on assignment error", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-fallback-workflow-"));
+    await writeFile(join(projectRoot, "phrase.json"), phraseTmsConfig());
+    const batchKey = "a".repeat(64);
+    const sourceCatalogConfig = {
+      projectUid: "project-uid",
+      region: "us",
+      sourceCatalog: {
+        path: "locales/en.json",
+        filename: "en.json",
+        adapter: "formatjs-json",
+        locale: "en",
+      },
+      targetLocales: [
+        { phraseLocale: "fr", repositoryLocale: "fr", outputPath: "locales/fr.json" },
+      ],
+      completionPolicy: { default: "per-locale" },
+    };
+    let stateRevision = "state-1";
+    let stateWriteCount = 0;
+    let stateRecord: Record<string, unknown> = {
+      schema: 1,
+      key: batchKey,
+      phase: "completed",
+      repository: "example/app",
+      baseRef: "main",
+      sourceCommit: "abc123",
+      sourceDigest: "b".repeat(64),
+      config: sourceCatalogConfig,
+      createdAt: "2026-10-19T00:00:00.000Z",
+      jobs: [],
+      warningCount: 0,
+      locales: {
+        fr: {
+          phase: "pr-created",
+          pullRequestUrl: "https://github.com/example/app/pull/7",
+          pullRequestFinalized: true,
+          pullRequestAssigneesPending: true,
+        },
+      },
+    };
+    const assigneeBodies: unknown[] = [];
+    const output: string[] = [];
+    const statePath = `/contents/.github/i18n-state/batches/${batchKey}.json`;
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      const parsed = new URL(url);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (parsed.pathname.endsWith("/contents/.github/i18n-state/batches")) {
+        return new Response(JSON.stringify([{ type: "file", name: `${batchKey}.json` }]));
+      }
+      if (parsed.pathname.endsWith(statePath) && method === "GET") {
+        return new Response(
+          JSON.stringify({
+            type: "file",
+            sha: stateRevision,
+            encoding: "base64",
+            content: Buffer.from(`${JSON.stringify(stateRecord, null, 2)}\n`).toString("base64"),
+          }),
+        );
+      }
+      if (parsed.pathname.endsWith(statePath) && method === "PUT") {
+        const body = JSON.parse(String(init?.body)) as { content: string };
+        stateRecord = JSON.parse(Buffer.from(body.content, "base64").toString("utf8")) as Record<
+          string,
+          unknown
+        >;
+        stateRevision = `state-${++stateWriteCount + 1}`;
+        return new Response(JSON.stringify({ content: { sha: stateRevision } }));
+      }
+      if (parsed.pathname.endsWith("/commits")) {
+        return new Response(
+          JSON.stringify([{ sha: "source-change", author: { login: "source-author" } }]),
+        );
+      }
+      if (parsed.pathname.endsWith("/issues/7/assignees") && method === "POST") {
+        assigneeBodies.push(JSON.parse(String(init?.body)));
+        return assigneeBodies.length === 1
+          ? new Response(JSON.stringify({ assignees: [] }), { status: 201 })
+          : new Response(JSON.stringify({ message: "Forbidden" }), { status: 403 });
+      }
+      return new Response(`Unexpected request: ${method} ${url}`, { status: 500 });
+    };
+
+    const exitCode = await runCli(
+      [
+        "tms",
+        "reconcile",
+        "--config",
+        "phrase.json",
+        "--fallback-assignee",
+        "hub-fallback",
+        "--fallback-assignee",
+        "team-owner",
+      ],
+      {
+        cwd: projectRoot,
+        env: {
+          PHRASE_PLATFORM_API_TOKEN: "phrase-token",
+          GITHUB_TOKEN: "github-token",
+          GITHUB_REPOSITORY: "example/app",
+        },
+        fetch,
+        stdout: (message) => output.push(message),
+        stderr: (message) => output.push(message),
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(assigneeBodies).toEqual([
+      { assignees: ["source-author"] },
+      { assignees: ["hub-fallback", "team-owner"] },
+    ]);
+    const locale = (stateRecord.locales as Record<string, Record<string, unknown>>).fr!;
+    expect(stateRecord.phase).toBe("completed");
+    expect(locale.phase).toBe("pr-created");
+    expect(locale.pullRequestAssigneesPending).toBeUndefined();
+    expect(output.join("\n")).toContain("Could not assign locale PR for fr");
+    expect(output.join("\n")).toContain("403");
   });
 
   it("processes shared batches unpinned while repairing only the loaded config's stuck batch", async () => {
