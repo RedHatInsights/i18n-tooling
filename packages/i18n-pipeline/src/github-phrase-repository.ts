@@ -575,6 +575,53 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     return true;
   }
 
+  async findLatestBotPullRequestComment(
+    pullRequestUrl: string,
+    bodyPrefix: string,
+  ): Promise<string | undefined> {
+    const number = this.pullRequestNumber(pullRequestUrl);
+    // This endpoint ignores sort parameters and lists oldest first, so the last match wins.
+    let latest: string | undefined;
+    for (let page = 1; ; page += 1) {
+      const query = new URLSearchParams({ per_page: "100", page: String(page) });
+      const response = await this.request(
+        `${this.repositoryPath}/issues/${number}/comments?${query.toString()}`,
+        { method: "GET" },
+      );
+      const value: unknown = await response.json();
+      if (!Array.isArray(value)) {
+        throw new GitHubRepositoryError(
+          "GitHub returned an invalid pull request comment list",
+          500,
+        );
+      }
+      // Actor lookup needs a separate API call, so report ownership uses GitHub's Bot author type.
+      for (const comment of value) {
+        if (
+          isRecord(comment) &&
+          typeof comment.body === "string" &&
+          comment.body.startsWith(bodyPrefix) &&
+          isRecord(comment.user) &&
+          comment.user.type === "Bot"
+        ) {
+          latest = comment.body;
+        }
+      }
+      if (value.length < 100) return latest;
+    }
+  }
+
+  async createPullRequestComment(pullRequestUrl: string, body: string): Promise<boolean> {
+    const number = this.pullRequestNumber(pullRequestUrl);
+    const state = await this.getPullRequestState(pullRequestUrl);
+    if (state.state !== "open") return false;
+    await this.request(`${this.repositoryPath}/issues/${number}/comments`, {
+      method: "POST",
+      body: JSON.stringify({ body }),
+    });
+    return true;
+  }
+
   private async pullRequestIsOpenAtHead(
     pullRequestUrl: string,
     expectedHeadSha: string,

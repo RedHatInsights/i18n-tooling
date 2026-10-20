@@ -27,6 +27,14 @@ import {
 
 export type LocaleCompletionPolicy = "per-locale" | "all-locales";
 
+export interface TranslationFinding {
+  severity: "error" | "warning";
+  messageId?: string;
+  problem: string;
+  source?: string;
+  translation?: string;
+}
+
 export interface PhraseTargetLocale {
   phraseLocale: string;
   repositoryLocale: string;
@@ -114,6 +122,8 @@ export interface PhraseLocaleRecord {
   pullRequestBodyDigest?: string;
   /** Retry the PR title and description update if it failed after a commit. */
   pullRequestBodyPending?: boolean;
+  /** Retry the translation findings comment on the next export for this open PR. */
+  pullRequestCommentPending?: boolean;
   /** A retry batch owns re-exporting this carried PR. */
   pullRequestReexportDelegated?: boolean;
 }
@@ -201,6 +211,11 @@ export interface PhraseWorkflowRepository {
     input: PhraseLocalePullRequestUpdate,
   ): Promise<PhraseLocalePullRequestUpdateResult>;
   updatePullRequestBody(pullRequestUrl: string, body: string, title?: string): Promise<boolean>;
+  findLatestBotPullRequestComment(
+    pullRequestUrl: string,
+    bodyPrefix: string,
+  ): Promise<string | undefined>;
+  createPullRequestComment(pullRequestUrl: string, body: string): Promise<boolean>;
 }
 
 export interface PhraseWorkflowDependencies {
@@ -409,22 +424,191 @@ type StuckBatchRepairResult =
   | { kind: "retrying"; reason: string };
 
 const MAX_PULL_REQUEST_FINDINGS = 50;
-// Both sections plus metadata must fit GitHub's PR body limit, including Unicode text.
+// Two report tables plus metadata stay below GitHub's 65,536-character PR comment limit.
 const MAX_PULL_REQUEST_SECTION_BYTES = 24_000;
+const TRANSLATION_FINDINGS_COMMENT_MARKER = "<!-- i18n-pipeline:translation-findings";
 
-function translationFindingsSection(heading: string, findings: string[]): string {
+function findingCount(icon: string, count: number, noun: string): string {
+  return `${icon} ${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function translationFindingsStatusLine(findings: TranslationFinding[]): string {
+  const errors = findings.filter((finding) => finding.severity === "error").length;
+  const warnings = findings.filter((finding) => finding.severity === "warning").length;
+  if (!errors && !warnings) return "✅ No translation errors or warnings.";
+  if (!errors) {
+    return `${findingCount("⚠️", warnings, "warning")} — see the latest 🌐 Translation check comment.`;
+  }
+  const counts = [findingCount("❌", errors, "error")];
+  if (warnings) counts.push(findingCount("⚠️", warnings, "warning"));
+  return `${counts.join(" · ")} — see the latest 🌐 Translation check comment.`;
+}
+
+function normalizeTableCell(value: string): string {
+  return value.replace(/[\r\n]+/g, " ").replaceAll("|", "\\|");
+}
+
+function codeSpan(value: string): string {
+  const normalized = normalizeTableCell(value);
+  const backtickRuns = normalized.match(/`+/g) ?? [];
+  const fence = "`".repeat(Math.max(1, ...backtickRuns.map((run) => run.length + 1)));
+  const padding =
+    normalized &&
+    (normalized.startsWith("`") ||
+      normalized.endsWith("`") ||
+      normalized.startsWith(" ") ||
+      normalized.endsWith(" "))
+      ? " "
+      : "";
+  return `${fence}${padding}${normalized}${padding}${fence}`;
+}
+
+function truncatePattern(pattern: string): string {
+  const normalized = pattern.replace(/[\r\n]+/g, " ");
+  const characters = [...normalized];
+  return characters.length > 300 ? `${characters.slice(0, 299).join("")}…` : normalized;
+}
+
+function renderFindingRow(finding: TranslationFinding, prefix: "E" | "W", index: number): string {
+  const message = finding.messageId ? codeSpan(finding.messageId) : "—";
+  const source = finding.source === undefined ? "—" : codeSpan(truncatePattern(finding.source));
+  const translation =
+    finding.translation === undefined ? "—" : codeSpan(truncatePattern(finding.translation));
+  return `| **${prefix}${index + 1}** | ${message} | ${normalizeTableCell(finding.problem)} | ${source} | ${translation} |`;
+}
+
+function translationFindingsTable(
+  heading: string,
+  prefix: "E" | "W",
+  findings: TranslationFinding[],
+): string {
   if (!findings.length) return "";
-  const shown = findings.slice(0, MAX_PULL_REQUEST_FINDINGS).map((finding) => `- ${finding}`);
-  const hidden = findings.length - shown.length;
-  if (hidden > 0) shown.push(`- ...and ${hidden} more`);
-  const details = shown.join("\n");
-  const bytes = new TextEncoder().encode(details);
-  // Streaming decode drops an incomplete trailing UTF-8 code point instead of emitting U+FFFD.
-  const bounded =
-    bytes.length > MAX_PULL_REQUEST_SECTION_BYTES
-      ? `${new TextDecoder().decode(bytes.slice(0, MAX_PULL_REQUEST_SECTION_BYTES), { stream: true })}\n- ...additional detail omitted to fit PR description`
-      : details;
-  return `\n${heading}:\n${bounded}\n`;
+  const tableHeader = [
+    "| # | Message | Problem | English source | Translation |",
+    "| :-: | --- | --- | --- | --- |",
+  ];
+  const rows: string[] = [];
+  const maxRows = Math.min(findings.length, MAX_PULL_REQUEST_FINDINGS);
+  for (let index = 0; index < maxRows; index += 1) {
+    const candidate = [...rows, renderFindingRow(findings[index]!, prefix, index)];
+    const bytes = new TextEncoder().encode([heading, "", ...tableHeader, ...candidate].join("\n"));
+    if (bytes.length > MAX_PULL_REQUEST_SECTION_BYTES) break;
+    rows.push(candidate.at(-1)!);
+  }
+  const hidden = findings.length - rows.length;
+  return [
+    heading,
+    "",
+    ...tableHeader,
+    ...rows,
+    ...(hidden ? ["", `…and ${hidden} more`] : []),
+  ].join("\n");
+}
+
+function translationFindingsComment(
+  input: {
+    locale: string;
+    batchKey: string;
+    sourceCommit: string;
+    projectUid: string;
+    finalJobUid: string;
+    findings: TranslationFinding[];
+    generatedYamlNote?: string;
+  },
+  findingsDigest: string,
+): string {
+  const errors = input.findings.filter((finding) => finding.severity === "error");
+  const warnings = input.findings.filter((finding) => finding.severity === "warning");
+  const lines = [
+    `<!-- i18n-pipeline:translation-findings digest=${findingsDigest} -->`,
+    `## 🌐 Translation check · ${codeSpan(input.locale)}`,
+    "",
+  ];
+  if (errors.length) {
+    lines.push(
+      "> [!CAUTION]",
+      `> **${findingCount("❌", errors.length, "error")}** ${errors.length === 1 ? "blocks" : "block"} merging.${
+        warnings.length
+          ? ` **${findingCount("⚠️", warnings.length, "warning")}** ${warnings.length === 1 ? "needs" : "need"} a reviewer's judgment.`
+          : ""
+      }`,
+    );
+  } else if (warnings.length) {
+    lines.push(
+      "> [!WARNING]",
+      `> **${findingCount("⚠️", warnings.length, "warning")}** ${warnings.length === 1 ? "needs" : "need"} a reviewer's judgment.`,
+    );
+  } else {
+    lines.push("> [!TIP]", "> **✅ No translation errors or warnings.**");
+  }
+  if (input.generatedYamlNote) {
+    lines.push("", "> [!NOTE]", `> ${normalizeTableCell(input.generatedYamlNote)}`);
+  }
+  if (errors.length) {
+    lines.push(
+      "",
+      translationFindingsTable("### ❌ Errors — must be fixed before merging", "E", errors),
+    );
+  }
+  if (warnings.length) {
+    lines.push(
+      "",
+      translationFindingsTable("### ⚠️ Warnings — review before merging", "W", warnings),
+    );
+  }
+  lines.push(
+    "",
+    "<details>",
+    "<summary>ℹ️ Batch details</summary>",
+    "",
+    "| | |",
+    "| --- | --- |",
+    `| Phrase project | ${codeSpan(input.projectUid)} |`,
+    `| Batch | ${codeSpan(input.batchKey.slice(0, 12))} |`,
+    `| Source commit | ${codeSpan(input.sourceCommit.slice(0, 7))} |`,
+    `| Final job | ${codeSpan(input.finalJobUid)} |`,
+    "",
+    "</details>",
+    "",
+    "<sub>🤖 Posted by i18n-pipeline. A new run with changed findings adds a new report; this PR stays a draft and is never marked ready automatically.</sub>",
+  );
+  return lines.join("\n");
+}
+
+function capitalizeFirst(value: string): string {
+  return value ? value[0]!.toUpperCase() + value.slice(1) : value;
+}
+
+function commentDigest(comment: string | undefined): string | undefined {
+  return comment?.match(/^<!-- i18n-pipeline:translation-findings digest=([a-f0-9]{64}) -->/)?.[1];
+}
+
+function argumentMismatchProblem(mismatch: { source: string[]; target: string[] }): string {
+  const sourceArguments = new Set(mismatch.source);
+  const targetArguments = new Set(mismatch.target);
+  const missing = mismatch.source.filter((argument) => !targetArguments.has(argument));
+  const extra = mismatch.target.filter((argument) => !sourceArguments.has(argument));
+  const formatNames = (names: string[]) =>
+    names.length < 2
+      ? `{${names[0]}}`
+      : `${names
+          .slice(0, -1)
+          .map((name) => `{${name}}`)
+          .join(", ")} and {${names.at(-1)}}`;
+  const problems: string[] = [];
+  if (missing.length) {
+    problems.push(
+      `${missing.length === 1 ? "Argument" : "Arguments"} ${formatNames(missing)} ${
+        missing.length === 1 ? "is" : "are"
+      } missing from the translation.`,
+    );
+  }
+  if (extra.length) {
+    problems.push(
+      `Translation adds ${extra.length === 1 ? "argument" : "arguments"} ${formatNames(extra)} that the source does not have.`,
+    );
+  }
+  return problems.join(" ");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -2195,7 +2379,7 @@ export class PhraseWorkflow {
         if (reexportingOpenPullRequest && existingLocale?.pullRequestUrl) {
           context.exportedPullRequestUrls.add(existingLocale.pullRequestUrl);
         }
-        const { content, warnings, errors } = await this.exportTarget(
+        const { content, warnings, errors, findings } = await this.exportTarget(
           record,
           target,
           ready.finalJob,
@@ -2268,11 +2452,14 @@ export class PhraseWorkflow {
             });
             frontendTemplateData = { path, descriptors, translated };
             const overlong = overlongFeoTranslationsWarning(feoLocale, translated);
-            if (overlong) warnings.push(overlong);
+            if (overlong) {
+              warnings.push(overlong);
+              findings.push({ severity: "warning", problem: overlong });
+            }
           } catch (error) {
-            errors.push(
-              `Frontend template inline failed: ${error instanceof Error ? error.message : String(error)}`,
-            );
+            const problem = `Frontend template inline failed: ${error instanceof Error ? error.message : String(error)}`;
+            errors.push(problem);
+            findings.push({ severity: "error", problem });
           }
         }
         const latestBaseCommit = await this.dependencies.repository.resolveCommit(record.baseRef);
@@ -2351,6 +2538,10 @@ export class PhraseWorkflow {
           existingLocale?.pullRequestBranch ??
           localePullRequestBranch(record.key, target.repositoryLocale);
         const pullRequestBatchKey = existingLocale?.pullRequestBatchKey ?? record.key;
+        const generatedYamlNote =
+          record.config.frontendTemplate && errors.length
+            ? "Generated Frontend YAML was not updated for this export. Any existing locale block may reflect an earlier valid export and must not be merged with this catalog."
+            : undefined;
         const body =
           `Phrase project: ${record.config.projectUid}\n` +
           `Batch: ${pullRequestBatchKey}\n` +
@@ -2360,11 +2551,31 @@ export class PhraseWorkflow {
           "\nReview validation findings before marking ready or merging. " +
           "Corrections in Phrase are pulled into this PR on later reconciliation runs. " +
           "Tooling never marks this PR ready automatically.\n" +
-          (record.config.frontendTemplate && errors.length
-            ? "\nGenerated Frontend YAML was not updated for this export. Any existing locale block may reflect an earlier valid export and must not be merged with this catalog.\n"
-            : "") +
-          translationFindingsSection("Translation errors (do not merge)", errors) +
-          translationFindingsSection("Translation warnings (review before merging)", warnings);
+          (generatedYamlNote ? `\n${generatedYamlNote}\n` : "\n") +
+          translationFindingsStatusLine(findings);
+        const findingsDigest = digest(
+          new TextEncoder().encode(
+            stableJson({
+              locale: target.repositoryLocale,
+              batchKey: record.key,
+              finalJobUid: ready.finalJob.uid,
+              findings,
+            }),
+          ),
+        );
+        const reportComment = translationFindingsComment(
+          {
+            locale: target.repositoryLocale,
+            batchKey: pullRequestBatchKey,
+            sourceCommit: record.sourceCommit,
+            projectUid: record.config.projectUid,
+            finalJobUid: ready.finalJob.uid,
+            findings,
+            generatedYamlNote:
+              record.config.frontendTemplate && errors.length ? generatedYamlNote : undefined,
+          },
+          findingsDigest,
+        );
         const deliveryMetadata = {
           validationErrors: errors,
           validationWarnings: warnings,
@@ -2380,6 +2591,56 @@ export class PhraseWorkflow {
             pullRequestUrl,
             ...(errors.length ? { reason: errors.join("; ") } : {}),
           });
+        const setPullRequestCommentPending = async (pending: boolean) => {
+          const locale = record.locales[target.phraseLocale];
+          if (
+            !locale ||
+            (pending
+              ? locale.pullRequestCommentPending === true
+              : locale.pullRequestCommentPending !== true)
+          ) {
+            return;
+          }
+          const updatedLocale = { ...locale };
+          if (pending) updatedLocale.pullRequestCommentPending = true;
+          else delete updatedLocale.pullRequestCommentPending;
+          const updatedRecord: PhraseBatchRecord = {
+            ...record,
+            locales: { ...record.locales, [target.phraseLocale]: updatedLocale },
+          };
+          revision = await this.dependencies.state.updateBatch(updatedRecord, revision);
+          record = updatedRecord;
+          const cached = context.storedBatches.get(record.key);
+          if (cached) {
+            cached.record = record;
+            cached.revision = revision;
+          }
+        };
+        const finishDelivery = async (pullRequestUrl: string, pendingErrors: unknown[] = []) => {
+          let commentFailure: { error: unknown } | undefined;
+          try {
+            const latestComment =
+              await this.dependencies.repository.findLatestBotPullRequestComment(
+                pullRequestUrl,
+                TRANSLATION_FINDINGS_COMMENT_MARKER,
+              );
+            if (commentDigest(latestComment) !== findingsDigest) {
+              await this.dependencies.repository.createPullRequestComment(
+                pullRequestUrl,
+                reportComment,
+              );
+            }
+          } catch (error) {
+            commentFailure = { error };
+          }
+          await setPullRequestCommentPending(Boolean(commentFailure));
+          const failures = [...pendingErrors, ...(commentFailure ? [commentFailure.error] : [])];
+          if (failures.length) {
+            push({ phase: "retrying", reason: failures.map(safeFailureReason).join("; ") });
+          } else {
+            reportDelivery(pullRequestUrl);
+          }
+        };
         const sourcePath = sourceInputPath(record.config);
         // Resubmission can adopt a moved generated-source template path within this batch.
         const title = `i18n(${target.repositoryLocale}): Phrase translation update for ${sourcePath}`;
@@ -2560,6 +2821,7 @@ export class PhraseWorkflow {
             if (update.pullRequestMerged) updatedLocale.pullRequestMerged = true;
             else delete updatedLocale.pullRequestMerged;
             updatedLocale.pullRequestBodyPending = true;
+            delete updatedLocale.pullRequestCommentPending;
             record.locales[target.phraseLocale] = updatedLocale;
             revision = await this.dependencies.state.updateBatch(record, revision);
           } else if (update.changed) {
@@ -2567,27 +2829,42 @@ export class PhraseWorkflow {
             else updatedLocale.pullRequestBodyPending = true;
             record.locales[target.phraseLocale] = updatedLocale;
             revision = await this.dependencies.state.updateBatch(record, revision);
-            if (update.bodyError) {
-              push({ phase: "retrying", reason: safeFailureReason(update.bodyError) });
-            } else if (!update.bodyUpdated) {
-              push({
-                phase: "retrying",
-                reason: "GitHub did not confirm the updated locale pull request description",
-              });
-            } else {
-              reportDelivery(existingLocale.pullRequestUrl);
-            }
-          } else if (existingLocale.pullRequestBodyPending || metadataChanged) {
-            const bodyUpdated = await this.dependencies.repository.updatePullRequestBody(
+            await finishDelivery(
               existingLocale.pullRequestUrl,
-              body,
-              title,
+              update.bodyError
+                ? [update.bodyError]
+                : update.bodyUpdated
+                  ? []
+                  : [
+                      new PhraseRepositoryError(
+                        "GitHub did not confirm the updated locale pull request description",
+                        500,
+                      ),
+                    ],
             );
+          } else if (existingLocale.pullRequestBodyPending || metadataChanged) {
+            let bodyUpdated = false;
+            let bodyError: unknown;
+            try {
+              bodyUpdated = await this.dependencies.repository.updatePullRequestBody(
+                existingLocale.pullRequestUrl,
+                body,
+                title,
+              );
+            } catch (error) {
+              bodyError = error;
+            }
             if (bodyUpdated) delete updatedLocale.pullRequestBodyPending;
-            else updatedLocale.pullRequestFinalized = true;
+            else if (bodyError) updatedLocale.pullRequestBodyPending = true;
+            else {
+              updatedLocale.pullRequestFinalized = true;
+              delete updatedLocale.pullRequestCommentPending;
+            }
             record.locales[target.phraseLocale] = updatedLocale;
             revision = await this.dependencies.state.updateBatch(record, revision);
-            if (bodyUpdated) reportDelivery(existingLocale.pullRequestUrl);
+            if (bodyUpdated || bodyError) {
+              await finishDelivery(existingLocale.pullRequestUrl, bodyError ? [bodyError] : []);
+            }
           } else {
             if (
               existingLocale.toolingCommitSha !== update.toolingCommitSha ||
@@ -2596,7 +2873,7 @@ export class PhraseWorkflow {
               record.locales[target.phraseLocale] = updatedLocale;
               revision = await this.dependencies.state.updateBatch(record, revision);
             }
-            reportDelivery(existingLocale.pullRequestUrl);
+            await finishDelivery(existingLocale.pullRequestUrl);
           }
         } else {
           const created =
@@ -2624,12 +2901,20 @@ export class PhraseWorkflow {
               : {}),
           };
           delete localeRecord.pendingToolingCommitSha;
+          if (created.pullRequestFinalized) delete localeRecord.pullRequestCommentPending;
           record.locales[target.phraseLocale] = localeRecord;
           revision = await this.dependencies.state.updateBatch(record, revision);
-          if (created.bodyError) {
-            push({ phase: "retrying", reason: safeFailureReason(created.bodyError) });
+          if (created.pullRequestFinalized) {
+            if (created.bodyError) {
+              push({ phase: "retrying", reason: safeFailureReason(created.bodyError) });
+            } else {
+              reportDelivery(created.pullRequestUrl);
+            }
           } else {
-            reportDelivery(created.pullRequestUrl);
+            await finishDelivery(
+              created.pullRequestUrl,
+              created.bodyError ? [created.bodyError] : [],
+            );
           }
         }
       } catch (error) {
@@ -2849,7 +3134,12 @@ export class PhraseWorkflow {
     finalJob: PhraseJobPart,
     sourceCatalog: Catalog,
     targetAdapter: CatalogAdapter,
-  ): Promise<{ content: Uint8Array; warnings: string[]; errors: string[] }> {
+  ): Promise<{
+    content: Uint8Array;
+    warnings: string[];
+    errors: string[];
+    findings: TranslationFinding[];
+  }> {
     const exportRequestId = await this.dependencies.phrase.startTargetDownload(
       record.config.projectUid,
       finalJob.uid,
@@ -2875,9 +3165,26 @@ export class PhraseWorkflow {
       );
       const comparison = checkCatalogs(sourceCatalog, targetCatalog);
       const problems: string[] = [];
+      const findings: TranslationFinding[] = [];
       if (comparison.missingIds.length)
         problems.push(`missing IDs: ${comparison.missingIds.join(", ")}`);
+      for (const id of comparison.missingIds) {
+        findings.push({
+          severity: "error",
+          messageId: id,
+          problem: "Message is missing from the translation.",
+          source: sourceCatalog.messages[id]!.pattern,
+        });
+      }
       if (comparison.extraIds.length) problems.push(`extra IDs: ${comparison.extraIds.join(", ")}`);
+      for (const id of comparison.extraIds) {
+        findings.push({
+          severity: "error",
+          messageId: id,
+          problem: "Translation has a message the source does not have.",
+          translation: targetCatalog.messages[id]!.pattern,
+        });
+      }
       if (comparison.argumentMismatches.length) {
         problems.push(
           `ICU argument mismatches: ${comparison.argumentMismatches
@@ -2885,22 +3192,49 @@ export class PhraseWorkflow {
             .join(", ")}`,
         );
       }
+      for (const mismatch of comparison.argumentMismatches) {
+        findings.push({
+          severity: "error",
+          messageId: mismatch.id,
+          problem: argumentMismatchProblem(mismatch),
+          source: sourceCatalog.messages[mismatch.id]!.pattern,
+          translation: targetCatalog.messages[mismatch.id]!.pattern,
+        });
+      }
       const warnings: string[] = [];
       for (const finding of lintTargetCatalog(sourceCatalog, targetCatalog)) {
         (finding.severity === "error" ? problems : warnings).push(finding.message);
+        findings.push({
+          severity: finding.severity,
+          messageId: finding.id,
+          problem: capitalizeFirst(
+            finding.message.startsWith(`"${finding.id}": `)
+              ? finding.message.slice(finding.id.length + 4)
+              : finding.message,
+          ),
+          source: sourceCatalog.messages[finding.id]!.pattern,
+          translation: targetCatalog.messages[finding.id]!.pattern,
+        });
       }
       const serialized = serializeCatalogDocument(
         targetAdapter.write(targetCatalog, context),
         targetAdapter,
         context,
       );
-      return { content: new TextEncoder().encode(serialized), warnings, errors: problems };
+      return {
+        content: new TextEncoder().encode(serialized),
+        warnings,
+        errors: problems,
+        findings,
+      };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
+      const problem = `Downloaded ${target.phraseLocale} catalog failed validation: ${detail}`;
       return {
         content: targetBytes,
         warnings: [],
-        errors: [`Downloaded ${target.phraseLocale} catalog failed validation: ${detail}`],
+        errors: [problem],
+        findings: [{ severity: "error", problem }],
       };
     }
   }
