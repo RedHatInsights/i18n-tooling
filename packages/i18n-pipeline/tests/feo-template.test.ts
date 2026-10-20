@@ -932,4 +932,17 @@ ${localesBlock(32)}      module:
       expect(inline(value)).toEqual({ "searchEntries.roles.title": "Rôles" });
     }
   });
+
+  it("keeps empty lines of a multiline translation", () => {
+    const source = extractFeoCatalog(template);
+    const result = inlineFeoLocale(
+      template,
+      source,
+      { "searchEntries.users.title": "Utilisateurs\n\nGroupes" },
+      "fr",
+    );
+    expect(parse(result).objects[0].spec.locales.fr["searchEntries.users.title"]).toBe(
+      "Utilisateurs\n\nGroupes",
+    );
+  });
 });

@@ -13,6 +13,11 @@
 export const FEO_LOCALE_PATTERN_SOURCE = "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$";
 export const FEO_LOCALE_PATTERN = new RegExp(FEO_LOCALE_PATTERN_SOURCE);
 
+/** Message keys accepted by the Frontend operator's locale catalog CRD. */
+export const FEO_LOCALE_KEY_PATTERN_SOURCE =
+  "^[A-Za-z0-9][A-Za-z0-9_-]*([.][A-Za-z0-9][A-Za-z0-9_-]*)*$";
+export const FEO_LOCALE_KEY_PATTERN = new RegExp(FEO_LOCALE_KEY_PATTERN_SOURCE);
+
 /** English is the source language and is never a translation target. */
 export const FEO_SOURCE_LOCALE = "en";
 
@@ -22,6 +27,16 @@ export const FEO_MAX_LOCALES = 32;
 export const FEO_MAX_LOCALE_KEYS = 2048;
 /** `LocaleMessage` MaxLength: characters (Unicode code points) per message. */
 export const FEO_MAX_MESSAGE_LENGTH = 4096;
+/** `LocaleMessage` key limit in the Frontend operator CRD. */
+export const FEO_MAX_LOCALE_KEY_LENGTH = 256;
+
+/**
+ * `spec.enabledLocales` limits from the FrontendEnvironment CRD.
+ * Source of truth: frontend-operator `api/v1alpha1` (PR #712). Keep these limits in sync with it.
+ */
+export const FEO_MAX_ENABLED_LOCALES = 32;
+export const FEO_MIN_ENABLED_LOCALE_NAME_LENGTH = 1;
+export const FEO_MAX_ENABLED_LOCALE_NAME_LENGTH = 64;
 
 function canonicalLocale(locale: string): string | undefined {
   try {
@@ -32,15 +47,17 @@ function canonicalLocale(locale: string): string | undefined {
 }
 
 /**
- * Stricter than the CRD pattern in one way: deprecated aliases such as `iw` or `in` match it, but
+ * Whether a locale id is canonical, as `spec.enabledLocales` needs; unlike `isFeoLocaleId`, this
+ * includes English. Stricter than the CRD pattern in one way: deprecated aliases such as `iw` or `in` match it, but
  * locale resolution canonicalizes them (`he`, `id`), so a block under the alias would never be read.
  */
+export function isCanonicalFeoLocaleId(locale: string): boolean {
+  return FEO_LOCALE_PATTERN.test(locale) && canonicalLocale(locale) === locale;
+}
+
+/** A canonical translation locale id: English is the source language. */
 export function isFeoLocaleId(locale: string): boolean {
-  return (
-    FEO_LOCALE_PATTERN.test(locale) &&
-    locale !== FEO_SOURCE_LOCALE &&
-    canonicalLocale(locale) === locale
-  );
+  return isCanonicalFeoLocaleId(locale) && locale !== FEO_SOURCE_LOCALE;
 }
 
 /** The canonical spelling of a malformed locale id, when there is exactly one valid candidate. */
