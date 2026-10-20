@@ -121,6 +121,7 @@ class FakePhrase {
   onDownloadTargetFile?: () => void;
   readonly jobStatuses = new Map<string, string>();
   readonly jobFilenamesByUid = new Map<string, string | undefined>();
+  ignoreWorkflowLevelFilter = false;
   private readonly knownJobParts = new Map<
     string,
     {
@@ -227,7 +228,17 @@ class FakePhrase {
       }
     }
     return structuredClone(
-      this.listedJobs.filter((job) => (job.workflowLevel ?? 1) === (options.workflowLevel ?? 1)),
+      this.ignoreWorkflowLevelFilter
+        ? this.listedJobs.map((job) => ({
+            ...job,
+            workflowLevel:
+              job.workflowLevelReported === true
+                ? (job.workflowLevel ?? options.workflowLevel ?? 1)
+                : (options.workflowLevel ?? 1),
+          }))
+        : this.listedJobs.filter(
+            (job) => (job.workflowLevel ?? 1) === (options.workflowLevel ?? 1),
+          ),
     );
   }
 
@@ -480,6 +491,20 @@ const japaneseConfig: PhraseWorkflowConfig = {
   ],
 };
 
+const recoveryLocaleTags = ["fr", "ja", "ko", "zh_cn"] as const;
+
+function configureRecoveryLocales(scenario: ReturnType<typeof makeJapaneseWorkflowScenario>): void {
+  scenario.input.config = {
+    ...scenario.input.config,
+    targetLocales: recoveryLocaleTags.map((phraseLocale) => ({
+      phraseLocale,
+      repositoryLocale: phraseLocale,
+      outputPath: `locales/${phraseLocale}.json`,
+    })),
+  };
+  scenario.phrase.expectedTargetLangs = [...recoveryLocaleTags];
+}
+
 const phrasePins = {
   expectedProjectUid: "project-uid",
   expectedSourceFilename: "translation-template.json",
@@ -530,11 +555,13 @@ function listedPhraseJob(
   sourceFileUid: string | undefined,
   dateCreated: string,
   workflowLevel = 1,
+  workflowLevelReported = true,
 ): PhraseJobListPart {
   return {
     uid,
     targetLang,
     workflowLevel,
+    workflowLevelReported,
     filename: "translation-template.json",
     dateCreated,
     listingEntry: `job ${uid}`,
@@ -617,6 +644,92 @@ describe("Phrase stuck batch recovery", () => {
       );
     },
   );
+
+  it("binds four locales whose jobs span adjacent creation seconds", async () => {
+    const clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+    configureRecoveryLocales(scenario);
+    const stuck = await storeStuckBatch(scenario, "creating", new Date(clock).toISOString());
+    const firstCreatedAt = new Date(clock).toISOString();
+    const secondCreatedAt = new Date(clock + 1000).toISOString();
+    scenario.phrase.listedJobs = [
+      listedPhraseJob("recovered-fr", "fr", "source-fr", firstCreatedAt),
+      listedPhraseJob("recovered-zh-cn", "zh_cn", "source-zh-cn", firstCreatedAt),
+      listedPhraseJob("recovered-ja", "ja", "source-ja", secondCreatedAt),
+      listedPhraseJob("recovered-ko", "ko", "source-ko", secondCreatedAt),
+    ];
+    scenario.phrase.getJobError = new PhraseApiError("Phrase API returned HTTP 503", 503);
+
+    const recovered = await scenario.workflow.submit(scenario.input);
+
+    expect(recovered.key).toBe(stuck.key);
+    expect(recovered.phase).toBe("importing");
+    expect(recovered.jobs).toHaveLength(4);
+    for (const uid of ["recovered-fr", "recovered-zh-cn", "recovered-ja", "recovered-ko"]) {
+      expect(recovered.jobs.filter((job) => job.uid === uid)).toHaveLength(1);
+    }
+  });
+
+  it("deduplicates repeated listed UIDs and stops after the first repeated workflow level", async () => {
+    const clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+    configureRecoveryLocales(scenario);
+    const stuck = await storeStuckBatch(scenario, "creating", new Date(clock).toISOString());
+    const createdAt = new Date(clock).toISOString();
+    scenario.phrase.ignoreWorkflowLevelFilter = true;
+    scenario.phrase.listedJobs = recoveryLocaleTags.map((targetLang) => ({
+      ...listedPhraseJob(`recovered-${targetLang}`, targetLang, `source-${targetLang}`, createdAt),
+      workflowLevelReported: false,
+    }));
+    scenario.phrase.getJobError = new PhraseApiError("Phrase API returned HTTP 503", 503);
+
+    const recovered = await scenario.workflow.submit(scenario.input);
+
+    expect(recovered.key).toBe(stuck.key);
+    expect(recovered.phase).toBe("importing");
+    expect(recovered.jobs).toHaveLength(4);
+    expect(recovered.jobs.map(({ workflowLevel }) => workflowLevel)).toEqual([1, 1, 1, 1]);
+    expect(new Set(recovered.jobs.map(({ uid }) => uid)).size).toBe(4);
+    expect(scenario.phrase.listJobCalls.map(({ workflowLevel }) => workflowLevel)).toEqual([1, 2]);
+  });
+
+  it("recovers the adjacent-second batch when Phrase ignores workflow-level filters", async () => {
+    const clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+    configureRecoveryLocales(scenario);
+    const stuck = await storeStuckBatch(scenario, "unknown", new Date(clock).toISOString());
+    const firstCreatedAt = new Date(clock).toISOString();
+    const secondCreatedAt = new Date(clock + 1000).toISOString();
+    scenario.phrase.ignoreWorkflowLevelFilter = true;
+    scenario.phrase.listedJobs = [
+      {
+        ...listedPhraseJob("recovered-fr", "fr", "source-fr", firstCreatedAt),
+        workflowLevelReported: false,
+      },
+      {
+        ...listedPhraseJob("recovered-zh-cn", "zh_cn", "source-zh-cn", firstCreatedAt),
+        workflowLevelReported: false,
+      },
+      {
+        ...listedPhraseJob("recovered-ja", "ja", "source-ja", secondCreatedAt),
+        workflowLevelReported: false,
+      },
+      {
+        ...listedPhraseJob("recovered-ko", "ko", "source-ko", secondCreatedAt),
+        workflowLevelReported: false,
+      },
+    ];
+    scenario.phrase.getJobError = new PhraseApiError("Phrase API returned HTTP 503", 503);
+
+    const recovered = await scenario.workflow.submit(scenario.input);
+
+    expect(recovered.key).toBe(stuck.key);
+    expect(recovered.phase).toBe("importing");
+    expect(recovered.jobs).toHaveLength(4);
+    expect(new Set(recovered.jobs.map(({ uid }) => uid)).size).toBe(4);
+    expect(recovered.jobs.map(({ workflowLevel }) => workflowLevel)).toEqual([1, 1, 1, 1]);
+    expect(scenario.phrase.listJobCalls.map(({ workflowLevel }) => workflowLevel)).toEqual([1, 2]);
+  });
 
   it("binds a creation-time group when sourceFileUid is absent", async () => {
     const clock = Date.parse("2026-10-19T10:00:00Z");
@@ -805,7 +918,7 @@ describe("Phrase stuck batch recovery", () => {
     expect(scenario.phrase.createJobCalls).toBe(2);
   });
 
-  it("fails closed on multiple creation-time groups and lists every candidate", async () => {
+  it("fails closed when two submissions fall within one recovery group and lists each candidate once", async () => {
     const clock = Date.parse("2026-10-19T10:00:00Z");
     const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
     const stuck = await storeStuckBatch(scenario, "unknown", new Date(clock).toISOString());
@@ -820,24 +933,22 @@ describe("Phrase stuck batch recovery", () => {
     const before = await scenario.state.readBatch(stuck.key);
 
     const error = await scenario.workflow.submit(scenario.input).catch((caught: unknown) => caught);
+    const errorMessage = error instanceof Error ? error.message : "";
 
     expect(error).toMatchObject({
       name: "PhraseAmbiguousRecoveryError",
       message: expect.stringContaining(
-        `creation time ${firstCreatedAt}: uid fr-a, targetLang fr, dateCreated ${firstCreatedAt}`,
+        "More than one Phrase job matches a locale within a Phrase creation-time group",
       ),
-    });
-    expect(error).toMatchObject({
-      message: expect.stringContaining(`uid ja-a, targetLang ja, dateCreated ${firstCreatedAt}`),
     });
     expect(error).toMatchObject({
       message: expect.stringContaining(
-        `creation time ${secondCreatedAt}: uid fr-b, targetLang fr, dateCreated ${secondCreatedAt}`,
+        `creation time ${firstCreatedAt}: uid fr-a, targetLang fr, dateCreated ${firstCreatedAt}`,
       ),
     });
-    expect(error).toMatchObject({
-      message: expect.stringContaining(`uid ja-b, targetLang ja, dateCreated ${secondCreatedAt}`),
-    });
+    for (const uid of ["fr-a", "ja-a", "fr-b", "ja-b"]) {
+      expect(errorMessage.match(new RegExp(`uid ${uid}`, "g"))).toHaveLength(1);
+    }
     expect(error).toMatchObject({
       message: expect.stringContaining(
         "Move the jobs that do not belong to this batch to the Phrase recycle bin, then rerun.",
@@ -845,6 +956,31 @@ describe("Phrase stuck batch recovery", () => {
     });
     expect(await scenario.state.readBatch(stuck.key)).toEqual(before);
     expect(scenario.phrase.createJobCalls).toBe(1);
+  });
+
+  it("fails closed when more than one distant group matches the batch", async () => {
+    const clock = Date.parse("2026-10-19T10:00:00Z");
+    const scenario = makeJapaneseWorkflowScenario({ now: () => clock });
+    const stuck = await storeStuckBatch(scenario, "unknown", new Date(clock).toISOString());
+    const firstCreatedAt = new Date(clock).toISOString();
+    const secondCreatedAt = new Date(clock + 10_000).toISOString();
+    scenario.phrase.listedJobs = [
+      listedPhraseJob("fr-a", "fr", "source-a", firstCreatedAt),
+      listedPhraseJob("ja-a", "ja", "source-b", firstCreatedAt),
+      listedPhraseJob("fr-b", "fr", "source-c", secondCreatedAt),
+      listedPhraseJob("ja-b", "ja", "source-d", secondCreatedAt),
+    ];
+    const before = await scenario.state.readBatch(stuck.key);
+
+    const error = await scenario.workflow.submit(scenario.input).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      name: "PhraseAmbiguousRecoveryError",
+      message: expect.stringContaining(
+        "More than one Phrase creation-time group matches this batch",
+      ),
+    });
+    expect(await scenario.state.readBatch(stuck.key)).toEqual(before);
   });
 
   it("excludes a creation-time group whose UIDs are claimed by another stored batch", async () => {

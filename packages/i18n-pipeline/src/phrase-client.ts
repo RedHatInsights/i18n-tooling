@@ -63,6 +63,8 @@ export interface PhraseJobPart {
 /** A project job-list item may be incomplete; recovery decides whether it is safe to bind. */
 export interface PhraseJobListPart extends Partial<PhraseJobPart> {
   listingEntry: string;
+  /** False when `workflowLevel` defaults to the requested list level rather than Phrase metadata. */
+  workflowLevelReported?: boolean;
 }
 
 export interface ListPhraseJobsOptions {
@@ -389,6 +391,12 @@ export class PhraseClient {
             jobsByUid.set(job.uid, {
               ...existing,
               ...job,
+              ...(existing?.workflowLevelReported === true && job.workflowLevelReported !== true
+                ? {
+                    workflowLevel: existing.workflowLevel,
+                    workflowLevelReported: true,
+                  }
+                : {}),
               listingEntry: existing?.listingEntry ?? job.listingEntry,
             });
           } else {
@@ -627,7 +635,11 @@ function mapListedJobPart(
   listingEntry: string,
   defaultWorkflowLevel: number,
 ): PhraseJobListPart {
-  const job: PhraseJobListPart = { listingEntry, workflowLevel: defaultWorkflowLevel };
+  const job: PhraseJobListPart = {
+    listingEntry,
+    workflowLevel: defaultWorkflowLevel,
+    workflowLevelReported: false,
+  };
   if (!isRecord(value)) return job;
 
   if (typeof value.uid === "string") job.uid = value.uid;
@@ -640,6 +652,7 @@ function mapListedJobPart(
   }
   if (isRecord(value.workflowStep) && typeof value.workflowStep.workflowLevel === "number") {
     job.workflowLevel = value.workflowStep.workflowLevel;
+    job.workflowLevelReported = true;
   }
   if (typeof value.imported === "boolean") job.imported = value.imported;
   if (typeof value.status === "string") job.status = value.status;
