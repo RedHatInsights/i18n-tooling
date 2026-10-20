@@ -91,7 +91,9 @@ describe("Phrase TMS config parser", () => {
         ],
       }),
     ).toThrow(
-      new RegExp(`Invalid target repository locale: ${locale}.*${hint.replace(/[()]/g, "\\$&")}`),
+      new RegExp(
+        `Target repository locale "${locale}" is not a canonical FEO locale id.*${hint.replace(/[()]/g, "\\$&")}`,
+      ),
     );
   });
 
@@ -111,6 +113,25 @@ describe("Phrase TMS config parser", () => {
       });
     },
   );
+
+  it("limits a FEO config to the operator's 32 locales per Frontend", () => {
+    const locales =
+      "ar bg cs da de el es et fi fr ga hr hu id it ja ko lt lv mt nl pl pt ro sk sl sv th tr uk vi zh hi".split(
+        " ",
+      );
+    const parse = (count: number) =>
+      parsePhraseTmsConfig({
+        ...minimalConfig,
+        frontendTemplate: { path: "deploy/frontend.yaml" },
+        targetLocales: locales.slice(0, count).map((locale) => ({
+          phraseLocale: locale,
+          repositoryLocale: locale,
+          outputPath: `locales/${locale}.json`,
+        })),
+      });
+    expect(() => parse(32)).not.toThrow();
+    expect(() => parse(33)).toThrow("at most 32 target locales, got 33");
+  });
 
   it("leaves repository locales of non-FEO configs unrestricted", () => {
     expect(() =>

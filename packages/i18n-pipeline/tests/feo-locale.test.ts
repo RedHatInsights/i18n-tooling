@@ -5,9 +5,10 @@ import { Ajv2020 } from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
 import {
   FEO_LOCALE_PATTERN_SOURCE,
+  assertFeoLocaleId,
   exceedsFeoMessageLength,
-  feoLocaleHint,
   isFeoLocaleId,
+  overlongFeoTranslationsWarning,
   suggestFeoLocale,
 } from "../src/feo-locale.js";
 
@@ -33,9 +34,22 @@ describe("FEO locale ids", () => {
   it.each(REJECTED_FEO_LOCALES)("rejects %s and suggests %s", (locale, suggestion) => {
     expect(isFeoLocaleId(locale)).toBe(false);
     expect(suggestFeoLocale(locale)).toBe(suggestion);
-    expect(feoLocaleHint(locale)).toContain(
-      suggestion === undefined ? "canonical BCP 47" : `use "${suggestion}"`,
+    expect(() => assertFeoLocaleId(locale, "Locale")).toThrow(
+      `Locale ${JSON.stringify(locale)} is not a canonical FEO locale id; ` +
+        (suggestion === undefined ? "use canonical BCP 47" : `use "${suggestion}"`),
     );
+  });
+
+  // The CRD pattern accepts these, but locale resolution would only ever look for the replacement.
+  it.each([
+    ["iw", "he"],
+    ["in", "id"],
+    ["ji", "yi"],
+    ["mo", "ro"],
+    ["sh", "sr-Latn"],
+  ])("rejects deprecated alias %s and suggests %s", (locale, suggestion) => {
+    expect(isFeoLocaleId(locale)).toBe(false);
+    expect(suggestFeoLocale(locale)).toBe(suggestion);
   });
 
   it("rejects trailing newlines and other shapes outside language, script and region", () => {
@@ -59,6 +73,18 @@ describe("FEO locale ids", () => {
     // 4096 code points are 8192 UTF-16 units.
     expect(exceedsFeoMessageLength("\u{1F600}".repeat(4096))).toBe(false);
     expect(exceedsFeoMessageLength("\u{1F600}".repeat(4097))).toBe(true);
+  });
+
+  it("warns about overlong translations by key, and only about those", () => {
+    expect(overlongFeoTranslationsWarning("fr", { a: "x", b: "y".repeat(4096) })).toBeUndefined();
+    const warning = overlongFeoTranslationsWarning("fr", {
+      b: "y".repeat(4097),
+      a: "x".repeat(4097),
+      c: "ok",
+    });
+    expect(warning).toContain('FEO locale "fr"');
+    expect(warning).toContain("4096-character limit");
+    expect(warning).toMatch(/fall back to English: a, b$/);
   });
 
   it.each(["catalog-validation-config", "phrase-tms-config"])(

@@ -43,6 +43,8 @@ Add a `feo` entry such as:
 }
 ```
 
+Locale ids are canonical BCP 47 with only language, script and region, other than `en`: `fr`, `zh-CN`, `zh-Hant-TW`, `es-419`. Never `zh-cn`, `zh_CN`, `pt_BR` or a deprecated alias such as `iw`; normalize a developer-supplied tag to its canonical form (`zh-CN`, `pt-BR`, `he`) before writing it, and keep Phrase's own code (`zh_cn`) only in `phraseLocale`. The Frontend operator allows at most 32 locales per Frontend and 2048 translated keys per locale. English source catalogs may contain more messages; inlining checks the per-locale limit after selecting that Frontend's translations. Translations over 4096 characters are dropped to English with a warning.
+
 `locales` lists every target locale from the wizard up front, each mapped to its repository-relative flat JSON file. Until a locale's file or a `spec.locales` block for it exists, validation skips it with a warning, so the config is complete on first write. Leave the locale files to Phrase; never create them by hand. Phrase reconciliation is authoritative for these locale files and overwrites manual edits on the next reconcile.
 
 ## Translation ownership and inlining

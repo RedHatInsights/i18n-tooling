@@ -153,11 +153,12 @@
           },
           "locales": {
             "type": "object",
-            "description": "Map of non-English locale ids in canonical BCP 47 casing (for example fr, ja, zh-CN) to repository-relative flat locale JSON files; this may be empty. Every locale with a spec.locales block in the template must be listed. If neither a locale file nor a spec.locales block exists, validation reports the locale as undelivered and skips it with a warning.",
+            "maxProperties": 32,
+            "description": "Map of canonical BCP 47 locale ids other than en (for example fr, ja, zh-CN) to repository-relative flat locale JSON files; this may be empty, and holds at most 32 locales, the Frontend operator's per-Frontend limit. Every locale with a spec.locales block in the template must be listed. If neither a locale file nor a spec.locales block exists, validation reports the locale as undelivered and skips it with a warning.",
             "propertyNames": {
               "pattern": "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$",
               "not": { "const": "en" },
-              "description": "Canonical BCP 47 locale id (language, optional script, optional region, such as fr, zh-CN or zh-Hant-TW), accepted by FEO inline. English is the source language. Matches the Frontend operator CRD rule for spec.locales keys."
+              "description": "Canonical BCP 47 locale id (language, optional script, optional region, such as fr, zh-CN or zh-Hant-TW) other than en, the source language. Matches the Frontend operator CRD rule for spec.locales keys; the CLI also rejects deprecated aliases such as iw (use he)."
             },
             "additionalProperties": {
               "$ref": "#/$defs/path"

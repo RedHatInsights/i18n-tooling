@@ -1,4 +1,4 @@
-import { feoLocaleHint, isFeoLocaleId } from "./feo-locale.js";
+import { FEO_MAX_LOCALES, assertFeoLocaleId } from "./feo-locale.js";
 import type { LocaleCompletionPolicy, PhraseWorkflowConfig } from "./phrase-workflow.js";
 
 export interface PhraseTmsConfig {
@@ -148,16 +148,19 @@ export function validatePhraseWorkflowConfig(config: PhraseWorkflowConfig): void
     ) {
       throw new TypeError("Frontend template must have its own path");
     }
+    if (config.targetLocales.length > FEO_MAX_LOCALES) {
+      throw new TypeError(
+        `Frontend template allows at most ${FEO_MAX_LOCALES} target locales, got ${config.targetLocales.length}`,
+      );
+    }
   }
   const outputPaths = new Set<string>();
   for (const locale of config.targetLocales) {
     if (!locale.phraseLocale.trim() || !locale.repositoryLocale.trim()) {
       throw new TypeError("Each target locale needs Phrase language and repository locale");
     }
-    if (config.frontendTemplate && !isFeoLocaleId(locale.repositoryLocale)) {
-      throw new TypeError(
-        `Invalid target repository locale: ${locale.repositoryLocale}${feoLocaleHint(locale.repositoryLocale)}`,
-      );
+    if (config.frontendTemplate) {
+      assertFeoLocaleId(locale.repositoryLocale, "Target repository locale");
     }
     validateRepoPath(locale.outputPath, "Target output path");
     if (locale.outputPath === config.sourceCatalog.path) {

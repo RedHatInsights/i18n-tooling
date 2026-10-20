@@ -739,7 +739,7 @@ describe("FEO locale ids and CRD limits", () => {
     ["en", "canonical BCP 47"],
   ])("rejects locale %s with a hint", (locale, hint) => {
     const message = errorMessage(() => inlineFeoLocale(template, source, target, locale));
-    expect(message).toContain(`Invalid target locale: ${locale}`);
+    expect(message).toContain(`Target locale ${JSON.stringify(locale)} is not a canonical`);
     expect(message).toContain(hint.trim());
   });
 
@@ -761,52 +761,175 @@ describe("FEO locale ids and CRD limits", () => {
     // Re-inlining an existing locale does not add one.
     expect(inlineFeoLocale(at32, source, target, "fr")).toBe(at32);
     const message = errorMessage(() => inlineFeoLocale(at32, source, target, "ko"));
-    expect(message).toContain("33 locales");
+    expect(message).toContain('Frontend already has 32 spec.locales blocks; adding "ko"');
     expect(message).toContain("32-locale limit");
+    // A template already over the limit can still update the locales it has.
+    const at33 = withLocales(33);
+    expect(() =>
+      inlineFeoLocale(at33, source, { "searchEntries.users.title": "y" }, "aa"),
+    ).not.toThrow();
   });
 
-  function manyKeys(count: number): { template: string; catalog: Record<string, string> } {
+  it("names the Frontend that would exceed the locale limit", () => {
+    const multi = `kind: Template
+objects:
+  - kind: Frontend
+    metadata:
+      name: first
+    spec:
+${localesBlock(32)}      module:
+        defaultDocumentTitle: First
+  - kind: Frontend
+    metadata:
+      name: second
+    spec:
+      module:
+        defaultDocumentTitle: Second
+`;
+    const message = errorMessage(() =>
+      inlineFeoLocale(
+        multi,
+        extractFeoCatalog(multi),
+        { "objects.first.spec.module.defaultDocumentTitle": "Premier" },
+        "fr",
+      ),
+    );
+    expect(message).toContain('Frontend "first" already has 32 spec.locales blocks');
+  });
+
+  it("renames a block under a non-canonical spelling of the locale", () => {
+    const legacy = template.replace(
+      "      searchEntries:",
+      "      locales:\n        zh-cn:\n          searchEntries.users.title: old\n      searchEntries:",
+    );
+    const inlined = inlineFeoLocale(legacy, source, target, "zh-CN");
+    expect(parse(inlined).objects[0].spec.locales).toEqual({
+      "zh-CN": { "searchEntries.users.title": "Utilisateurs" },
+    });
+  });
+
+  it.each([
+    ["zh-CN", "zh-cn"],
+    ["zh-cn", "zh-CN"],
+    ["zh-cn", "ZH-CN"],
+  ])("consolidates %s and %s into one canonical block", (first, second) => {
+    const blocks = [first, second]
+      .map((id) => `        ${id}:\n          searchEntries.users.title: old\n`)
+      .join("");
+    const french = "        fr:\n          searchEntries.users.title: Bonjour\n";
+    const legacy = template.replace(
+      "      searchEntries:",
+      `      locales:\n${blocks}${french}      searchEntries:`,
+    );
+
+    const inlined = inlineFeoLocale(legacy, source, target, "zh-CN");
+
+    expect(parse(inlined).objects[0].spec.locales).toEqual({
+      "zh-CN": { "searchEntries.users.title": "Utilisateurs" },
+      fr: { "searchEntries.users.title": "Bonjour" },
+    });
+    expect(inlined).toContain(french);
+    expect(inlineFeoLocale(inlined, source, target, "zh-CN")).toBe(inlined);
+  });
+
+  function manyEntries(count: number): string {
     const entries = Array.from(
       { length: count },
       (_, index) => `        - id: e${index}\n          title: T\n`,
     );
-    return {
-      template: `kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n${entries.join("")}`,
-      catalog: Object.fromEntries(
-        Array.from({ length: count }, (_, index) => [`searchEntries.e${index}.title`, "T"]),
-      ),
-    };
+    return `kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n${entries.join("")}`;
   }
 
-  it("limits a locale to 2048 keys", () => {
-    const ok = manyKeys(2048);
-    const okSource = extractFeoCatalog(ok.template);
-    const inlined = inlineFeoLocale(ok.template, okSource, ok.catalog, "fr");
+  it.each([
+    ["zh-CN", "zh-cn"],
+    ["zh-cn", "zh-CN"],
+  ])("preserves sibling indentation after trailing comments in %s before %s", (first, second) => {
+    const blocks =
+      `        ${first}:\n          searchEntries.users.title: old\n          # locale note\n` +
+      `        ${second}:\n          searchEntries.users.title: old\n`;
+    const french = "        fr:\n          searchEntries.users.title: Bonjour\n";
+    const legacy = template.replace(
+      "      searchEntries:",
+      `      locales:\n${blocks}${french}      searchEntries:`,
+    );
+
+    const inlined = inlineFeoLocale(legacy, source, target, "zh-CN");
+
+    expect(parse(inlined).objects[0].spec.locales).toEqual({
+      "zh-CN": { "searchEntries.users.title": "Utilisateurs" },
+      fr: { "searchEntries.users.title": "Bonjour" },
+    });
+    expect(inlined).toContain(french);
+    expect(inlineFeoLocale(inlined, source, target, "zh-CN")).toBe(inlined);
+  });
+
+  it("allows more English messages than the per-locale key limit", () => {
+    const english = manyEntries(2049);
+    const source = extractFeoCatalog(english);
+    const inlined = inlineFeoLocale(english, source, { "searchEntries.e0.title": "T" }, "fr");
+
+    expect(Object.keys(source)).toHaveLength(2049);
+    expect(parse(inlined).objects[0].spec.locales.fr).toEqual({ "searchEntries.e0.title": "T" });
+  });
+
+  it("preserves the following spec field after an alias's trailing comment", () => {
+    const legacy = template.replace(
+      "      searchEntries:",
+      "      locales:\n        zh-CN:\n          searchEntries.users.title: old\n" +
+        "        zh-cn:\n          searchEntries.users.title: old\n          # alias note\n" +
+        "      searchEntries:",
+    );
+
+    const inlined = inlineFeoLocale(legacy, source, target, "zh-CN");
+
+    expect(parse(inlined).objects[0].spec.searchEntries).toEqual(
+      parse(template).objects[0].spec.searchEntries,
+    );
+    expect(inlineFeoLocale(inlined, source, target, "zh-CN")).toBe(inlined);
+  });
+
+  it("limits each translated locale to 2048 keys", () => {
+    const ok = manyEntries(2048);
+    const catalog = Object.fromEntries(
+      Array.from({ length: 2048 }, (_, index) => [`searchEntries.e${index}.title`, "T"]),
+    );
+    const inlined = inlineFeoLocale(ok, extractFeoCatalog(ok), catalog, "fr");
     expect(Object.keys(parse(inlined).objects[0].spec.locales.fr)).toHaveLength(2048);
 
-    const tooMany = manyKeys(2049);
+    const oversized = manyEntries(2049);
     const message = errorMessage(() =>
-      inlineFeoLocale(tooMany.template, extractFeoCatalog(tooMany.template), tooMany.catalog, "fr"),
+      inlineFeoLocale(
+        oversized,
+        extractFeoCatalog(oversized),
+        { ...catalog, "searchEntries.e2048.title": "T" },
+        "fr",
+      ),
     );
     expect(message).toContain("2049 keys");
     expect(message).toContain("2048-key limit");
   });
 
-  it("limits a message to 4096 characters, counting code points", () => {
+  it("omits translations over 4096 characters, counting code points", () => {
     const inline = (value: string) =>
-      inlineFeoLocale(template, source, { "searchEntries.users.title": value }, "fr");
-    expect(() => inline("a".repeat(4096))).not.toThrow();
+      parse(
+        inlineFeoLocale(
+          template,
+          source,
+          { "searchEntries.users.title": value, "searchEntries.roles.title": "Rôles" },
+          "fr",
+        ),
+      ).objects[0].spec.locales.fr;
+    expect(inline("a".repeat(4096))["searchEntries.users.title"]).toHaveLength(4096);
     // 4096 code points are 8192 UTF-16 units; 2049 emoji are 4098 units but only 2049 code points.
-    expect(() => inline("\u{1F600}".repeat(4096))).not.toThrow();
-    expect(() => inline("\u{1F600}".repeat(2049))).not.toThrow();
+    expect(inline("\u{1F600}".repeat(4096))).toHaveProperty("searchEntries.users.title");
+    expect(inline("\u{1F600}".repeat(2049))).toHaveProperty("searchEntries.users.title");
     for (const value of [
       "a".repeat(4097),
       "\u{1F600}".repeat(4097),
       `${"a".repeat(4096)}\u{1F600}`,
     ]) {
-      const message = errorMessage(() => inline(value));
-      expect(message).toContain("4096-character limit");
-      expect(message).toContain("searchEntries.users.title");
+      // Only the overlong message falls back to English; the rest of the locale is kept.
+      expect(inline(value)).toEqual({ "searchEntries.roles.title": "Rôles" });
     }
   });
 });

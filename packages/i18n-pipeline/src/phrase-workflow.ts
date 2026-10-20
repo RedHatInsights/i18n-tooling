@@ -16,6 +16,7 @@ import type {
   PhraseJobListPart,
   PhraseJobPart,
 } from "./phrase-client.js";
+import { overlongFeoTranslationsWarning, suggestFeoLocale } from "./feo-locale.js";
 import { targetAdapterId, validatePhraseWorkflowConfig } from "./phrase-config.js";
 import {
   extractFeoCatalog,
@@ -670,11 +671,15 @@ function makeBatchRecord(
     input.config.targetLocales.map((target) => {
       const { phraseLocale } = target;
       const previousLocale = previousRecord?.locales[phraseLocale];
+      // The previous batch may predate a rename of the repository locale (such as zh-cn to zh-CN).
+      const previousRepositoryLocale =
+        previousRecord?.config.targetLocales.find((entry) => entry.phraseLocale === phraseLocale)
+          ?.repositoryLocale ?? target.repositoryLocale;
       const previousBranch =
         previousLocale?.phase === "pr-created"
           ? (previousLocale.pullRequestBranch ??
             (previousRecord
-              ? localePullRequestBranch(previousRecord.key, target.repositoryLocale)
+              ? localePullRequestBranch(previousRecord.key, previousRepositoryLocale)
               : undefined))
           : undefined;
       if (previousLocale?.phase !== "pr-created" || isClosedInvalidPullRequest(previousLocale)) {
@@ -1707,6 +1712,17 @@ export class PhraseWorkflow {
     // Phrase-facing settings are part of the batch key, so a differing config only changes
     // repository-side mapping (output paths, adapters, completion policy). Adopt the latest.
     if (configChanged) {
+      // Older records inferred the PR branch from the config's repository locale. Preserve it
+      // before a canonical locale rename changes that inference.
+      for (const target of record.config.targetLocales) {
+        const locale = record.locales[target.phraseLocale];
+        if (locale?.phase === "pr-created" && !locale.pullRequestBranch) {
+          locale.pullRequestBranch = localePullRequestBranch(
+            locale.pullRequestBatchKey ?? record.key,
+            target.repositoryLocale,
+          );
+        }
+      }
       record.config = config;
       revision = await this.dependencies.state.updateBatch(record, revision);
     }
@@ -2223,6 +2239,9 @@ export class PhraseWorkflow {
               translated: Record<string, string>;
             }
           | undefined;
+        // Batches submitted before FEO locale ids had to be canonical may hold `zh-cn`; inline those
+        // under the canonical id, which also renames an existing block.
+        const feoLocale = suggestFeoLocale(target.repositoryLocale) ?? target.repositoryLocale;
         // Invalid exports remain reviewable, but must not enter generated runtime files.
         if (record.config.frontendTemplate && errors.length === 0) {
           const path = record.config.frontendTemplate.path;
@@ -2244,10 +2263,12 @@ export class PhraseWorkflow {
             additionalFiles.push({
               path,
               content: new TextEncoder().encode(
-                inlineFeoLocale(template, descriptors, translated, target.repositoryLocale),
+                inlineFeoLocale(template, descriptors, translated, feoLocale),
               ),
             });
             frontendTemplateData = { path, descriptors, translated };
+            const overlong = overlongFeoTranslationsWarning(feoLocale, translated);
+            if (overlong) warnings.push(overlong);
           } catch (error) {
             errors.push(
               `Frontend template inline failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -2311,7 +2332,7 @@ export class PhraseWorkflow {
                   latestTemplate,
                   frontendTemplateData.descriptors,
                   frontendTemplateData.translated,
-                  target.repositoryLocale,
+                  feoLocale,
                 );
               } catch (error) {
                 await this.closeBatch(

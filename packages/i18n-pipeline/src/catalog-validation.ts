@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import { checkCatalogs } from "./catalog-check.js";
 import { parseCatalogDocument } from "./catalog-document.js";
-import { feoLocaleHint, isFeoLocaleId } from "./feo-locale.js";
+import {
+  FEO_MAX_LOCALES,
+  assertFeoLocaleId,
+  overlongFeoTranslationsWarning,
+} from "./feo-locale.js";
 import {
   extractFeoCatalog,
   feoTemplateLocales,
@@ -237,14 +241,16 @@ function parseFeoTemplateValidation(value: unknown, index: number): FeoTemplateV
   const source = requiredString(entry.source, `${label}.source`);
   validateRepoPath(source, `${label}.source`);
   const localeEntries = recordValue(entry.locales, `${label}.locales`);
+  if (Object.keys(localeEntries).length > FEO_MAX_LOCALES) {
+    throw new TypeError(
+      `${label}.locales lists ${Object.keys(localeEntries).length} locales; a Frontend holds at ` +
+        `most ${FEO_MAX_LOCALES}`,
+    );
+  }
   const locales = Object.fromEntries(
     Object.entries(localeEntries).map(([locale, value]) => {
       const localeLabel = `${label}.locales[${JSON.stringify(locale)}]`;
-      if (!isFeoLocaleId(locale)) {
-        throw new TypeError(
-          `${localeLabel} must be a non-English FEO locale tag${feoLocaleHint(locale)}`,
-        );
-      }
+      assertFeoLocaleId(locale, `${label}.locales key`);
       const path = requiredString(value, localeLabel);
       validateRepoPath(path, localeLabel);
       return [locale, path] as const;
@@ -746,6 +752,8 @@ async function checkFeoTemplate(
       problems.push(feoLocaleProblem(entry, locale, localePath, errorMessage(error), englishDrift));
       continue;
     }
+    const overlong = overlongFeoTranslationsWarning(locale, target);
+    if (overlong) warnings.push(`${overlong} (in "${localePath}").`);
 
     if (!templateBytes.equals(Buffer.from(expectedTemplate, "utf8"))) {
       const updateCommand = englishDrift
@@ -760,10 +768,12 @@ async function checkFeoTemplate(
   }
 
   for (const locale of templateLocales) {
-    if (!isFeoLocaleId(locale)) {
+    try {
+      assertFeoLocaleId(locale, `FEO template "${entry.template}" spec.locales block`);
+    } catch (error) {
       problems.push(
-        `FEO template "${entry.template}" has spec.locales for "${locale}", which is not a ` +
-          `valid FEO locale id${feoLocaleHint(locale)}. Rename the block in the template.`,
+        `${errorMessage(error)}. Rename the block in the template; \`feo inline\` for the ` +
+          "canonical id renames it.",
       );
       continue;
     }

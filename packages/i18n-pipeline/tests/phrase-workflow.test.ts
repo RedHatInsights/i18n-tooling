@@ -3719,6 +3719,146 @@ describe("PhraseWorkflow submission", () => {
     expect(yaml).toContain("zh-CN:\n          searchEntries.roles.title: 职务");
   });
 
+  it("inlines a batch stored with a legacy non-canonical FEO locale under the canonical id", async () => {
+    const template =
+      "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      locales:\n        zh-cn:\n          searchEntries.roles.title: 旧\n      searchEntries:\n        - id: roles\n          title: Roles\n        - id: users\n          title: Users\n";
+    const source = new TextEncoder().encode(
+      '{\n  "searchEntries.roles.title": {\n    "defaultMessage": "Roles",\n    "description": "title of searchEntries.roles"\n  },\n' +
+        '  "searchEntries.users.title": {\n    "defaultMessage": "Users",\n    "description": "title of searchEntries.users"\n  }\n}\n',
+    );
+    const zhConfig: PhraseWorkflowConfig = {
+      ...config,
+      sourceCatalog: {
+        ...config.sourceCatalog,
+        path: "deploy/locales/feo-en.json",
+        filename: "feo-en.json",
+      },
+      targetLocales: [
+        {
+          phraseLocale: "zh_cn",
+          repositoryLocale: "zh-CN",
+          outputPath: "deploy/locales/zh-cn.json",
+        },
+      ],
+      frontendTemplate: { path: "deploy/frontend.yaml", generateSourceCatalog: true },
+    };
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.expectedFilename = "feo-en.json";
+    phrase.expectedTargetLangs = ["zh_cn"];
+    phrase.jobParts = [{ uid: "job-zh_cn", targetLang: "zh_cn", workflowLevel: 1 }];
+    phrase.targetBytes = new TextEncoder().encode(
+      JSON.stringify({
+        "searchEntries.roles.title": "角色",
+        "searchEntries.users.title": "用".repeat(4097),
+      }),
+    );
+    const repository = new FakeRepository();
+    repository.onReadFile = (path) =>
+      path === "deploy/frontend.yaml" ? new TextEncoder().encode(template) : source;
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes: source,
+      config: zhConfig,
+    });
+    // Batches submitted before canonical ids were enforced keep the old spelling in their config.
+    const [stored] = await state.listBatches();
+    stored!.record.config.targetLocales[0]!.repositoryLocale = "zh-cn";
+    phrase.jobStatus = "COMPLETED";
+
+    const results = await workflow.reconcile();
+
+    expect(results[0]?.phase).toBe("pr-created");
+    const pullRequest = repository.pullRequests[0];
+    expect(pullRequest?.branch).toMatch(/-zh-cn$/);
+    const yaml = new TextDecoder().decode(
+      pullRequest?.additionalFiles?.find((file) => file.path === "deploy/frontend.yaml")?.content,
+    );
+    expect(yaml).toContain("zh-CN:\n          searchEntries.roles.title: 角色\n");
+    expect(yaml).not.toContain("zh-cn:");
+    expect(yaml).not.toContain("searchEntries.users.title: 用");
+    expect(pullRequest?.body).toContain("Translation warnings");
+    expect(pullRequest?.body).toContain("fall back to English: searchEntries.users.title");
+  });
+
+  it("preserves an implicit legacy PR branch when resubmitting canonical FEO config", async () => {
+    const template =
+      "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      module:\n        defaultDocumentTitle: Home\n";
+    const source = new TextEncoder().encode(
+      `${JSON.stringify({ "module.defaultDocumentTitle": { defaultMessage: "Home", description: "defaultDocumentTitle of module" } }, null, 2)}\n`,
+    );
+    const canonicalConfig: PhraseWorkflowConfig = {
+      ...config,
+      sourceCatalog: {
+        ...config.sourceCatalog,
+        path: "locales/feo-en.json",
+        filename: "feo-en.json",
+      },
+      frontendTemplate: { path: "deploy/frontend.yaml", generateSourceCatalog: true },
+      targetLocales: [
+        { phraseLocale: "he", repositoryLocale: "he", outputPath: "locales/he.json" },
+        { phraseLocale: "fr", repositoryLocale: "fr", outputPath: "locales/fr.json" },
+      ],
+    };
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    phrase.expectedFilename = "feo-en.json";
+    phrase.expectedTargetLangs = ["he", "fr"];
+    phrase.jobParts = [
+      { uid: "job-he", targetLang: "he", workflowLevel: 1 },
+      { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
+    ];
+    phrase.jobStatuses.set("job-he", "COMPLETED");
+    phrase.targetBytes = new TextEncoder().encode('{"module.defaultDocumentTitle":"Hebrew home"}');
+    const repository = new FakeRepository();
+    repository.onReadFile = (path) =>
+      path === "deploy/frontend.yaml" ? new TextEncoder().encode(template) : source;
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const input = {
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes: source,
+      config: canonicalConfig,
+    };
+    await workflow.submit(input);
+    let stored = (await state.listBatches())[0]!;
+    stored.record.config.targetLocales[0]!.repositoryLocale = "iw";
+    await workflow.reconcile();
+    stored = (await state.listBatches())[0]!;
+    const originalBranch = stored.record.locales.he!.pullRequestBranch!;
+    expect(originalBranch).toMatch(/-iw$/);
+    // Older records identify the PR only by URL; its branch must be recovered before config adoption.
+    delete stored.record.locales.he!.pullRequestBranch;
+
+    await workflow.submit(input);
+    phrase.targetBytes = new TextEncoder().encode(
+      '{"module.defaultDocumentTitle":"Updated Hebrew home"}',
+    );
+    const results = await workflow.reconcile();
+
+    expect(results.find((result) => result.phraseLocale === "he")?.phase).toBe("pr-created");
+    expect((await state.listBatches())[0]!.record.locales.he!.pullRequestBranch).toBe(
+      originalBranch,
+    );
+    expect(repository.commitCount(originalBranch)).toBe(2);
+    expect(repository.branchHeads.size).toBe(1);
+    expect(phrase.createJobCalls).toBe(1);
+  });
+
   it("supersedes an open FEO re-export when base English drifts from committed source", async () => {
     const template =
       "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n        - id: roles\n          title: Roles\n";
