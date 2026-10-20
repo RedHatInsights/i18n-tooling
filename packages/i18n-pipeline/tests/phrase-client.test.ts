@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { PhraseClient, PhraseAsyncRequestError, phraseEndpoints } from "../src/phrase-client.js";
+import {
+  PhraseClient,
+  PhraseAsyncRequestError,
+  phraseEndpoints,
+  phraseJobUrl,
+  phraseProjectUrl,
+} from "../src/phrase-client.js";
 
 describe("PhraseClient", () => {
   it("exchanges a Platform API token and uploads the source catalog as a job", async () => {
@@ -86,6 +92,18 @@ describe("PhraseClient", () => {
       oauthTokenUrl: "https://us.phrase.com/idm/oauth/token",
       apiBaseUrl: "https://us.cloud.memsource.com/web",
     });
+    expect(phraseJobUrl("eu", "job-eu")).toBe(
+      "https://cloud.memsource.com/web/job/job-eu/translate",
+    );
+    expect(phraseProjectUrl("eu", "project-eu")).toBe(
+      "https://cloud.memsource.com/web/project2/show/project-eu",
+    );
+    expect(phraseJobUrl("us", "job/us")).toBe(
+      "https://us.cloud.memsource.com/web/job/job%2Fus/translate",
+    );
+    expect(phraseProjectUrl("us", "project-us")).toBe(
+      "https://us.cloud.memsource.com/web/project2/show/project-us",
+    );
   });
 
   it("maps the Phrase job filename and nullable import error field", async () => {

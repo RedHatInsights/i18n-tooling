@@ -909,7 +909,7 @@ describe("Phrase stuck batch recovery", () => {
       repairScope: phraseRepairScope,
     });
 
-    expect(results).toEqual([
+    expect(results).toMatchObject([
       {
         batchKey: stuck.key,
         phase: "retrying",
@@ -1421,7 +1421,7 @@ describe("PhraseWorkflow submission", () => {
 
     const results = await scenario.workflow.reconcile(phrasePins);
 
-    expect(results).toEqual([
+    expect(results).toMatchObject([
       {
         batchKey: submitted.key,
         phase: "failed",
@@ -1439,12 +1439,14 @@ describe("PhraseWorkflow submission", () => {
 
     const results = await scenario.workflow.reconcile(phrasePins);
 
-    expect(results).toContainEqual({
-      batchKey: submitted.key,
-      phraseLocale: "fr",
-      phase: "retrying",
-      reason: "Phrase has not yet exposed the new jobs; the next run continues this batch",
-    });
+    expect(results).toContainEqual(
+      expect.objectContaining({
+        batchKey: submitted.key,
+        phraseLocale: "fr",
+        phase: "retrying",
+        reason: "Phrase has not yet exposed the new jobs; the next run continues this batch",
+      }),
+    );
     expect(results).toContainEqual(
       expect.objectContaining({ batchKey: submitted.key, phraseLocale: "ja", phase: "pr-created" }),
     );
@@ -2127,12 +2129,14 @@ describe("PhraseWorkflow submission", () => {
     expect(retry.locales.fr?.phase).toBe("pr-created");
     expect(retry.locales.ja).toEqual({ phase: "pending" });
     expect(retry.locales.ko?.phase).toBe("pending");
-    expect(results).toContainEqual({
-      batchKey: retry.key,
-      phraseLocale: "ja",
-      phase: "retrying",
-      reason: "Phrase API returned HTTP 503",
-    });
+    expect(results).toContainEqual(
+      expect.objectContaining({
+        batchKey: retry.key,
+        phraseLocale: "ja",
+        phase: "retrying",
+        reason: "Phrase API returned HTTP 503",
+      }),
+    );
     expect(
       results.some(({ phraseLocale, phase }) => phraseLocale === "ko" && phase === "pr-created"),
     ).toBe(true);
@@ -2835,7 +2839,7 @@ describe("PhraseWorkflow submission", () => {
 
     const results = await workflow.reconcile();
 
-    expect(results).toEqual([
+    expect(results).toMatchObject([
       {
         batchKey: expect.any(String),
         phraseLocale: "fr",
@@ -4802,7 +4806,7 @@ describe("PhraseWorkflow submission", () => {
     state.corruptKeys.clear();
     repository.pullRequestStates.set("https://github.com/example/app/pull/42", "merged");
     phrase.getJobError = new PhraseApiError("Phrase API returned HTTP 404", 404);
-    expect(await workflow.reconcile()).toEqual([
+    expect(await workflow.reconcile()).toMatchObject([
       {
         batchKey: corrupt.key,
         phraseLocale: "fr",
@@ -4814,7 +4818,7 @@ describe("PhraseWorkflow submission", () => {
     const authMessage =
       "Phrase Platform OAuth returned HTTP 401 for the service account credentials";
     phrase.getJobError = new PhraseAuthError(authMessage, 401);
-    expect(await workflow.reconcile()).toEqual([
+    expect(await workflow.reconcile()).toMatchObject([
       { batchKey: corrupt.key, phraseLocale: "fr", phase: "retrying", reason: authMessage },
     ]);
 
@@ -4873,7 +4877,7 @@ describe("PhraseWorkflow submission", () => {
 
       const results = await workflow.reconcile(options);
 
-      expect(results).toEqual([
+      expect(results).toMatchObject([
         {
           batchKey: pending.key,
           phase: "failed",
@@ -5386,12 +5390,14 @@ describe("PhraseWorkflow submission", () => {
         "Phrase Platform OAuth returned HTTP 401 for the service account credentials";
 
       for (const outcome of [pinned, unpinned]) {
-        expect(outcome.results).toContainEqual({
-          batchKey: expect.any(String),
-          phraseLocale: "fr",
-          phase: "failed",
-          reason: authMessage,
-        });
+        expect(outcome.results).toContainEqual(
+          expect.objectContaining({
+            batchKey: expect.any(String),
+            phraseLocale: "fr",
+            phase: "failed",
+            reason: authMessage,
+          }),
+        );
         expect(outcome.locale).toMatchObject({ phase: "failed", failureReason: authMessage });
       }
     },
@@ -5806,12 +5812,14 @@ describe("PhraseWorkflow submission", () => {
     const results = await workflow.reconcile();
     const failed = await state.readBatch(submitted.key);
 
-    expect(results).toContainEqual({
-      batchKey: submitted.key,
-      phraseLocale: "fr",
-      phase: "retrying",
-      reason: "Phrase has not yet exposed the new jobs; the next run continues this batch",
-    });
+    expect(results).toContainEqual(
+      expect.objectContaining({
+        batchKey: submitted.key,
+        phraseLocale: "fr",
+        phase: "retrying",
+        reason: "Phrase has not yet exposed the new jobs; the next run continues this batch",
+      }),
+    );
     expect(failed?.record.locales.fr).toMatchObject({
       phase: "pending",
     });
@@ -6711,6 +6719,33 @@ describe("new locale PR assignees", () => {
   };
   const translatedMessages = { greeting: "Bonjour {name}" };
 
+  it("returns run metadata and stores assignees after a successful invalid-translation export", async () => {
+    const scenario = await makeFindingsScenario(sourceMessages, { greeting: "Bonjour" });
+    scenario.repository.sourceChangeAuthors = ["petrsimon"];
+
+    const [result] = await scenario.workflow.reconcile();
+    const stored = await scenario.state.readBatch(scenario.batch.key);
+
+    expect(result).toMatchObject({
+      batchKey: scenario.batch.key,
+      phraseLocale: "fr",
+      repositoryLocale: "fr",
+      phase: "invalid-translation",
+      jobUid: "job-fr",
+      jobStatus: "COMPLETED",
+      projectUid: "project-uid",
+      region: "us",
+      sourceCommit: "abc123",
+      createdAt: scenario.batch.createdAt,
+      validationErrorCount: 1,
+      validationWarningCount: 0,
+      pullRequestAssignees: ["petrsimon"],
+      pullRequestUrl: "https://github.com/example/app/pull/42",
+    });
+    expect(stored?.record.locales.fr?.pullRequestAssignees).toEqual(["petrsimon"]);
+    expect(stored?.record.locales.fr?.pullRequestAssigneesPending).toBeUndefined();
+  });
+
   it("resolves source-change authors once per batch for all new locale PRs", async () => {
     const scenario = makeJapaneseWorkflowScenario();
     await scenario.workflow.submit(scenario.input);
@@ -6907,5 +6942,19 @@ describe("new locale PR assignees", () => {
       headCommit: "current-source",
       baseCommit: "latest-source",
     });
+  });
+});
+
+describe("PhraseWorkflow submit outcome", () => {
+  it("distinguishes a new batch from a reused unchanged source", async () => {
+    const scenario = makeJapaneseWorkflowScenario();
+
+    const first = await scenario.workflow.submitWithOutcome(scenario.input);
+    const repeated = await scenario.workflow.submitWithOutcome(scenario.input);
+
+    expect(first.createdThisRun).toBe(true);
+    expect(repeated.createdThisRun).toBe(false);
+    expect(repeated.batch.key).toBe(first.batch.key);
+    expect(scenario.phrase.createJobCalls).toBe(1);
   });
 });

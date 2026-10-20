@@ -126,6 +126,8 @@ export interface PhraseLocaleRecord {
   pullRequestCommentPending?: boolean;
   /** Retry the initial best-effort assignee update for this newly created PR. */
   pullRequestAssigneesPending?: boolean;
+  /** Logins returned by the successful first assignment attempt for this PR. */
+  pullRequestAssignees?: string[];
   /** A retry batch owns re-exporting this carried PR. */
   pullRequestReexportDelegated?: boolean;
 }
@@ -265,6 +267,12 @@ export interface PhraseSubmitInput {
   retryFailed?: boolean;
 }
 
+export interface PhraseSubmitOutcome {
+  batch: PhraseBatchRecord;
+  /** True only when this call created the batch record instead of resuming an existing one. */
+  createdThisRun: boolean;
+}
+
 export interface PhraseReconcileResult {
   batchKey: string;
   /** Omitted when the whole batch could not be reconciled on this run. */
@@ -274,6 +282,16 @@ export interface PhraseReconcileResult {
    * `invalid-translation` means a locale PR was delivered with translation validation errors.
    */
   phase: "pending" | "retrying" | "failed" | "superseded" | "pr-created" | "invalid-translation";
+  repositoryLocale?: string;
+  jobUid?: string;
+  jobStatus?: string;
+  projectUid?: string;
+  region?: "eu" | "us";
+  sourceCommit?: string;
+  createdAt?: string;
+  validationErrorCount?: number;
+  validationWarningCount?: number;
+  pullRequestAssignees?: string[];
   pullRequestUrl?: string;
   reason?: string;
 }
@@ -375,7 +393,7 @@ const PHRASE_JOB_MAX_WORKFLOW_LEVEL = 15;
 // Phrase can timestamp parts of one create request seconds apart across a second boundary.
 const PHRASE_JOB_RECOVERY_CLUSTER_GAP_MS = 5_000;
 const PHRASE_JOB_VISIBILITY_GRACE_LABEL = "15 minutes";
-const NO_PHRASE_JOB_CREATED_VOID_REASON = `No Phrase job was created for this batch; voided after ${PHRASE_JOB_VISIBILITY_GRACE_LABEL}`;
+export const NO_PHRASE_JOB_CREATED_VOID_REASON = `No Phrase job was created for this batch; voided after ${PHRASE_JOB_VISIBILITY_GRACE_LABEL}`;
 const DELIVERY_FINAL_LOCALE_PHASES: ReadonlySet<PhraseLocalePhase> = new Set([
   "pr-created",
   "failed",
@@ -407,6 +425,8 @@ interface PhraseReconcileContext {
   /** Source-change authors per batch key, resolved once per run for all of its locales. */
   sourceChangeAuthors: Map<string, Promise<string[]>>;
   verifiedJobs: Map<string, PhraseJobPart[]>;
+  /** Latest job statuses seen this run, for reporting only; never treated as pin-verified. */
+  reportedJobs: Map<string, PhraseJobPart[]>;
   jobVerificationFailures: Map<string, Map<string, unknown>>;
   verifiedJobSnapshots: Map<string, { projectUid: string; jobUids: string[] }>;
   pullRequestOwners: Map<string, string>;
@@ -462,11 +482,11 @@ function translationFindingsStatusLine(findings: TranslationFinding[]): string {
   return `${counts.join(" · ")} — see the latest 🌐 Translation check comment.`;
 }
 
-function normalizeTableCell(value: string): string {
+export function normalizeTableCell(value: string): string {
   return value.replace(/[\r\n]+/g, " ").replaceAll("|", "\\|");
 }
 
-function codeSpan(value: string): string {
+export function codeSpan(value: string): string {
   const normalized = normalizeTableCell(value);
   const backtickRuns = normalized.match(/`+/g) ?? [];
   const fence = "`".repeat(Math.max(1, ...backtickRuns.map((run) => run.length + 1)));
@@ -1152,7 +1172,7 @@ function hasValidationFailure(record: PhraseBatchRecord): boolean {
 }
 function assessReadiness(jobs: PhraseJobPart[]): LocaleReadiness {
   const finalLevel = Math.max(...jobs.map((job) => job.lastWorkflowLevel ?? job.workflowLevel));
-  const finalJobs = jobs.filter((job) => job.workflowLevel === finalLevel);
+  const finalJobs = finalWorkflowJobs(jobs);
   if (finalJobs.length === 0) {
     return {
       phase: "failed",
@@ -1173,6 +1193,19 @@ function assessReadiness(jobs: PhraseJobPart[]): LocaleReadiness {
     return { phase: "failed", reason: `Final Phrase job ended with status ${finalJob.status}` };
   }
   return finalJob.status === "COMPLETED" ? { phase: "ready", finalJob } : { phase: "pending" };
+}
+
+function finalWorkflowJobs(jobs: readonly PhraseJobPart[]): PhraseJobPart[] {
+  const finalLevel = Math.max(...jobs.map((job) => job.lastWorkflowLevel ?? job.workflowLevel));
+  return jobs.filter((job) => job.workflowLevel === finalLevel);
+}
+
+export function phraseFinalWorkflowJob(
+  jobs: readonly PhraseJobPart[],
+  phraseLocale: string,
+): PhraseJobPart | undefined {
+  const finalJobs = finalWorkflowJobs(jobs.filter((job) => job.targetLang === phraseLocale));
+  return finalJobs.length === 1 ? finalJobs[0] : undefined;
 }
 
 function classifyImportJobParts(
@@ -1264,6 +1297,10 @@ export class PhraseWorkflow {
   }
 
   async submit(input: PhraseSubmitInput): Promise<PhraseBatchRecord> {
+    return (await this.submitWithOutcome(input)).batch;
+  }
+
+  async submitWithOutcome(input: PhraseSubmitInput): Promise<PhraseSubmitOutcome> {
     validatePhraseWorkflowConfig(input.config);
     const pins: PhrasePinOptions =
       input.expectedProjectUid !== undefined || input.expectedSourceFilename !== undefined
@@ -1350,7 +1387,10 @@ export class PhraseWorkflow {
           previousFailedBatch = existing.record;
           continue;
         }
-        return await this.resumeSubmission(existing, input.config, pins);
+        return {
+          batch: await this.resumeSubmission(existing, input.config, pins),
+          createdThisRun: false,
+        };
       } catch (error) {
         if (error instanceof PhraseStuckBatchVoidedError) {
           previousFailedBatch = error.record;
@@ -1397,6 +1437,7 @@ export class PhraseWorkflow {
       assignmentWarnings: new Map(),
       sourceChangeAuthors: new Map(),
       verifiedJobs: new Map(),
+      reportedJobs: new Map(),
       jobVerificationFailures: new Map(),
       verifiedJobSnapshots: new Map(),
       pullRequestOwners: new Map(),
@@ -1595,7 +1636,49 @@ export class PhraseWorkflow {
         });
       }
     }
-    return results;
+    return results.map((result) => {
+      const stored = context.storedBatches.get(result.batchKey);
+      if (!stored) return result;
+      const { record } = stored;
+      const locale = result.phraseLocale ? record.locales[result.phraseLocale] : undefined;
+      const target = result.phraseLocale
+        ? record.config.targetLocales.find(
+            (candidate) => candidate.phraseLocale === result.phraseLocale,
+          )
+        : undefined;
+      const jobs =
+        context.reportedJobs.get(record.key) ?? context.verifiedJobs.get(record.key) ?? record.jobs;
+      const finalJob = result.phraseLocale
+        ? phraseFinalWorkflowJob(jobs, result.phraseLocale)
+        : undefined;
+      const validationErrorCount = locale?.validationErrors?.length ?? 0;
+      const validationWarningCount = locale?.validationWarnings?.length ?? 0;
+      return {
+        ...result,
+        ...(result.phase === "pr-created" && validationErrorCount
+          ? { phase: "invalid-translation" as const }
+          : {}),
+        ...(target ? { repositoryLocale: result.repositoryLocale ?? target.repositoryLocale } : {}),
+        ...(finalJob?.uid || result.jobUid ? { jobUid: result.jobUid ?? finalJob?.uid } : {}),
+        ...(finalJob?.status || result.jobStatus
+          ? { jobStatus: result.jobStatus ?? finalJob?.status }
+          : {}),
+        projectUid: result.projectUid ?? record.config.projectUid,
+        region: result.region ?? record.config.region,
+        sourceCommit: result.sourceCommit ?? record.sourceCommit,
+        createdAt: result.createdAt ?? record.createdAt,
+        validationErrorCount: result.validationErrorCount ?? validationErrorCount,
+        validationWarningCount: result.validationWarningCount ?? validationWarningCount,
+        ...(result.pullRequestUrl || locale?.pullRequestUrl
+          ? { pullRequestUrl: result.pullRequestUrl ?? locale?.pullRequestUrl }
+          : {}),
+        ...(result.pullRequestAssignees?.length || locale?.pullRequestAssignees?.length
+          ? {
+              pullRequestAssignees: result.pullRequestAssignees ?? locale?.pullRequestAssignees,
+            }
+          : {}),
+      };
+    });
   }
 
   /** Never throws: assignment problems become warnings on this locale's result. */
@@ -1713,6 +1796,7 @@ export class PhraseWorkflow {
       : undefined;
     const updatedLocale = { ...locale };
     delete updatedLocale.pullRequestAssigneesPending;
+    if (assignedLogins.length) updatedLocale.pullRequestAssignees = [...assignedLogins];
     const updatedRecord: PhraseBatchRecord = {
       ...record,
       locales: { ...record.locales, [phraseLocale]: updatedLocale },
@@ -1732,7 +1816,7 @@ export class PhraseWorkflow {
     sourceDigest: string,
     previousRecord?: PhraseBatchRecord,
     pins: PhrasePinOptions = {},
-  ): Promise<PhraseBatchRecord> {
+  ): Promise<PhraseSubmitOutcome> {
     if (previousRecord && hasPhrasePins(pins)) {
       assertExpectedBatchConfig(previousRecord, pins);
     }
@@ -1746,7 +1830,12 @@ export class PhraseWorkflow {
       revision = await this.dependencies.state.createBatch(record);
     } catch (error) {
       const raced = await this.dependencies.state.readBatch(key);
-      if (raced) return this.resumeSubmission(raced, input.config, pins);
+      if (raced) {
+        return {
+          batch: await this.resumeSubmission(raced, input.config, pins),
+          createdThisRun: false,
+        };
+      }
       throw error;
     }
 
@@ -1826,7 +1915,7 @@ export class PhraseWorkflow {
     const visibilityError = firstPhraseJobVisibilityFailure(retryableImportFailures);
     if (visibilityError) throw visibilityError;
     await this.delegateRetryParent(finished.record, finished.revision, pins);
-    return finished.record;
+    return { batch: finished.record, createdThisRun: true };
   }
 
   private async readOtherBatchRecords(batchKey: string): Promise<{
@@ -2517,6 +2606,7 @@ export class PhraseWorkflow {
     if (refreshedJobs.length) {
       const refreshedByUid = new Map(refreshedJobs.map((job) => [job.uid, job]));
       const jobs = record.jobs.map((job) => refreshedByUid.get(job.uid) ?? job);
+      context.reportedJobs.set(record.key, jobs);
       // Avoid a state-branch commit on every scheduled run when nothing moved in Phrase.
       if (stableJson(jobs) !== stableJson(record.jobs)) {
         record.jobs = jobs;

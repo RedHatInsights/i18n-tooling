@@ -35,6 +35,14 @@ export function phraseEndpoints(region: PhraseRegion): {
   };
 }
 
+export function phraseJobUrl(region: PhraseRegion, jobUid: string): string {
+  return `${phraseEndpoints(region).apiBaseUrl}/job/${encodeURIComponent(jobUid)}/translate`;
+}
+
+export function phraseProjectUrl(region: PhraseRegion, projectUid: string): string {
+  return `${phraseEndpoints(region).apiBaseUrl}/project2/show/${encodeURIComponent(projectUid)}`;
+}
+
 export interface CreatePhraseJobInput {
   projectUid: string;
   filename: string;
