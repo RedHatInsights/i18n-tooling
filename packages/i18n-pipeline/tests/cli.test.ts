@@ -477,6 +477,50 @@ objects:
     expect(errors).toEqual([expect.stringContaining("out of sync with the FEO inline output")]);
   });
 
+  it.each([
+    ["zh-cn", 'use "zh-CN"'],
+    ["fr_FR", "canonical BCP 47"],
+    ["en", "canonical BCP 47"],
+  ])("rejects feo inline --locale %s without writing the template", async (locale, hint) => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-feo-locale-"));
+    const template =
+      "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      module:\n        defaultDocumentTitle: Home\n";
+    await mkdir(join(projectRoot, "locales"), { recursive: true });
+    await writeFile(join(projectRoot, "frontend.yaml"), template);
+    await writeFile(
+      join(projectRoot, "locales/source.json"),
+      JSON.stringify({
+        "module.defaultDocumentTitle": { defaultMessage: "Home", description: "" },
+      }),
+    );
+    await writeFile(
+      join(projectRoot, "locales/target.json"),
+      JSON.stringify({ "module.defaultDocumentTitle": "Accueil" }),
+    );
+    const errors: string[] = [];
+
+    const exitCode = await runCli(
+      [
+        "feo",
+        "inline",
+        "--template",
+        "frontend.yaml",
+        "--source",
+        "locales/source.json",
+        "--target",
+        "locales/target.json",
+        "--locale",
+        locale,
+      ],
+      { cwd: projectRoot, stdout: () => undefined, stderr: (message) => errors.push(message) },
+    );
+
+    expect(exitCode).toBe(1);
+    expect(errors.join("\n")).toContain(`Invalid target locale: ${locale}`);
+    expect(errors.join("\n")).toContain(hint);
+    expect(await readFile(join(projectRoot, "frontend.yaml"), "utf8")).toBe(template);
+  });
+
   it("extracts, inlines and checks a multi-Frontend template without writing in check mode", async () => {
     projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-feo-"));
     const templatePath = join(projectRoot, "frontend.yaml");

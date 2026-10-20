@@ -89,6 +89,10 @@ function feoValidationConfig(
   };
 }
 
+function feoLocalesConfig(locales: Record<string, string>) {
+  return parseCatalogValidationConfig(feoValidationConfig(locales));
+}
+
 async function runFeo(args: string[]): Promise<void> {
   const errors: string[] = [];
   const exitCode = await runCli(["feo", ...args], {
@@ -1460,6 +1464,45 @@ objects:
     expect(result.errors).toEqual([]);
   });
 
+  it.each([
+    ["zh-cn", 'use "zh-CN"'],
+    ["fr-fr", 'use "fr-FR"'],
+    ["zh-hant-tw", 'use "zh-Hant-TW"'],
+    ["fr-FR-u-nu-latn", "canonical BCP 47"],
+    ["fr_FR", "canonical BCP 47"],
+    ["EN", "canonical BCP 47"],
+    ["en", "canonical BCP 47"],
+  ])("rejects FEO locale id %s in the catalog validation config", (locale, hint) => {
+    const run = () => feoLocalesConfig({ [locale]: "deploy/locales/x.json" });
+    expect(run).toThrow("must be a non-English FEO locale tag; ");
+    expect(run).toThrow(hint);
+  });
+
+  it.each(["fr", "ko", "ja", "zh-CN", "zh-Hant-TW", "es-419", "fil", "sr-Latn"])(
+    "accepts canonical FEO locale id %s in the catalog validation config",
+    (locale) => {
+      expect(feoLocalesConfig({ [locale]: "deploy/locales/x.json" }).feo?.[0]?.locales).toEqual({
+        [locale]: "deploy/locales/x.json",
+      });
+    },
+  );
+
+  it("reports a non-canonical spec.locales block in the template with the canonical spelling", async () => {
+    await createFeoProject();
+    const path = join(projectRoot!, "deploy/frontend.yaml");
+    const template = await readFile(path, "utf8");
+    await writeFile(path, template.replace("\n        fr:", "\n        fr-fr:"));
+
+    const result = await runValidation(feoValidationConfig());
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors.join("\n")).toContain(
+      'FEO template "deploy/frontend.yaml" has spec.locales for "fr-fr", which is not a valid ' +
+        'FEO locale id; use "fr-FR"',
+    );
+    expect(result.errors.join("\n")).not.toContain('spec.locales for "fr-fr", but its');
+  });
+
   it("rejects invalid FEO locale tags and paths outside the consumer root", () => {
     expect(() =>
       parseCatalogValidationConfig({
@@ -1474,6 +1517,9 @@ objects:
         ],
       }),
     ).toThrow("must be a non-English FEO locale tag");
+    expect(() => feoLocalesConfig({ "zh-cn": "deploy/locales/zh-CN.json" })).toThrow(
+      'must be a non-English FEO locale tag; use "zh-CN"',
+    );
     expect(() =>
       parseCatalogValidationConfig({
         version: 1,

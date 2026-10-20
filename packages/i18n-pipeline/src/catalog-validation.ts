@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import { checkCatalogs } from "./catalog-check.js";
 import { parseCatalogDocument } from "./catalog-document.js";
+import { feoLocaleHint, isFeoLocaleId } from "./feo-locale.js";
 import {
   extractFeoCatalog,
   feoTemplateLocales,
@@ -24,7 +25,6 @@ import type {
 
 const OUTPUT_PLACEHOLDER = "{output}";
 const DEFAULT_CATALOG_EXTENSION = ".json";
-const FEO_LOCALE_PATTERN = /^[a-z]{2,3}(?:-[A-Za-z0-9]+)*$/;
 
 export interface CatalogFileReference {
   path: string;
@@ -240,8 +240,10 @@ function parseFeoTemplateValidation(value: unknown, index: number): FeoTemplateV
   const locales = Object.fromEntries(
     Object.entries(localeEntries).map(([locale, value]) => {
       const localeLabel = `${label}.locales[${JSON.stringify(locale)}]`;
-      if (!FEO_LOCALE_PATTERN.test(locale) || locale === "en") {
-        throw new TypeError(`${localeLabel} must be a non-English FEO locale tag`);
+      if (!isFeoLocaleId(locale)) {
+        throw new TypeError(
+          `${localeLabel} must be a non-English FEO locale tag${feoLocaleHint(locale)}`,
+        );
       }
       const path = requiredString(value, localeLabel);
       validateRepoPath(path, localeLabel);
@@ -758,6 +760,13 @@ async function checkFeoTemplate(
   }
 
   for (const locale of templateLocales) {
+    if (!isFeoLocaleId(locale)) {
+      problems.push(
+        `FEO template "${entry.template}" has spec.locales for "${locale}", which is not a ` +
+          `valid FEO locale id${feoLocaleHint(locale)}. Rename the block in the template.`,
+      );
+      continue;
+    }
     if (Object.hasOwn(entry.locales, locale)) continue;
     problems.push(
       `FEO template "${entry.template}" has spec.locales for "${locale}", but its "feo" entry ` +

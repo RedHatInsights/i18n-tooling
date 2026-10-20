@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "checks": [],
+  "feo": [
+    {
+      "template": "deploy/frontend.yaml",
+      "source": "deploy/locales/translation-template.json",
+      "locales": {
+        "zh-cn": "deploy/locales/zh-cn.json"
+      }
+    }
+  ]
+}

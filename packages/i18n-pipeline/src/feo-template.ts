@@ -7,6 +7,14 @@ import {
   type YAMLMap,
   type Document,
 } from "yaml";
+import {
+  FEO_MAX_LOCALES,
+  FEO_MAX_LOCALE_KEYS,
+  FEO_MAX_MESSAGE_LENGTH,
+  exceedsFeoMessageLength,
+  feoLocaleHint,
+  isFeoLocaleId,
+} from "./feo-locale.js";
 
 type Descriptor = { defaultMessage: string; description: string };
 export type FeoCatalog = Record<string, Descriptor>;
@@ -344,8 +352,8 @@ export function inlineFeoLocale(
   target: Record<string, string>,
   locale: string,
 ): string {
-  if (!/^[a-z]{2,3}(?:-[A-Za-z0-9]+)*$/.test(locale) || locale === "en")
-    throw new Error(`Invalid target locale: ${locale}`);
+  if (!isFeoLocaleId(locale))
+    throw new Error(`Invalid target locale: ${locale}${feoLocaleHint(locale)}`);
   const doc = parse(template);
   const { catalog, specs, owned, prefixes } = collect(doc);
   for (const key of new Set([...Object.keys(source), ...Object.keys(catalog)])) {
@@ -359,6 +367,11 @@ export function inlineFeoLocale(
       throw new Error(`Unknown translation key: ${key}${hint}`);
     }
     if (typeof value !== "string" || !value.trim()) throw new Error(`Invalid translation: ${key}`);
+    if (exceedsFeoMessageLength(value)) {
+      throw new Error(
+        `FEO spec.locales translation exceeds the ${FEO_MAX_MESSAGE_LENGTH}-character limit: ${key}`,
+      );
+    }
   }
   const sorted = Object.fromEntries(Object.entries(target).sort(byKey));
   const changes: { start: number; end: number; text: string }[] = [];
@@ -378,6 +391,19 @@ export function inlineFeoLocale(
       (item) => item.key && isScalar(item.key) && item.key.value === locale,
     );
     if (!Object.keys(ownTarget).length && !pair) continue;
+    if (Object.keys(ownTarget).length > FEO_MAX_LOCALE_KEYS) {
+      throw new Error(
+        `FEO spec.locales.${locale} has ${Object.keys(ownTarget).length} keys, exceeding the ` +
+          `${FEO_MAX_LOCALE_KEYS}-key limit per locale`,
+      );
+    }
+    const localeCount = (existing?.items.length ?? 0) + (pair ? 0 : 1);
+    if (localeCount > FEO_MAX_LOCALES) {
+      throw new Error(
+        `FEO spec.locales would have ${localeCount} locales, exceeding the ` +
+          `${FEO_MAX_LOCALES}-locale limit per Frontend`,
+      );
+    }
     const keyRange = pair && isScalar(pair.key) ? pair.key.range : undefined;
     const valueRange = pair && isMap(pair.value) ? pair.value.range : undefined;
     const indentAt = (offset: number) => offset - template.lastIndexOf("\n", offset - 1) - 1;

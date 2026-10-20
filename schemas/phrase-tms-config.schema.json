@@ -164,6 +164,20 @@
               "adapter": { "const": "formatjs-json" },
               "locale": { "const": "en" }
             }
+          },
+          "targetLocales": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "repositoryLocale": {
+                  "type": "string",
+                  "description": "Becomes a key of spec.locales, so it must be a canonical BCP 47 locale id (language, optional script, optional region, such as fr, zh-CN or zh-Hant-TW) other than en. Matches the Frontend operator CRD rule. phraseLocale may keep Phrase's own code, such as zh_cn.",
+                  "pattern": "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$",
+                  "not": { "const": "en" }
+                }
+              }
+            }
           }
         }
       }
