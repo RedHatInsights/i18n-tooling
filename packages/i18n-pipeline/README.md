@@ -69,6 +69,35 @@ The OpenAPI adapter reads OpenAPI 3 JSON or YAML. It extracts component schemas 
 
 `validate` also reads `I18N_CATALOG_ADAPTER`, `I18N_CATALOG_PATH`, `I18N_CATALOG_ROLE`, `I18N_CATALOG_LOCALE`, and `I18N_CATALOG_CONFIG`, which lets the reusable workflow pass settings without building shell commands from inputs.
 
+## FEO template localization
+
+`i18n-pipeline feo extract --template deploy/frontend.yaml --output deploy/locales/translation-template.json` extracts the Frontend objects in an OpenShift Template. `feo inline` writes only `spec.locales.<locale>` and preserves the rest of the YAML. The default `--kind` is `Frontend`; pass `--kind FrontendEnvironment` for a single FrontendEnvironment custom resource.
+
+FrontendEnvironment extraction combines multiple custom resources into one English catalog. Shared keys with the same English text are included once; conflicting English text reports both file paths. The keys are `bundles.<id>.title`, `bundles.<id>.description`, `serviceCategories.<id>.title`, and `serviceCategories.<id>.groups.<group-id>.title`. Jinja `{{ ... }}` placeholders are preserved. Jinja statements/comments and placeholders inside translatable fields or `spec.locales` are rejected. Inlining validates the whole `spec.locales` block and any existing `spec.enabledLocales` against the operator CRD.
+
+```bash
+i18n-pipeline feo extract --kind FrontendEnvironment \
+  --template deploy/frontend-environment.yaml \
+  --template deploy/frontend-environment-stage-multicluster.yaml \
+  --template deploy/frontend-environment-prod-multicluster.yaml \
+  --output deploy/locales/frontend-environment-translation-template.json
+
+i18n-pipeline feo inline --kind FrontendEnvironment \
+  --template deploy/frontend-environment.yaml \
+  --source deploy/locales/frontend-environment-translation-template.json \
+  --target deploy/locales/fr.json --locale fr
+i18n-pipeline feo inline --kind FrontendEnvironment \
+  --template deploy/frontend-environment-stage-multicluster.yaml \
+  --source deploy/locales/frontend-environment-translation-template.json \
+  --target deploy/locales/fr.json --locale fr
+i18n-pipeline feo inline --kind FrontendEnvironment \
+  --template deploy/frontend-environment-prod-multicluster.yaml \
+  --source deploy/locales/frontend-environment-translation-template.json \
+  --target deploy/locales/fr.json --locale fr
+```
+
+Add `--check` to extraction or inlining for CI drift detection without writing files. Frontend retains its single-template behavior; only FrontendEnvironment extraction accepts repeated `--template` options.
+
 ## Generic project validation
 
 Use `i18n-pipeline validate-project --config <path>` for a repository-wide validation plan. A plan can compare several catalogs, use different adapters for each input/output, derive locale checks from the Phrase TMS config, check generated files against fresh outputs, and reject catalog files nobody declared:

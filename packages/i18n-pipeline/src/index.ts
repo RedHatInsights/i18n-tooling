@@ -14,6 +14,20 @@ export {
 export { CatalogFormatError } from "./catalog-format-error.js";
 export { parseCatalogDocument, serializeCatalogDocument } from "./catalog-document.js";
 export {
+  extractFeoCatalog,
+  feoTemplateLocales,
+  formatFeoCatalog,
+  inlineFeoLocale,
+  serializeFeoCatalog,
+  type FeoCatalog,
+} from "./feo-template.js";
+export {
+  extractFeoEnvironmentCatalog,
+  extractFeoEnvironmentCatalogs,
+  inlineFeoEnvironmentLocale,
+  type FeoEnvironmentTemplateInput,
+} from "./feo-environment.js";
+export {
   argumentMismatchHint,
   describeArgumentMismatch,
   lintSourceCatalog,

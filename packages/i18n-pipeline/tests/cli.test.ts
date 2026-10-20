@@ -50,6 +50,10 @@ function generatedSourceTmsConfig(): string {
   });
 }
 
+function parseTemplatedYaml(template: string): ReturnType<typeof parse> {
+  return parse(template.replace(/\{\{[\s\S]*?\}\}/g, (match) => match.replace(/[^\r\n]/g, "x")));
+}
+
 function credentialTrackingEnv(reads: string[]): NodeJS.ProcessEnv {
   const credentials = new Set([
     "PHRASE_PLATFORM_API_TOKEN",
@@ -602,6 +606,174 @@ objects:
     expect(await run([...extract, "--check"])).toBe(1);
     expect(await run([...inline, "--check"])).toBe(1);
     expect(errors.at(-1)).toContain("English source changed");
+  });
+
+  it("extracts and inlines one FrontendEnvironment catalog across Jinja templates", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-feo-environment-"));
+    await mkdir(join(projectRoot, "locales"), { recursive: true });
+    const templateFiles = ["main.yaml", "stage-multicluster.yaml", "prod-multicluster.yaml"];
+    const templateFor = (name: string, extraBundle = false) =>
+      `# ${name} environment\napiVersion: cloud.redhat.com/v1alpha1\nkind: FrontendEnvironment\nmetadata:\n  name: {{env_name}}\nspec:\n  hostname: {{env_name}}.{{hostname}}\n  reverseProxyHostname: reverse-proxy.{{hostname}}\n  sso: {{sso_source}}\n  ssl: {{ssl}}\n  targetNamespaces:\n    - {{chrome_target_namespace}}\n  deployCutoffTimestampPushCache: "{{deploy_cutoff_timestamp_push_cache}}"\n  # Shared bundle titles\n  bundles:\n    - id: iam\n      title: Identity & Access Management\n      description: Ensure that the right users have the appropriate access to technology resources.\n    - id: application-pipeline\n      title: Konflux\n${extraBundle ? "    - id: extra\n      title: Extra Bundle\n" : ""}  serviceCategories:\n    - id: automation\n      title: Automation\n      groups:\n        - id: ansible\n          title: Ansible\n`;
+    const templates = [templateFor("main"), templateFor("stage"), templateFor("prod", true)];
+    await Promise.all(
+      templateFiles.map((file, index) => writeFile(join(projectRoot!, file), templates[index]!)),
+    );
+    const errors: string[] = [];
+    const run = (args: string[]) =>
+      runCli(["feo", ...args], {
+        cwd: projectRoot,
+        stdout: () => undefined,
+        stderr: (message) => errors.push(message),
+      });
+    const extract = ["extract", "--kind", "FrontendEnvironment"];
+    for (const file of templateFiles) extract.push("--template", file);
+    extract.push("--output", "locales/source.json");
+
+    expect(await run(extract)).toBe(0);
+    expect(await run([...extract, "--check"])).toBe(0);
+    const source = JSON.parse(await readFile(join(projectRoot!, "locales/source.json"), "utf8"));
+    expect(Object.keys(source)).toEqual([
+      "bundles.application-pipeline.title",
+      "bundles.extra.title",
+      "bundles.iam.description",
+      "bundles.iam.title",
+      "serviceCategories.automation.groups.ansible.title",
+      "serviceCategories.automation.title",
+    ]);
+    await writeFile(
+      join(projectRoot!, "locales/fr.json"),
+      JSON.stringify({
+        "bundles.application-pipeline.title": "Konflux FR",
+        "bundles.extra.title": "Autre bundle",
+        "bundles.iam.description": "Gérer les utilisateurs et les rôles",
+        "bundles.iam.title": "Gestion des identités et des accès",
+        "serviceCategories.automation.groups.ansible.title": "Ansible FR",
+        "serviceCategories.automation.title": "Automatisation",
+      }),
+    );
+
+    for (const [index, file] of templateFiles.entries()) {
+      const inline = [
+        "inline",
+        "--kind",
+        "FrontendEnvironment",
+        "--template",
+        file,
+        "--source",
+        "locales/source.json",
+        "--target",
+        "locales/fr.json",
+        "--locale",
+        "fr",
+      ];
+      expect(await run(inline)).toBe(0);
+      const updated = await readFile(join(projectRoot!, file), "utf8");
+      const original = templates[index]!;
+      const originalEnd = original.trimEnd().length;
+      const inserted = updated.slice(originalEnd, updated.length - (original.length - originalEnd));
+      expect(updated.startsWith(original.slice(0, originalEnd))).toBe(true);
+      expect(updated.endsWith(original.slice(originalEnd))).toBe(true);
+      expect(inserted).toMatch(/^\n {2}locales:\n {4}fr:\n/);
+      expect(updated.match(/\{\{[\s\S]*?\}\}/g)).toEqual(original.match(/\{\{[\s\S]*?\}\}/g));
+      expect(updated).toContain(
+        `# ${file === "main.yaml" ? "main" : file.startsWith("stage") ? "stage" : "prod"} environment`,
+      );
+      expect(parseTemplatedYaml(updated).spec.locales.fr).toEqual(
+        index === 2
+          ? {
+              "bundles.application-pipeline.title": "Konflux FR",
+              "bundles.extra.title": "Autre bundle",
+              "bundles.iam.description": "Gérer les utilisateurs et les rôles",
+              "bundles.iam.title": "Gestion des identités et des accès",
+              "serviceCategories.automation.groups.ansible.title": "Ansible FR",
+              "serviceCategories.automation.title": "Automatisation",
+            }
+          : {
+              "bundles.application-pipeline.title": "Konflux FR",
+              "bundles.iam.description": "Gérer les utilisateurs et les rôles",
+              "bundles.iam.title": "Gestion des identités et des accès",
+              "serviceCategories.automation.groups.ansible.title": "Ansible FR",
+              "serviceCategories.automation.title": "Automatisation",
+            },
+      );
+      expect(await run([...inline, "--check"])).toBe(0);
+      expect(await readFile(join(projectRoot!, file), "utf8")).toBe(updated);
+      expect(await run([...extract, "--check"])).toBe(0);
+    }
+
+    expect(errors).toEqual([]);
+  });
+
+  it("reports kind mismatches and keeps multi-template extraction Frontend-only", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-feo-kind-"));
+    const frontend = "kind: Template\nobjects:\n  - kind: Frontend\n    spec: {}\n";
+    const environment =
+      "apiVersion: cloud.redhat.com/v1alpha1\nkind: FrontendEnvironment\nmetadata:\n  name: stage\nspec: {}\n";
+    await writeFile(join(projectRoot!, "frontend.yaml"), frontend);
+    await writeFile(join(projectRoot!, "environment.yaml"), environment);
+    const errors: string[] = [];
+    const run = (args: string[]) =>
+      runCli(["feo", ...args], {
+        cwd: projectRoot,
+        stdout: () => undefined,
+        stderr: (message) => errors.push(message),
+      });
+
+    expect(
+      await run([
+        "extract",
+        "--kind",
+        "FrontendEnvironment",
+        "--template",
+        "frontend.yaml",
+        "--output",
+        "source.json",
+      ]),
+    ).toBe(1);
+    expect(errors.at(-1)).toContain("found kind Template");
+    expect(
+      await run(["extract", "--template", "environment.yaml", "--output", "source.json"]),
+    ).toBe(1);
+    expect(errors.at(-1)).toContain("found kind FrontendEnvironment");
+    expect(
+      await run([
+        "extract",
+        "--template",
+        "frontend.yaml",
+        "--template",
+        "environment.yaml",
+        "--output",
+        "source.json",
+      ]),
+    ).toBe(1);
+    expect(errors.at(-1)).toContain("Frontend accepts only one --template");
+    expect(
+      await run([
+        "extract",
+        "--kind",
+        "Other",
+        "--template",
+        "frontend.yaml",
+        "--output",
+        "source.json",
+      ]),
+    ).toBe(1);
+    expect(errors.at(-1)).toContain('--kind must be "Frontend" or "FrontendEnvironment"');
+  });
+
+  it("shows FrontendEnvironment options in FEO help", async () => {
+    const output: string[] = [];
+    const errors: string[] = [];
+
+    expect(
+      await runCli(["feo", "--help"], {
+        stdout: (message) => output.push(message),
+        stderr: (message) => errors.push(message),
+      }),
+    ).toBe(0);
+    expect(output[0]).toContain("--kind <kind>");
+    expect(output[0]).toContain("FrontendEnvironment extract accepts multiple --template files");
+    expect(errors).toEqual([]);
   });
 
   it("shows general and per-command help", async () => {

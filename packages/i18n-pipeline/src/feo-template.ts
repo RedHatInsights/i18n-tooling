@@ -10,6 +10,8 @@ import {
   type Pair,
 } from "yaml";
 import {
+  FEO_LOCALE_KEY_PATTERN,
+  FEO_MAX_LOCALE_KEY_LENGTH,
   FEO_MAX_LOCALES,
   FEO_MAX_LOCALE_KEYS,
   assertFeoLocaleId,
@@ -19,8 +21,6 @@ import {
 
 type Descriptor = { defaultMessage: string; description: string };
 export type FeoCatalog = Record<string, Descriptor>;
-
-const maxLocaleKeyLength = 256;
 
 type KeyOwner = { item: object; description: string };
 type FrontendKeyRegistry = {
@@ -45,9 +45,9 @@ function text(value: unknown, label: string): string {
   return value.value;
 }
 
-function identifier(node: YAMLMap, name: string, label: string): string {
+export function feoIdentifier(node: YAMLMap, name: string, label: string): string {
   const value = text(node.get(name, true), `${label}.${name}`);
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)*$/.test(value)) {
+  if (!FEO_LOCALE_KEY_PATTERN.test(value)) {
     throw new Error(
       `${label}.${name} has an unsafe identifier: ${value} ` +
         `(expected one or more dot-separated segments, each matching /^[A-Za-z0-9][A-Za-z0-9_-]*$/)`,
@@ -69,8 +69,10 @@ function frontendSpecs(doc: Document): {
   labels: string[];
 } {
   const root = mapping(doc.contents, "Template");
-  if (text(root.get("kind", true), "Template.kind") !== "Template")
-    throw new Error("Expected an OpenShift Template");
+  const kind = text(root.get("kind", true), "Template.kind");
+  if (kind !== "Template") {
+    throw new Error(`Expected kind Template for a Frontend template; found kind ${kind}`);
+  }
   const objects = root.get("objects", true);
   if (!isSeq(objects)) throw new Error("Template.objects must be a sequence");
   const specs: YAMLMap[] = [];
@@ -153,9 +155,9 @@ function collect(doc: Document): {
     register(registry.runtime, runtimeKey, item, description, "runtime");
   }
   function validateLocaleKey(key: string): void {
-    if (key.length > maxLocaleKeyLength) {
+    if (key.length > FEO_MAX_LOCALE_KEY_LENGTH) {
       throw new Error(
-        `FEO spec.locales key exceeds the ${maxLocaleKeyLength}-character limit: ${key}`,
+        `FEO spec.locales key exceeds the ${FEO_MAX_LOCALE_KEY_LENGTH}-character limit: ${key}`,
       );
     }
   }
@@ -253,7 +255,7 @@ function collect(doc: Document): {
     for (const [index, raw] of items.items.entries()) {
       const item = mapping(raw, catalogPrefix);
       if (item.has("segmentRef")) continue;
-      const id = identifier(item, "id", catalogPrefix);
+      const id = feoIdentifier(item, "id", catalogPrefix);
       const key = `${catalogPrefix}.${id}`;
       const runtimeKey = `${runtimePrefix}.${id}`;
       const source = `${sourcePrefix}[${index}] (id=${JSON.stringify(id)})`;
@@ -269,7 +271,7 @@ function collect(doc: Document): {
     registry = { catalog: new Map(), runtime: new Map() };
     const before = new Set(Object.keys(catalog));
     entries(spec, "searchEntries", ["title", "description", "alt_title"], (item, index) => {
-      const id = identifier(item, "id", "searchEntries");
+      const id = feoIdentifier(item, "id", "searchEntries");
       return {
         catalogBase: `searchEntries.${id}`,
         runtimeBase: `search.${id}`,
@@ -277,9 +279,9 @@ function collect(doc: Document): {
       };
     });
     entries(spec, "serviceTiles", ["title", "description"], (item, index) => {
-      const section = identifier(item, "section", "serviceTiles");
-      const group = identifier(item, "group", "serviceTiles");
-      const id = identifier(item, "id", "serviceTiles");
+      const section = feoIdentifier(item, "section", "serviceTiles");
+      const group = feoIdentifier(item, "group", "serviceTiles");
+      const id = feoIdentifier(item, "id", "serviceTiles");
       return {
         catalogBase: `serviceTiles.${section}.${group}.${id}`,
         runtimeBase: `tile.${section}.${group}.${id}`,
@@ -293,8 +295,8 @@ function collect(doc: Document): {
       if (!isSeq(segments)) throw new Error("bundleSegments must be a sequence");
       for (const [index, raw] of segments.items.entries()) {
         const item = mapping(raw, "bundleSegments");
-        const bundleId = identifier(item, "bundleId", "bundleSegments");
-        const segmentId = identifier(item, "segmentId", "bundleSegments");
+        const bundleId = feoIdentifier(item, "bundleId", "bundleSegments");
+        const segmentId = feoIdentifier(item, "segmentId", "bundleSegments");
         const key = `bundleSegments.${bundleId}.${segmentId}.navItems`;
         const runtimeKey = `nav.${bundleId}.${segmentId}`;
         const source =
@@ -357,48 +359,33 @@ function parse(template: string): Document {
   return doc;
 }
 
+export interface FeoLocaleSpliceUpdate {
+  spec: YAMLMap;
+  locale: string;
+  /** Translations keyed relative to `spec`; overlong ones already removed. */
+  target: Record<string, string>;
+  /** Names the spec in errors, such as `Frontend "rbac"`. */
+  label: string;
+}
+
 /**
- * Only updates spec.locales[locale]; English and other locale entries remain untouched. A block
- * under a non-canonical spelling of `locale` (such as `zh-cn` for `zh-CN`) is renamed. Translations
- * over the CRD length limit are omitted like missing ones, so they fall back to English; report them
- * with `overlongFeoTranslationsWarning`.
+ * Computes locale-only edits from YAML nodes parsed from `sourceTemplate` and applies them to
+ * `originalTemplate`, which must have the same length (for example, the text before masking).
  */
-export function inlineFeoLocale(
-  template: string,
-  source: FeoCatalog,
-  target: Record<string, string>,
-  locale: string,
+export function spliceFeoLocaleUpdates(
+  sourceTemplate: string,
+  updates: readonly FeoLocaleSpliceUpdate[],
+  originalTemplate = sourceTemplate,
 ): string {
-  assertFeoLocaleId(locale, "Target locale");
-  const doc = parse(template);
-  const { catalog, specs, owned, prefixes, labels } = collect(doc);
-  for (const key of new Set([...Object.keys(source), ...Object.keys(catalog)])) {
-    if (source[key]?.defaultMessage !== catalog[key]?.defaultMessage) {
-      throw new Error(`English source changed for ${key}; regenerate and resubmit catalog`);
-    }
+  if (sourceTemplate.length !== originalTemplate.length) {
+    throw new Error("FEO locale splice source and original text must have the same length");
   }
-  for (const [key, value] of Object.entries(target)) {
-    if (!Object.hasOwn(catalog, key)) {
-      const hint = key.endsWith(".alt_title") ? "; alt_title uses one message per slug" : "";
-      throw new Error(`Unknown translation key: ${key}${hint}`);
-    }
-    if (typeof value !== "string" || !value.trim()) throw new Error(`Invalid translation: ${key}`);
-  }
-  const sorted = Object.fromEntries(
-    Object.entries(target)
-      .filter(([, value]) => !exceedsFeoMessageLength(value))
-      .sort(byKey),
-  );
   const changes: { start: number; end: number; text: string }[] = [];
-  for (const [index, spec] of specs.entries()) {
-    const ownTarget = Object.fromEntries(
-      Object.entries(sorted)
-        .filter(([key]) => owned[index]!.has(key))
-        .map(([key, value]) => [key.slice(prefixes[index]!.length), value]),
-    );
+  for (const { spec, locale, target, label } of updates) {
+    const ownTarget = Object.fromEntries(Object.entries(target).sort(byKey));
     if (Object.keys(ownTarget).length > FEO_MAX_LOCALE_KEYS) {
       throw new Error(
-        `${labels[index]} spec.locales.${locale} has ${Object.keys(ownTarget).length} keys, ` +
+        `${label} spec.locales.${locale} has ${Object.keys(ownTarget).length} keys, ` +
           `exceeding the ${FEO_MAX_LOCALE_KEYS}-key limit per locale`,
       );
     }
@@ -419,24 +406,24 @@ export function inlineFeoLocale(
     if (!Object.keys(ownTarget).length && !pair) continue;
     if (!pair && (existing?.items.length ?? 0) >= FEO_MAX_LOCALES) {
       throw new Error(
-        `${labels[index]} already has ${existing!.items.length} spec.locales blocks; adding ` +
+        `${label} already has ${existing!.items.length} spec.locales blocks; adding ` +
           `"${locale}" would exceed the ${FEO_MAX_LOCALES}-locale limit per Frontend`,
       );
     }
     const keyRange = pair && isScalar(pair.key) ? pair.key.range : undefined;
-    const indentAt = (offset: number) => offset - template.lastIndexOf("\n", offset - 1) - 1;
+    const indentAt = (offset: number) => offset - sourceTemplate.lastIndexOf("\n", offset - 1) - 1;
     const blockRange = (entry: Pair) => {
       if (!isScalar(entry.key) || !entry.key.range) return undefined;
       const range = entry.key.range;
       const valueRange = isNode(entry.value) ? entry.value.range : undefined;
-      const lineEnd = template.indexOf("\n", range[1]);
+      const lineEnd = sourceTemplate.indexOf("\n", range[1]);
       const end =
-        valueRange?.[2] ?? valueRange?.[1] ?? (lineEnd < 0 ? template.length : lineEnd + 1);
+        valueRange?.[2] ?? valueRange?.[1] ?? (lineEnd < 0 ? sourceTemplate.length : lineEnd + 1);
       // A trailing comment's range can include the following line's indentation. Never splice it.
-      const lineStart = template.lastIndexOf("\n", end - 1) + 1;
+      const lineStart = sourceTemplate.lastIndexOf("\n", end - 1) + 1;
       return {
         start: range[0] - indentAt(range[0]),
-        end: template.slice(lineStart, end).trim() ? end : lineStart,
+        end: sourceTemplate.slice(lineStart, end).trim() ? end : lineStart,
       };
     };
     // The target catalog is authoritative for this locale, including any legacy spellings.
@@ -476,8 +463,11 @@ export function inlineFeoLocale(
     // yaml attaches an inline comment after `fr:` to the following mapping.
     let headerComment: string | undefined;
     if (keyRange && localeMap?.commentBefore) {
-      const lineEnd = template.indexOf("\n", keyRange[1]);
-      const suffix = template.slice(keyRange[1], lineEnd < 0 ? template.length : lineEnd);
+      const lineEnd = sourceTemplate.indexOf("\n", keyRange[1]);
+      const suffix = sourceTemplate.slice(
+        keyRange[1],
+        lineEnd < 0 ? sourceTemplate.length : lineEnd,
+      );
       const comment = suffix.match(/^:\s*(#.*)$/)?.[1];
       const [first, ...rest] = localeMap.commentBefore.split("\n");
       if (comment && first?.trim() === comment.slice(1).trim()) {
@@ -504,8 +494,8 @@ export function inlineFeoLocale(
       changes.push({ ...replacementRange, text: block });
     } else if (emptyFlow && existing?.range) {
       let start = existing.range[0];
-      const lineStart = template.lastIndexOf("\n", start - 1) + 1;
-      while (start > lineStart && template[start - 1] === " ") start -= 1;
+      const lineStart = sourceTemplate.lastIndexOf("\n", start - 1) + 1;
+      while (start > lineStart && sourceTemplate[start - 1] === " ") start -= 1;
       const commentLines = existing.comment?.split("\n").map((line) => line.trim());
       const comment = commentLines?.some(Boolean)
         ? commentLines
@@ -524,21 +514,67 @@ export function inlineFeoLocale(
       changes.push({
         start: offset,
         end: offset,
-        text: `${offset && template[offset - 1] !== "\n" ? "\n" : ""}${block}`,
+        text: `${offset && sourceTemplate[offset - 1] !== "\n" ? "\n" : ""}${block}`,
       });
     } else if (spec.range) {
       const offset = spec.range[1];
       changes.push({
         start: offset,
         end: offset,
-        text: `${offset && template[offset - 1] !== "\n" ? "\n" : ""}${block}`,
+        text: `${offset && sourceTemplate[offset - 1] !== "\n" ? "\n" : ""}${block}`,
       });
     }
   }
-  let result = template;
+  let result = originalTemplate;
   for (const change of changes.sort((a, b) => b.start - a.start)) {
     result = result.slice(0, change.start) + change.text + result.slice(change.end);
   }
+  return result;
+}
+
+/**
+ * Only updates spec.locales[locale]; English and other locale entries remain untouched. A block
+ * under a non-canonical spelling of `locale` (such as `zh-cn` for `zh-CN`) is renamed. Translations
+ * over the CRD length limit are omitted like missing ones, so they fall back to English; report them
+ * with `overlongFeoTranslationsWarning`.
+ */
+export function inlineFeoLocale(
+  template: string,
+  source: FeoCatalog,
+  target: Record<string, string>,
+  locale: string,
+): string {
+  assertFeoLocaleId(locale, "Target locale");
+  const doc = parse(template);
+  const { catalog, specs, owned, prefixes, labels } = collect(doc);
+  for (const key of new Set([...Object.keys(source), ...Object.keys(catalog)])) {
+    if (source[key]?.defaultMessage !== catalog[key]?.defaultMessage) {
+      throw new Error(`English source changed for ${key}; regenerate and resubmit catalog`);
+    }
+  }
+  for (const [key, value] of Object.entries(target)) {
+    if (!Object.hasOwn(catalog, key)) {
+      const hint = key.endsWith(".alt_title") ? "; alt_title uses one message per slug" : "";
+      throw new Error(`Unknown translation key: ${key}${hint}`);
+    }
+    if (typeof value !== "string" || !value.trim()) throw new Error(`Invalid translation: ${key}`);
+  }
+  const sorted = Object.fromEntries(
+    Object.entries(target)
+      .filter(([, value]) => !exceedsFeoMessageLength(value))
+      .sort(byKey),
+  );
+  const updates = specs.map((spec, index) => ({
+    spec,
+    locale,
+    label: labels[index]!,
+    target: Object.fromEntries(
+      Object.entries(sorted)
+        .filter(([key]) => owned[index]!.has(key))
+        .map(([key, value]) => [key.slice(prefixes[index]!.length), value]),
+    ),
+  }));
+  const result = spliceFeoLocaleUpdates(template, updates);
   parse(result);
   return result;
 }

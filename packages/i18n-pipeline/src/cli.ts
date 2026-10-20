@@ -35,6 +35,7 @@ import {
   serializeFeoCatalog,
   type FeoCatalog,
 } from "./feo-template.js";
+import { extractFeoEnvironmentCatalogs, inlineFeoEnvironmentLocale } from "./feo-environment.js";
 import { runValidateCiCommand, VALIDATE_CI_HELP } from "./validate-ci.js";
 
 export interface CliOptions {
@@ -54,7 +55,7 @@ Commands:
   validate-ci       Discover and validate a consumer repository for CI
   convert           Convert a catalog between adapters
   tms               Submit and reconcile translation batches
-  feo               Extract and inline Frontend template translations
+  feo               Extract and inline Frontend and FrontendEnvironment translations
   version           Print the package version
   help              Show help, optionally for one command
 
@@ -63,10 +64,12 @@ Use i18n-pipeline <command> --help for command options.`;
 const COMMAND_HELP: Record<string, string> = {
   feo: `Usage: i18n-pipeline feo <extract|inline> [options]
 
-  extract --template <yaml> --output <json> [--check]
-  inline --template <yaml> --source <json> --target <json> --locale <tag> [--check]
+  extract --template <yaml> [--template <yaml> ...] --output <json> [--kind <kind>] [--check]
+  inline --template <yaml> --source <json> --target <json> --locale <tag> [--kind <kind>] [--check]
 
---check verifies checked-in output without writing. Inline updates only spec.locales.<locale>.`,
+  --kind <kind> is Frontend (default) or FrontendEnvironment.
+  FrontendEnvironment extract accepts multiple --template files and combines them into one catalog.
+  --check verifies checked-in output without writing. Inline updates only spec.locales.<locale>.`,
   check: `Usage: i18n-pipeline check --source <path> --target <path> [options]
 
 Options:
@@ -708,26 +711,54 @@ async function runFeoCommand(
   const [subcommand, ...rest] = args;
   if (subcommand !== "extract" && subcommand !== "inline")
     throw new Error("feo requires extract or inline");
-  const values = parseOptions(rest, {
-    template: { type: "string" },
-    output: { type: "string" },
-    source: { type: "string" },
-    target: { type: "string" },
-    locale: { type: "string" },
-    check: { type: "boolean" },
+  const { values } = parseArgs({
+    args: rest,
+    options: {
+      template: { type: "string", multiple: true },
+      output: { type: "string" },
+      source: { type: "string" },
+      target: { type: "string" },
+      locale: { type: "string" },
+      kind: { type: "string" },
+      check: { type: "boolean" },
+    },
+    strict: true,
+    allowPositionals: false,
   });
-  if (!values.template) throw new Error("feo requires --template");
-  const templatePath = resolve(cwd, values.template);
-  const template = await readFile(templatePath, "utf8");
+  const kind = values.kind ?? "Frontend";
+  if (kind !== "Frontend" && kind !== "FrontendEnvironment") {
+    throw new Error('--kind must be "Frontend" or "FrontendEnvironment"');
+  }
+  const templatePaths = values.template ?? [];
+  if (!templatePaths.length) throw new Error("feo requires --template");
+  if (kind === "Frontend" && templatePaths.length > 1) {
+    throw new Error("feo --kind Frontend accepts only one --template");
+  }
+  if (subcommand === "inline" && templatePaths.length > 1) {
+    throw new Error(`feo inline --kind ${kind} accepts only one --template`);
+  }
   let path: string;
   let generated: string;
   if (subcommand === "extract") {
     if (!values.output) throw new Error("feo extract requires --output");
     path = resolve(cwd, values.output);
-    generated = serializeFeoCatalog(extractFeoCatalog(template));
+    if (kind === "Frontend") {
+      const template = await readFile(resolve(cwd, templatePaths[0]!), "utf8");
+      generated = serializeFeoCatalog(extractFeoCatalog(template));
+    } else {
+      const templates = await Promise.all(
+        templatePaths.map(async (templatePath) => ({
+          path: templatePath,
+          template: await readFile(resolve(cwd, templatePath), "utf8"),
+        })),
+      );
+      generated = serializeFeoCatalog(extractFeoEnvironmentCatalogs(templates));
+    }
   } else {
     if (!values.source || !values.target || !values.locale)
       throw new Error("feo inline requires --source, --target and --locale");
+    const templatePath = resolve(cwd, templatePaths[0]!);
+    const template = await readFile(templatePath, "utf8");
     path = templatePath;
     const source = (await readJson(
       resolve(cwd, values.source),
@@ -737,7 +768,10 @@ async function runFeoCommand(
       string,
       string
     >;
-    generated = inlineFeoLocale(template, source, target, values.locale);
+    generated =
+      kind === "Frontend"
+        ? inlineFeoLocale(template, source, target, values.locale)
+        : inlineFeoEnvironmentLocale(template, source, target, values.locale);
     const overlong = overlongFeoTranslationsWarning(values.locale, target);
     if (overlong) stdout(`Warning: ${overlong}.`);
   }
