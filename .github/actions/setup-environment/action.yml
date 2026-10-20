@@ -15,12 +15,14 @@ inputs:
 runs:
   using: composite
   steps:
-    # v4 does not enable dependency caching automatically.
+    # v5+ caches npm automatically when package.json declares packageManager;
+    # turn that off so the cache input alone decides, keeping privileged jobs uncached.
     - name: Set up Node.js
-      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         node-version: ${{ inputs.node-version }}
         node-version-file: ${{ inputs.node-version == '' && format('{0}/.nvmrc', inputs.working-directory) || '' }}
+        package-manager-cache: false
         cache: ${{ inputs.cache == 'true' && 'npm' || '' }}
         cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
 

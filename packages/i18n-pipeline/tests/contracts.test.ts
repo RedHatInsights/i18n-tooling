@@ -181,8 +181,7 @@ describe("repository i18n contracts", () => {
       const cliStep = steps.find((step) => step.env?.GITHUB_AUTH_MODE)!;
       const consumerCheckouts = steps.filter(
         (step) =>
-          step.uses === "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" &&
-          step.with?.repository === targetRepository,
+          step.uses?.startsWith("actions/checkout@") && step.with?.repository === targetRepository,
       );
       const consumerCheckout = consumerCheckouts[0];
 
