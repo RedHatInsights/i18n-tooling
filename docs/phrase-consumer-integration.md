@@ -2,6 +2,8 @@
 
 This example shows the consumer-owned boundary around the reusable Phrase workflows. It uses synthetic `fr` data and placeholders only; it does not call Phrase or GitHub. Replace the sample locale and paths to match each application. For hub-owned automation, follow the [hub route in consumer onboarding](consumer-onboarding.md#hub-owned-phrase-automation).
 
+For maintainer guidance on run schedules, Phrase job links, locale PRs, and outcomes, see [Where is my translation?](../README.md#where-is-my-translation).
+
 ## Catalog handoff
 
 1. Keep the extracted FormatJS source committed at `locales/translation-template.json`. The submit workflow reads the catalog at the dispatched commit; it does not run framework extraction.

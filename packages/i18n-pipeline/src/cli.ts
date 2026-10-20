@@ -27,7 +27,18 @@ import { GitHubPhraseRepository } from "./github-phrase-repository.js";
 import { PhraseClient, type PhraseClientOptions } from "./phrase-client.js";
 import { overlongFeoTranslationsWarning } from "./feo-locale.js";
 import { parsePhraseTmsConfig, targetAdapterId } from "./phrase-config.js";
-import { PhraseWorkflow, type PhraseReconcileResult } from "./phrase-workflow.js";
+import {
+  phraseFinalWorkflowJob,
+  PhraseWorkflow,
+  type PhraseReconcileResult,
+} from "./phrase-workflow.js";
+import { appendGitHubStepSummary } from "./append-step-summary.js";
+import {
+  formatTmsFailureSummary,
+  formatTmsResultLine,
+  formatTmsRunSummary,
+  formatTmsSubmitSummary,
+} from "./tms-summary.js";
 import {
   extractFeoCatalog,
   formatFeoCatalog,
@@ -471,7 +482,8 @@ function builtInCatalogAdapters(adapterIds: string[]): CatalogAdapterRegistry {
 async function runTmsCommand(
   command: "submit" | "reconcile",
   args: string[],
-  options: Required<Pick<CliOptions, "cwd" | "env" | "stdout">> & Pick<CliOptions, "fetch">,
+  options: Required<Pick<CliOptions, "cwd" | "env" | "stdout" | "stderr">> &
+    Pick<CliOptions, "fetch">,
 ): Promise<number> {
   const values = parseOptions(args, {
     config: { type: "string" },
@@ -527,127 +539,183 @@ async function runTmsCommand(
   const generatedFrom = parsed.workflow.frontendTemplate?.generateSourceCatalog
     ? parsed.workflow.frontendTemplate
     : undefined;
-  const submitInputPath =
-    command !== "submit"
-      ? undefined
-      : generatedFrom
-        ? await resolveTmsInputPath(options.cwd, generatedFrom.path, "Frontend template")
-        : await resolveTmsInputPath(
-            options.cwd,
-            parsed.workflow.sourceCatalog.path,
-            "Source catalog",
-          );
-  const catalogAdapters = builtInCatalogAdapters([
-    parsed.workflow.sourceCatalog.adapter,
-    targetAdapterId(parsed.workflow),
-  ]);
-  const credentials = phraseCredentials(options.env);
-  const githubToken = options.env.GITHUB_TOKEN;
-  if (!githubToken)
-    throw new Error("GITHUB_TOKEN is required for state and pull-request operations");
   // Empty strings arrive from unset reusable-workflow inputs, so fall through with `||`.
   const repositoryName = values.repository || options.env.GITHUB_REPOSITORY;
-  if (!repositoryName) throw new Error("Pass --repository or set GITHUB_REPOSITORY");
+  const summaryContext = {
+    repository: repositoryName ?? "",
+    sourcePath: generatedFrom?.path ?? parsed.workflow.sourceCatalog.path,
+    frontendTemplate: Boolean(parsed.workflow.frontendTemplate),
+  };
 
-  const phrase = new PhraseClient({
-    ...credentials,
-    region: parsed.workflow.region,
-    fetch: options.fetch,
-  });
-  options.stdout(
-    phrase.authMethod === "service-account"
-      ? "Phrase auth: service account (PHRASE_SERVICE_ACCOUNT_CLIENT_ID/_SECRET)"
-      : "Phrase auth: user Platform API token (PHRASE_PLATFORM_API_TOKEN)",
-  );
-  const github = new GitHubPhraseRepository({
-    repository: repositoryName,
-    token: githubToken,
-    stateBranch: parsed.stateBranch,
-    stateDirectory: parsed.stateDirectory,
-    ...(options.env.GITHUB_API_URL ? { apiUrl: options.env.GITHUB_API_URL } : {}),
-    fetch: options.fetch,
-  });
-  const workflow = new PhraseWorkflow({
-    phrase,
-    state: github,
-    repository: github,
-    catalogAdapters,
-  });
+  let summaryWritten = false;
+  const appendSummary = async (summary: string): Promise<void> => {
+    await appendGitHubStepSummary(options.env.GITHUB_STEP_SUMMARY, summary, options.stderr);
+    summaryWritten = true;
+  };
 
-  if (command === "submit") {
-    const branchRef = options.env.GITHUB_REF?.startsWith("refs/heads/")
-      ? options.env.GITHUB_REF.slice("refs/heads/".length)
-      : undefined;
-    const baseRef = values["base-ref"] || options.env.I18N_BASE_REF || branchRef;
-    const sourceCommit =
-      values["source-commit"] || options.env.I18N_SOURCE_COMMIT || options.env.GITHUB_SHA;
-    if (!baseRef) {
-      throw new Error(
-        "Pass --base-ref: GITHUB_REF is not a branch (pull-request and tag runs need an explicit PR base)",
-      );
-    }
-    if (!sourceCommit) throw new Error("Pass --source-commit or set GITHUB_SHA");
-    const sourceBytes = generatedFrom
-      ? new TextEncoder().encode(formatFeoCatalog(await readFile(submitInputPath!, "utf8")))
-      : await readFile(submitInputPath!);
-    const batch = await workflow.submit({
-      repository: repositoryName,
-      baseRef,
-      sourceCommit,
-      sourceBytes,
-      config: parsed.workflow,
-      retryFailed: values["retry-failed"] === true,
-      ...phrasePins,
+  try {
+    const submitInputPath =
+      command !== "submit"
+        ? undefined
+        : generatedFrom
+          ? await resolveTmsInputPath(options.cwd, generatedFrom.path, "Frontend template")
+          : await resolveTmsInputPath(
+              options.cwd,
+              parsed.workflow.sourceCatalog.path,
+              "Source catalog",
+            );
+    const catalogAdapters = builtInCatalogAdapters([
+      parsed.workflow.sourceCatalog.adapter,
+      targetAdapterId(parsed.workflow),
+    ]);
+    const credentials = phraseCredentials(options.env);
+    const githubToken = options.env.GITHUB_TOKEN;
+    if (!githubToken)
+      throw new Error("GITHUB_TOKEN is required for state and pull-request operations");
+    if (!repositoryName) throw new Error("Pass --repository or set GITHUB_REPOSITORY");
+
+    const phrase = new PhraseClient({
+      ...credentials,
+      region: parsed.workflow.region,
+      fetch: options.fetch,
     });
-    const warningSummary = batch.warningCount ? `, ${batch.warningCount} import warning(s)` : "";
     options.stdout(
-      `Phrase batch ${batch.key} is ${batch.phase} (${batch.jobs.length} job parts${warningSummary}).`,
+      phrase.authMethod === "service-account"
+        ? "Phrase auth: service account (PHRASE_SERVICE_ACCOUNT_CLIENT_ID/_SECRET)"
+        : "Phrase auth: user Platform API token (PHRASE_PLATFORM_API_TOKEN)",
     );
-    const failedLocales = Object.entries(batch.locales).filter(
-      ([, locale]) => locale.phase === "failed",
-    );
-    for (const [phraseLocale, locale] of failedLocales) {
-      options.stdout(
-        `${batch.key.slice(0, 12)} ${phraseLocale}: failed` +
-          (locale.failureReason ? ` — ${locale.failureReason}` : ""),
-      );
-    }
-    return failedLocales.length ? 1 : 0;
-  }
+    const github = new GitHubPhraseRepository({
+      repository: repositoryName,
+      token: githubToken,
+      stateBranch: parsed.stateBranch,
+      stateDirectory: parsed.stateDirectory,
+      ...(options.env.GITHUB_API_URL ? { apiUrl: options.env.GITHUB_API_URL } : {}),
+      fetch: options.fetch,
+    });
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state: github,
+      repository: github,
+      catalogAdapters,
+    });
 
-  const results = await workflow.reconcile({
-    ...phrasePins,
-    fallbackAssignees,
-    repairScope: {
-      projectUid: parsed.workflow.projectUid,
-      sourceFilename: parsed.workflow.sourceCatalog.filename,
-    },
-  });
-  if (!results.length) {
-    options.stdout("No ready Phrase batches found.");
-    return 0;
-  }
-  for (const result of results) options.stdout(formatReconcileResult(result));
-  if (options.env.GITHUB_ACTIONS === "true") {
-    for (const result of results) {
-      if (result.phase !== "invalid-translation") continue;
-      const message =
-        `${result.phraseLocale} translation has validation errors; see the 🌐 Translation check comment on ` +
-        `${result.pullRequestUrl}. Fix it in Phrase.`;
+    if (command === "submit") {
+      const branchRef = options.env.GITHUB_REF?.startsWith("refs/heads/")
+        ? options.env.GITHUB_REF.slice("refs/heads/".length)
+        : undefined;
+      const baseRef = values["base-ref"] || options.env.I18N_BASE_REF || branchRef;
+      const sourceCommit =
+        values["source-commit"] || options.env.I18N_SOURCE_COMMIT || options.env.GITHUB_SHA;
+      if (!baseRef) {
+        throw new Error(
+          "Pass --base-ref: GITHUB_REF is not a branch (pull-request and tag runs need an explicit PR base)",
+        );
+      }
+      if (!sourceCommit) throw new Error("Pass --source-commit or set GITHUB_SHA");
+      const sourceBytes = generatedFrom
+        ? new TextEncoder().encode(formatFeoCatalog(await readFile(submitInputPath!, "utf8")))
+        : await readFile(submitInputPath!);
+      const outcome = await workflow.submitWithOutcome({
+        repository: repositoryName,
+        baseRef,
+        sourceCommit,
+        sourceBytes,
+        config: parsed.workflow,
+        retryFailed: values["retry-failed"] === true,
+        ...phrasePins,
+      });
+      const batch = outcome.batch;
+      const warningSummary = batch.warningCount ? `, ${batch.warningCount} import warning(s)` : "";
       options.stdout(
-        `::warning title=i18n-pipeline translation check::${escapeAnnotation(message)}`,
+        `Phrase batch ${batch.key} is ${batch.phase} (${batch.jobs.length} job parts${warningSummary}).`,
       );
+      const failedLocales = Object.entries(batch.locales).filter(
+        ([, locale]) => locale.phase === "failed",
+      );
+      const localeResults = batch.config.targetLocales.map((target): PhraseReconcileResult => {
+        const locale = batch.locales[target.phraseLocale];
+        const finalJob = phraseFinalWorkflowJob(batch.jobs, target.phraseLocale);
+        const validationErrorCount = locale?.validationErrors?.length ?? 0;
+        const phase: PhraseReconcileResult["phase"] =
+          batch.phase === "superseded"
+            ? "superseded"
+            : batch.phase === "failed" ||
+                locale?.phase === "failed" ||
+                locale?.phase === "validation-failed"
+              ? "failed"
+              : locale?.phase === "pr-created" && validationErrorCount > 0
+                ? "invalid-translation"
+                : locale?.phase === "pr-created"
+                  ? "pr-created"
+                  : "pending";
+        return {
+          batchKey: batch.key,
+          phraseLocale: target.phraseLocale,
+          repositoryLocale: target.repositoryLocale,
+          phase,
+          sourceCommit: batch.sourceCommit,
+          createdAt: batch.createdAt,
+          projectUid: batch.config.projectUid,
+          region: batch.config.region,
+          validationErrorCount,
+          validationWarningCount: locale?.validationWarnings?.length ?? 0,
+          ...(finalJob
+            ? {
+                jobUid: finalJob.uid,
+                ...(finalJob.status ? { jobStatus: finalJob.status } : {}),
+              }
+            : {}),
+          ...(locale?.pullRequestUrl ? { pullRequestUrl: locale.pullRequestUrl } : {}),
+          ...(locale?.pullRequestAssignees
+            ? { pullRequestAssignees: locale.pullRequestAssignees }
+            : {}),
+          ...(locale?.failureReason
+            ? { reason: locale.failureReason }
+            : phase === "failed" && batch.failureReason
+              ? { reason: batch.failureReason }
+              : {}),
+        };
+      });
+      for (const result of localeResults) options.stdout(formatTmsResultLine(result));
+      await appendSummary(formatTmsSubmitSummary(summaryContext, batch, outcome.createdThisRun));
+      return failedLocales.length ? 1 : 0;
     }
-  }
-  return results.some((result) => result.phase === "failed" || result.phase === "retrying") ? 1 : 0;
-}
 
-function formatReconcileResult(result: PhraseReconcileResult): string {
-  return (
-    `${result.batchKey.slice(0, 12)} ${result.phraseLocale ?? "(batch)"}: ${result.phase}` +
-    (result.pullRequestUrl ? ` — ${result.pullRequestUrl}` : "") +
-    (result.reason ? ` — ${result.reason}` : "")
-  );
+    const results: PhraseReconcileResult[] = await workflow.reconcile({
+      ...phrasePins,
+      fallbackAssignees,
+      repairScope: {
+        projectUid: parsed.workflow.projectUid,
+        sourceFilename: parsed.workflow.sourceCatalog.filename,
+      },
+    });
+    if (!results.length) {
+      options.stdout("No ready Phrase batches found.");
+      await appendSummary(formatTmsRunSummary(summaryContext, results));
+      return 0;
+    }
+    for (const result of results) options.stdout(formatTmsResultLine(result));
+    if (options.env.GITHUB_ACTIONS === "true") {
+      for (const result of results) {
+        if (result.phase !== "invalid-translation") continue;
+        const message =
+          `${result.phraseLocale} translation has validation errors; see the 🌐 Translation check comment on ` +
+          `${result.pullRequestUrl}. Fix it in Phrase.`;
+        options.stdout(
+          `::warning title=i18n-pipeline translation check::${escapeAnnotation(message)}`,
+        );
+      }
+    }
+    await appendSummary(formatTmsRunSummary(summaryContext, results));
+    return results.some((result) => result.phase === "failed" || result.phase === "retrying")
+      ? 1
+      : 0;
+  } catch (error) {
+    if (!summaryWritten && repositoryName) {
+      await appendSummary(formatTmsFailureSummary(command, summaryContext));
+    }
+    throw error;
+  }
 }
 
 async function convertCatalog(
@@ -859,6 +927,7 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
         cwd,
         env,
         stdout,
+        stderr,
         fetch: options.fetch,
       });
     }

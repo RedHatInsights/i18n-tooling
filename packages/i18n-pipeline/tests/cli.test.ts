@@ -1178,6 +1178,8 @@ objects:
     const sourceBytes = Buffer.from(JSON.stringify({ greeting: { defaultMessage: "Hello" } }));
     await writeFile(join(projectRoot, "locales/en.json"), sourceBytes);
     await writeFile(join(projectRoot, "phrase.json"), phraseTmsConfig());
+    const summaryPath = join(projectRoot, "step-summary.md");
+    await writeFile(summaryPath, "", "utf8");
     let stateRevision: string | undefined;
     let stateWriteCount = 0;
     const output: string[] = [];
@@ -1275,6 +1277,7 @@ objects:
           GITHUB_REPOSITORY: "example/app",
           GITHUB_REF: "refs/heads/main",
           GITHUB_SHA: "abc123",
+          GITHUB_STEP_SUMMARY: summaryPath,
         },
         fetch,
         stdout: (message) => output.push(message),
@@ -1285,7 +1288,37 @@ objects:
     expect(exitCode).toBe(0);
     expect(output[0]).toBe("Phrase auth: user Platform API token (PHRASE_PLATFORM_API_TOKEN)");
     expect(output[1]).toMatch(/^Phrase batch [a-f0-9]{64} is ready \(1 job parts\)\.$/);
+    expect(output[2]).toContain("fr: pending — waiting for translation in Phrase");
+    const summary = await readFile(summaryPath, "utf8");
+    expect(summary).toContain("## 🌐 Phrase submit · `app` · `locales/en.json`");
+    expect(summary).toContain("| Batch | Result | Source | Jobs | Locales | |");
+    expect(summary).toContain("🆕 submitted");
     expect(errors).toEqual([]);
+  });
+
+  it("appends one failure block when submit cannot resolve its source input", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-submit-missing-source-"));
+    await writeFile(join(projectRoot, "package.json"), "{}\n");
+    await writeFile(join(projectRoot, "phrase.json"), phraseTmsConfig("locales/missing.json"));
+    const summaryPath = join(projectRoot, "step-summary.md");
+    const errors: string[] = [];
+
+    const exitCode = await runCli(["tms", "submit", "--config", "phrase.json"], {
+      cwd: projectRoot,
+      env: {
+        GITHUB_REPOSITORY: "example/app",
+        GITHUB_STEP_SUMMARY: summaryPath,
+      },
+      stdout: () => undefined,
+      stderr: (message) => errors.push(message),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(errors[0]).toContain("Source catalog");
+    const summary = await readFile(summaryPath, "utf8");
+    expect(summary.match(/## 🌐 Phrase submit/g)).toHaveLength(1);
+    expect(summary).toContain("## 🌐 Phrase submit · `app` · `locales/missing.json`");
+    expect(summary).toContain("> [!CAUTION]");
   });
 
   it.each([
@@ -1573,6 +1606,26 @@ objects:
     expect(calls).toHaveLength(1);
     expect(calls[0]).toContain("/contents/.github/i18n-state/batches?ref=i18n-tms-state");
 
+    const appendWarnings: string[] = [];
+    expect(
+      await runCli(["tms", "reconcile", "--config", "phrase.json"], {
+        cwd: projectRoot,
+        env: {
+          PHRASE_PLATFORM_API_TOKEN: "protected-phrase-token",
+          GITHUB_TOKEN: "run-token",
+          GITHUB_REPOSITORY: "example/app",
+          GITHUB_STEP_SUMMARY: projectRoot,
+        },
+        fetch,
+        stdout: () => undefined,
+        stderr: (message) => appendWarnings.push(message),
+      }),
+    ).toBe(0);
+    expect(appendWarnings).toHaveLength(1);
+    expect(appendWarnings[0]).toMatch(/^Warning: could not append GitHub step summary:/);
+
+    const summaryPath = join(projectRoot, "reconcile-summary.md");
+    await writeFile(summaryPath, "", "utf8");
     output.length = 0;
     expect(
       await runCli(["tms", "reconcile", "--config", "phrase.json"], {
@@ -1583,6 +1636,7 @@ objects:
           PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET: "client-secret",
           GITHUB_TOKEN: "run-token",
           GITHUB_REPOSITORY: "example/app",
+          GITHUB_STEP_SUMMARY: summaryPath,
         },
         fetch,
         stdout: (message) => output.push(message),
@@ -1593,6 +1647,9 @@ objects:
       "Phrase auth: service account (PHRASE_SERVICE_ACCOUNT_CLIENT_ID/_SECRET)",
     );
     expect(output.join("\n")).not.toContain("client-secret");
+    const summary = await readFile(summaryPath, "utf8");
+    expect(summary).toContain("## 🌐 Phrase reconcile · `app` · `locales/en.json`");
+    expect(summary).toContain("> No active Phrase batches.");
   });
 
   it("rejects invalid fallback GitHub logins as a reconcile usage error", async () => {
@@ -1767,7 +1824,7 @@ objects:
     const invalidOnly = await runReconcileWithResults([invalidTranslation]);
     expect(invalidOnly.exitCode).toBe(0);
     expect(invalidOnly.stdout).toContain(
-      "aaaaaaaaaaaa fr: invalid-translation — https://github.com/example/app/pull/19 — ICU argument mismatch details",
+      "aaaaaaaaaaaa fr: invalid-translation — fix the translation in Phrase; the next sync updates the PR — PR (draft with errors): https://github.com/example/app/pull/19",
     );
 
     const withFailed = await runReconcileWithResults([
@@ -1831,7 +1888,7 @@ objects:
     expect(result.exitCode).toBe(0);
     expect(result.stdout.some((line) => line.startsWith("::warning"))).toBe(false);
     expect(result.stdout).toContain(
-      "aaaaaaaaaaaa fr: invalid-translation — https://github.com/example/app/pull/19 — ICU argument mismatch details",
+      "aaaaaaaaaaaa fr: invalid-translation — fix the translation in Phrase; the next sync updates the PR — PR (draft with errors): https://github.com/example/app/pull/19",
     );
   });
 
