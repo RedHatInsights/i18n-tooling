@@ -2452,7 +2452,10 @@ export class PhraseWorkflow {
             });
             frontendTemplateData = { path, descriptors, translated };
             const overlong = overlongFeoTranslationsWarning(feoLocale, translated);
-            if (overlong) warnings.push(overlong);
+            if (overlong) {
+              warnings.push(overlong);
+              findings.push({ severity: "warning", problem: overlong });
+            }
           } catch (error) {
             const problem = `Frontend template inline failed: ${error instanceof Error ? error.message : String(error)}`;
             errors.push(problem);

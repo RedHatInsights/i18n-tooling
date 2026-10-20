@@ -2648,7 +2648,7 @@ describe("PhraseWorkflow submission", () => {
       {
         aWarning: "Au revoir !",
         bWarning: "Bienvenue !",
-        requestCount: "{count, plural, one {# demande} other {demandes}}",
+        requestCount: "{count, plural, one {# élément} other {éléments}}",
         zName: "Bonjour",
       },
     );
@@ -4098,8 +4098,13 @@ describe("PhraseWorkflow submission", () => {
     expect(yaml).toContain("zh-CN:\n          searchEntries.roles.title: 角色\n");
     expect(yaml).not.toContain("zh-cn:");
     expect(yaml).not.toContain("searchEntries.users.title: 用");
-    expect(pullRequest?.body).toContain("Translation warnings");
-    expect(pullRequest?.body).toContain("fall back to English: searchEntries.users.title");
+    expect(pullRequest?.body).toContain(
+      "⚠️ 1 warning — see the latest 🌐 Translation check comment.",
+    );
+    const report = repository.pullRequestComments.at(-1)?.body ?? "";
+    expect(report).toContain("> [!WARNING]");
+    expect(report).toContain("| **W1** | — |");
+    expect(report).toContain("fall back to English: searchEntries.users.title");
   });
 
   it("preserves an implicit legacy PR branch when resubmitting canonical FEO config", async () => {
