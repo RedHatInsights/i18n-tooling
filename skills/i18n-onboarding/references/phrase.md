@@ -14,7 +14,7 @@ Detect the current mode during inspection:
 - **Standalone callers** are consumer workflows whose `uses:` names `RedHatInsights/i18n-tooling/.github/workflows/phrase-submit.yml` or `phrase-reconcile.yml`.
 - **Hub registration** is an entry in i18n-hub's `consumers.json` whose `repository` equals this repository. The hub is not public; organization members read it with `gh api repos/RedHatInsights/i18n-hub/contents/consumers.json -H "Accept: application/vnd.github.raw+json"`. If that request fails, report the registration as unverified.
 
-When a repository has both, report it as a conflict for the developer to resolve. Otherwise, show the detected mode as done. For a standalone repository under `RedHatInsights`, offer **Migrate to i18n-hub** as an upgrade (see [phrase-hub.md](phrase-hub.md#migrate-from-standalone)).
+When a repository has both, report it as a conflict for the developer to resolve. Otherwise, show the detected mode as done. For a standalone repository under `RedHatInsights`, offer **Migrate to i18n-hub** as an upgrade (see [phrase-hub.md](phrase-hub.md#migrate-from-standalone)). When the Phrase config has no `preset` and uses the shared project's values or the sandbox, offer **Switch to the hcc-ui preset** (see [below](#switch-to-the-hcc-ui-preset)).
 
 ## Shared project
 
@@ -46,6 +46,22 @@ A preset config needs an `i18n-pipeline` build and a pinned validation workflow 
 Point the validation config's `tmsConfig` at `phrase-tms.json` in the same change. A target file that has not arrived yet, or that is an empty `{}` placeholder the app imports before delivery, is pending, not a validation error. Keep such placeholders.
 
 The reusable reconciliation workflow writes one flat locale JSON file per target locale and opens or updates one PR per locale. It does not run the consumer's build or aggregation scripts. Never use an aggregate file as a target `outputPath`.
+
+## Switch to the hcc-ui preset
+
+Offer this upgrade when an existing `phrase-tms.json` has no `preset` and either names the sandbox project `yWWEIEQgpNVK650YBQhGx6` (`pesimon-hcc-ui-testing`, which is never a real repository's project) or writes out the values the `hcc-ui` preset supplies. Leave a config alone when the developer chose another project. The hub's own test consumers (`i18n-hub-test-consumer`) stay on the sandbox on purpose; do not offer it there. Run it only after the developer selects it. As one unit:
+
+- Rewrite the config in the preset form above. Keep `sourceCatalog.path`, `sourceCatalog.filename` and `frontendTemplate` unchanged; never rename a Phrase file in use. Use `targetOutputPath` when every output path follows one pattern, otherwise keep `targetLocales`. Use `locales` when the config translates only some of the preset's locales. Keep `state` only when it differs from the defaults.
+- Compare `i18n-pipeline tms config --config <path>` output for the old and the new file. Targets, output paths, filename, adapters and import settings must match. Only `project.uid` may change, when leaving the sandbox, and defaults the old file wrote out (`state`, `completionPolicy`) may disappear.
+- Move the locale validation caller's pin to an `i18n-tooling` commit that has `tms config`. Change any repository script that reads `targetLocales` or `project` from the file to read `tms config` output instead.
+
+A config that already names `hcc-ui` only changes shape: it resolves to the same config, so nothing is resubmitted and the hub entry stays as it is.
+
+Leaving the sandbox changes the Phrase project, so the next run submits a new batch to `hcc-ui`. Add these items to the consumer PR checklist:
+
+- Close the open locale PRs from the sandbox batch, then wait for one hub run to complete that batch. The hub checks every unfinished batch against its project pin, so an unfinished sandbox batch fails every run once the pin moves.
+- Hub mode: in the same rollout, set the hub entry's `phraseProject` to `LFsYhKphLpXQ0WWa47VZ19`. Merge the consumer PR and the hub PR back to back, between two hub runs; either one alone fails the project pin.
+- Cancel the sandbox batch's jobs in Phrase. The tooling never cancels jobs.
 
 ## Pull-request validation (both modes)
 
