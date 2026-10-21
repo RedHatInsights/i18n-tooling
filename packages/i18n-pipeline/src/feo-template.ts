@@ -548,7 +548,9 @@ export function inlineFeoLocale(
   const doc = parse(template);
   const { catalog, specs, owned, prefixes, labels } = collect(doc);
   for (const key of new Set([...Object.keys(source), ...Object.keys(catalog)])) {
-    if (source[key]?.defaultMessage !== catalog[key]?.defaultMessage) {
+    const sourceMessage = Object.hasOwn(source, key) ? source[key]?.defaultMessage : undefined;
+    const catalogMessage = Object.hasOwn(catalog, key) ? catalog[key]?.defaultMessage : undefined;
+    if (sourceMessage !== catalogMessage) {
       throw new Error(`English source changed for ${key}; regenerate and resubmit catalog`);
     }
   }

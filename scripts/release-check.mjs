@@ -14,7 +14,9 @@ export function checkEligibility({ tag, plugin, pipeline, reachable, checks, sha
   }
   if (!reachable) throw new Error("Tagged commit is not reachable from origin/main");
   for (const name of requiredChecks) {
-    const runs = checks.filter((run) => run.name === name && run.head_sha === sha);
+    const runs = checks.filter(
+      (run) => run.name === name && run.head_sha === sha && run.app?.slug === "github-actions",
+    );
     // Require the newest run: a stale successful run must not hide a failed rerun.
     const latest = runs.sort((a, b) => b.id - a.id)[0];
     if (!latest || latest.status !== "completed" || latest.conclusion !== "success") {

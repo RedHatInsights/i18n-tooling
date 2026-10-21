@@ -12,6 +12,7 @@ const passingChecks = (headSha) =>
     name,
     id,
     head_sha: headSha,
+    app: { slug: "github-actions" },
     status: "completed",
     conclusion: "success",
   }));
@@ -54,6 +55,40 @@ test("requires the newest run of each check to complete successfully on the rele
   for (const checks of refused) {
     assert.throws(() => checkEligibility({ ...base, checks }), /Required check/);
   }
+});
+
+test("rejects a successful required check from an unrelated producer", () => {
+  const base = eligible();
+  const [name] = requiredChecks;
+  const checks = base.checks.map((run) =>
+    run.name === name ? { ...run, app: { slug: "unrelated-check-producer" } } : run,
+  );
+
+  assert.throws(() => checkEligibility({ ...base, checks }), /Required check/);
+});
+
+test("a newer failed GitHub Actions run overrides an older successful run", () => {
+  const base = eligible();
+  const successful = base.checks[0];
+  const failed = { ...successful, id: successful.id + 1, conclusion: "failure" };
+
+  assert.throws(
+    () => checkEligibility({ ...base, checks: [...base.checks, failed] }),
+    /Required check/,
+  );
+});
+
+test("accepts a successful GitHub Actions run despite a same-name unrelated run", () => {
+  const base = eligible();
+  const successful = base.checks[0];
+  const unrelated = {
+    ...successful,
+    id: successful.id + 100,
+    app: { slug: "unrelated-check-producer" },
+    conclusion: "failure",
+  };
+
+  assert.doesNotThrow(() => checkEligibility({ ...base, checks: [...base.checks, unrelated] }));
 });
 
 test("refuses off-main lightweight and annotated tags and binds the event SHA", async (t) => {

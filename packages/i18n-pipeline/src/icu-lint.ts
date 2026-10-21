@@ -391,7 +391,9 @@ export function lintTargetMessage(
       }
       for (const [branch, option] of Object.entries(element.options)) {
         if (branch === "other") continue;
-        const translatedBranch = translated.options[branch];
+        const translatedBranch = Object.hasOwn(translated.options, branch)
+          ? translated.options[branch]
+          : undefined;
         if (
           !rendersCount(option.value, argument) ||
           !translatedBranch ||

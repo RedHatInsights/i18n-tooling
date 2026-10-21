@@ -1069,9 +1069,9 @@ objects:
       config: "none",
     });
 
-    const badArgument = await runValidateCi(await createRoot(), ["--mode", "warn", "--unknown"]);
-    expect(badArgument.exitCode).toBe(0);
-    expect(badArgument.stderr[0]).toContain("Unknown option '--unknown'");
+    const badArgument = await runValidateCi(await createRoot(), ["--mode", "warn", "--rot", "/x"]);
+    expect(badArgument.exitCode).toBe(2);
+    expect(badArgument.stderr[0]).toContain("Unknown option '--rot'");
     await expectResults(badArgument, {
       status: "tool-error",
       errors: 0,
@@ -1085,7 +1085,7 @@ objects:
       "--timeout-seconds",
       "0",
     ]);
-    expect(badTimeout.exitCode).toBe(0);
+    expect(badTimeout.exitCode).toBe(2);
     expect(badTimeout.stderr[0]).toContain("--timeout-seconds must be a positive integer");
     await expectResults(badTimeout, {
       status: "tool-error",
@@ -1093,6 +1093,22 @@ objects:
       warnings: 0,
       config: "none",
     });
+
+    const emptyResults = await createRoot();
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const emptyResultsExitCode = await runCli(
+      ["validate-ci", "--root", emptyResults, "--mode", "warn", "--results-dir", ""],
+      {
+        cwd: packageRoot,
+        env: {},
+        stdout: (message) => stdout.push(message),
+        stderr: (message) => stderr.push(message),
+      },
+    );
+    expect(emptyResultsExitCode).toBe(2);
+    expect(stderr[0]).toContain("--results-dir must not be empty");
+    expect(stdout[0]).toContain("status=tool-error errors=0 warnings=0 config=none");
   });
 
   it.each(["warn", "error"] as const)(
