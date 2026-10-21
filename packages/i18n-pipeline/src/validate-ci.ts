@@ -771,13 +771,13 @@ export async function runValidateCiCommand(
       report.toolError = `${report.toolError}; could not write results: ${errorMessage(writeError)}`;
     }
     emitReport(mode, report, options);
-    return exitCodeFor(mode, report);
+    return 2;
   }
 
   if (parsed.resultsDir !== undefined && !parsed.resultsDir.trim()) {
     const report = reportForToolError("--results-dir must not be empty");
     emitReport(mode, report, options);
-    return exitCodeFor(mode, report);
+    return 2;
   }
 
   let timeoutSeconds: bigint;
@@ -793,7 +793,7 @@ export async function runValidateCiCommand(
       report.toolError = `${report.toolError}; could not write results: ${errorMessage(writeError)}`;
     }
     emitReport(mode, report, options);
-    return exitCodeFor(mode, report);
+    return 2;
   }
 
   const root = resolve(options.cwd, parsed.root ?? ".");
