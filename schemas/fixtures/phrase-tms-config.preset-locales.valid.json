@@ -1,0 +1,9 @@
+{
+  "preset": "hcc-ui",
+  "locales": ["zh-CN", "fr"],
+  "sourceCatalog": {
+    "path": "locales/translation-template.json",
+    "filename": "sample.ui.en.json"
+  },
+  "targetOutputPath": "src/locales/{locale}.json"
+}

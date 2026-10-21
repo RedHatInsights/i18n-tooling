@@ -20,6 +20,8 @@ The FormatJS adapter retains string/object descriptions and other descriptor met
 
 `i18n-pipeline tms reconcile --config <path>` reconciles completed Phrase jobs into draft locale PRs. It accepts `--expect-project <uid>` and `--expect-source-filename <name>` pins, plus repeatable `--fallback-assignee <login>` values. When a run first creates a locale PR, it assigns GitHub users linked to commits that changed the batch's source input since the previous batch for the same repository, base ref, Phrase project, and upload filename. If GitHub assigns none of those users, it tries the fallback list. Existing PRs are not assigned retroactively; transient assignment errors are retried from batch state, while final errors do not change the locale result. When a newer source batch opens a locale PR, reconciliation closes matching locale PRs from earlier superseded batches unless their heads contain reviewer commits; those PRs stay open with a notice. Hub callers pass fallback logins through the reusable workflow's `fallback-assignees` input; the list does not belong in `phrase-tms.json`.
 
+`i18n-pipeline tms config --config <path>` validates and prints the resolved config as two-space-indented JSON without credentials or network calls. The built-in `hcc-ui` preset supplies the shared HCC UI project, FormatJS source settings, and `fr`, `ja`, `ko`, and `zh_cn` locale mapping. Repository objects merge recursively; repository arrays and scalar values replace preset values. Use `locales` to select a subset in the requested order, or write `targetLocales` for a different mapping. `targetOutputPath` fills missing target paths by replacing `{locale}` with the repository locale; explicit target paths win. Changing a preset changes each consumer's batch identity, so its next run resubmits the source to Phrase.
+
 In GitHub Actions, `tms submit` and `tms reconcile` append a run summary with Phrase links. Reconcile rows show locale PRs, recorded assignees, and validation finding counts; detailed findings remain in the PR's 🌐 Translation check comment.
 
 `validate --role source` and `validate-project` also warn about source plural semantics that per-locale ICU validation cannot see. Warnings do not fail validation; under GitHub Actions they become annotations.
@@ -32,14 +34,14 @@ In GitHub Actions, `tms submit` and `tms reconcile` append a run summary with Ph
 
 In `tms reconcile`, translation-validation findings do not fail the command: GitHub Actions emits warning annotations alongside the PR's 🌐 Translation check comment, and only pipeline failures exit 1.
 
-| Rule                             | Severity | Locales        | Finding                                                                                                                              |
-| -------------------------------- | -------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `missing-exact-plural-selector`  | error    | all            | The translation dropped a source `=N` branch.                                                                                        |
-| `plural-count-dropped`           | error in `other`; warning in other branches | all | A structurally paired `other` branch drops a count shown by the source; use `#` where the number belongs. |
-| `ambiguous-plural-occurrence`    | warning  | all            | Repeated plurals at the same structural path cannot be paired safely, so count-drop checks are skipped.                                |
-| `unused-plural-category`         | warning  | all            | The translation has a category its locale never selects, such as `one` in zh, ja, or ko.                                             |
-| `korean-particle-after-argument` | warning  | ko             | A bare 이/가, 은/는, 을/를, 과/와, or (으)로 follows a runtime value. Use `을(를)`-style forms or rephrase.                          |
-| `french-punctuation-space`       | warning  | fr (not fr-CA) | A regular space precedes `: ; ! ? »` or follows `«`. Use U+00A0 or U+202F.                                                           |
+| Rule                             | Severity                                    | Locales        | Finding                                                                                                     |
+| -------------------------------- | ------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------- |
+| `missing-exact-plural-selector`  | error                                       | all            | The translation dropped a source `=N` branch.                                                               |
+| `plural-count-dropped`           | error in `other`; warning in other branches | all            | A structurally paired `other` branch drops a count shown by the source; use `#` where the number belongs.   |
+| `ambiguous-plural-occurrence`    | warning                                     | all            | Repeated plurals at the same structural path cannot be paired safely, so count-drop checks are skipped.     |
+| `unused-plural-category`         | warning                                     | all            | The translation has a category its locale never selects, such as `one` in zh, ja, or ko.                    |
+| `korean-particle-after-argument` | warning                                     | ko             | A bare 이/가, 은/는, 을/를, 과/와, or (으)로 follows a runtime value. Use `을(를)`-style forms or rephrase. |
+| `french-punctuation-space`       | warning                                     | fr (not fr-CA) | A regular space precedes `: ; ! ? »` or follows `«`. Use U+00A0 or U+202F.                                  |
 
 When a target loses an argument because the source used a category branch, the mismatch error names the source branch to fix.
 

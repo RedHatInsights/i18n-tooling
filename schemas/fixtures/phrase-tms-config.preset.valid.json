@@ -1,0 +1,8 @@
+{
+  "preset": "hcc-ui",
+  "sourceCatalog": {
+    "path": "locales/translation-template.json",
+    "filename": "i18n-frontend-environment.frontend-environment.en.json"
+  },
+  "targetOutputPath": "locales/{locale}.json"
+}

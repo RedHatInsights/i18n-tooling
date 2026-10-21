@@ -666,6 +666,33 @@ describe("catalog project validation", () => {
     );
   });
 
+  it("uses a preset Phrase config from validate-project tmsConfig", async () => {
+    await createProject();
+    await writeFile(
+      join(projectRoot!, "phrase-tms.json"),
+      JSON.stringify({
+        preset: "hcc-ui",
+        locales: ["fr"],
+        sourceCatalog: {
+          path: "locales/en.json",
+          filename: "sample.ui.en.json",
+        },
+        targetOutputPath: "locales/{locale}.json",
+      }),
+    );
+    await writeFile(
+      join(projectRoot!, "locales/fr.json"),
+      JSON.stringify({ greeting: "Bonjour {name}" }),
+    );
+
+    const result = await runValidation({ version: 1, tmsConfig: "phrase-tms.json", checks: [] });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output.at(-1)).toBe(
+      "Catalog validation passed (1 source, 1 target, 0 generated catalogs).",
+    );
+  });
+
   it("counts an empty placeholder TMS target as pending with a warning", async () => {
     await createProject();
     await writeTmsConfig();

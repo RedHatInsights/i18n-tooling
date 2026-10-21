@@ -885,6 +885,7 @@ objects:
       }),
     ).toBe(0);
     expect(help[2]).toContain("PHRASE_SERVICE_ACCOUNT_CLIENT_ID");
+    expect(help[2]).toContain("<config|submit|reconcile>");
     expect(help[2]).toContain("PHRASE_PLATFORM_API_TOKEN");
     expect(help[2]).toContain("required for submit");
     expect(help[2]).toContain("reconciliation support remains unverified");
@@ -924,6 +925,76 @@ objects:
     expect(errors[0]).toContain(
       "Set PHRASE_SERVICE_ACCOUNT_CLIENT_ID and PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET, or PHRASE_PLATFORM_API_TOKEN, as protected workflow secrets",
     );
+  });
+
+  it("prints the resolved Phrase config without credentials or network calls", async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-config-print-"));
+    outsideRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-config-outside-"));
+    const config = {
+      preset: "hcc-ui",
+      sourceCatalog: {
+        path: "locales/translation-template.json",
+        filename: "sample.ui.en.json",
+      },
+      targetOutputPath: "locales/{locale}.json",
+    };
+    const configPath = join(outsideRoot, "phrase.json");
+    await writeFile(configPath, JSON.stringify(config));
+    const output: string[] = [];
+    const errors: string[] = [];
+    const fetch: typeof globalThis.fetch = vi.fn();
+    const exitCode = await runCli(["tms", "config", "--config", configPath], {
+      cwd: projectRoot,
+      env: {},
+      stdout: (message) => output.push(message),
+      stderr: (message) => errors.push(message),
+      fetch,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(errors).toEqual([]);
+    const printedConfig = JSON.parse(output[0]) as Record<string, unknown>;
+    expect(printedConfig).toEqual({
+      provider: "phrase",
+      project: { uid: "LFsYhKphLpXQ0WWa47VZ19", region: "eu" },
+      sourceCatalog: {
+        path: "locales/translation-template.json",
+        filename: "sample.ui.en.json",
+        adapter: "formatjs-json",
+        locale: "en",
+        useProjectFileImportSettings: true,
+      },
+      targetAdapter: "formatjs-json",
+      targetLocales: [
+        { phraseLocale: "fr", repositoryLocale: "fr", outputPath: "locales/fr.json" },
+        { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
+        { phraseLocale: "ko", repositoryLocale: "ko", outputPath: "locales/ko.json" },
+        { phraseLocale: "zh_cn", repositoryLocale: "zh-CN", outputPath: "locales/zh-CN.json" },
+      ],
+    });
+    expect(output[0]).toBe(JSON.stringify(printedConfig, null, 2));
+    expect(fetch).not.toHaveBeenCalled();
+
+    const help: string[] = [];
+    expect(
+      await runCli(["tms", "config", "--help"], {
+        stdout: (message) => help.push(message),
+        stderr: () => undefined,
+      }),
+    ).toBe(0);
+    expect(help[0]).toContain("Usage: i18n-pipeline tms config --config <path>");
+    expect(help[0]).toContain("needs no credentials and makes no network calls");
+
+    await writeFile(configPath, JSON.stringify({ ...config, preset: "unknown" }));
+    expect(
+      await runCli(["tms", "config", "--config", configPath], {
+        cwd: projectRoot,
+        env: {},
+        stdout: () => undefined,
+        stderr: (message) => errors.push(message),
+      }),
+    ).toBe(1);
+    expect(errors.at(-1)).toContain("Available presets: hcc-ui");
   });
 
   it.each([
@@ -1686,7 +1757,7 @@ objects:
 
     expect(exitCode).toBe(1);
     expect(errors[0]).toContain('Invalid GitHub login for --fallback-assignee: "not/a/login"');
-    expect(errors[0]).toContain("Usage: i18n-pipeline tms <submit|reconcile> [options]");
+    expect(errors[0]).toContain("Usage: i18n-pipeline tms <config|submit|reconcile> [options]");
     expect(calls).toEqual([]);
   });
 

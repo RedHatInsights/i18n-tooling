@@ -95,9 +95,11 @@ export {
 } from "./phrase-workflow.js";
 export {
   parsePhraseTmsConfig,
+  resolvePhraseTmsConfig,
   validatePhraseWorkflowConfig,
   type PhraseTmsConfig,
 } from "./phrase-config.js";
+export { PHRASE_TMS_PRESETS, type PhraseTmsPresetName } from "./phrase-presets.js";
 export {
   GitHubPhraseRepository,
   GitHubRepositoryError,
