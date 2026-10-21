@@ -20,7 +20,7 @@ The `i18n-onboarding` agent skill does the onboarding for you, in Claude Code, C
    npx skills add RedHatInsights/i18n-tooling -g -s i18n-onboarding -a claude-code -a codex -a opencode -a pi -y
    ```
 
-3. **Run it.** In the repository to onboard, ask the agent to "onboard this repository to i18n tooling". It inspects the repository and asks one set of questions: tracks, Jira tickets, branch layout, how far to go and Phrase mode. It then adds catalog validation and the tracks you chose.
+3. **Run it.** In the repository to onboard, ask the agent to "onboard this repository to i18n tooling". It inspects the repository, shows a plan (tracks, Phrase mode, locales, branch, whether it pushes and opens a PR) and asks you to approve it. Choose adjust to change anything through a short wizard. It then adds catalog validation and the approved tracks.
 4. **Finish the Phrase setup.** In the default hub mode, the skill opens or drafts a registration PR in `RedHatInsights/i18n-hub`. Two admin steps remain:
    - A `RedHatInsights` organization owner installs the [`hcc-i18n-tms-sync`](https://github.com/apps/hcc-i18n-tms-sync) App on the repository.
    - If the repository restricts branch creation with rulesets, an admin excludes `i18n-tms-state` and `i18n/phrase-*`.
@@ -140,7 +140,7 @@ Alternatives:
 - **Claude Code plugin:** `/plugin marketplace add RedHatInsights/i18n-tooling`, then `/plugin install i18n-onboarding@i18n-tooling`. Update with `/plugin marketplace update i18n-tooling`.
 - **Without third-party tools:** clone this repository and symlink `skills/i18n-onboarding` into `~/.agents/skills/` and `~/.claude/skills/`.
 
-Then ask the agent to onboard the repository to i18n tooling. The skill inspects first, asks one set of questions (tracks, Jira tickets, branch layout, how far to go, Phrase mode), and then runs the selected tracks. For Phrase, the default is registering the repository in the central i18n hub (the `RedHatInsights/i18n-hub` repository, not public), which holds the Phrase credential and the key of the i18n GitHub App, [`hcc-i18n-tms-sync`](https://github.com/apps/hcc-i18n-tms-sync). A `RedHatInsights` organization owner installs that App on each hub consumer; the skill requests it in the hub registration PR. In that mode the repository gets no Phrase callers or secrets. The alternative is standalone: the repository runs its own callers, using its own GitHub App or, as a fallback, `GITHUB_TOKEN`.
+Then ask the agent to onboard the repository to i18n tooling. The skill inspects first, proposes a plan and asks for approval, and then runs the approved tracks. To change the plan (tracks, Jira tickets, branch layout, how far to go, Phrase mode), choose adjust and answer the wizard. For Phrase, the default is registering the repository in the central i18n hub (the `RedHatInsights/i18n-hub` repository, not public), which holds the Phrase credential and the key of the i18n GitHub App, [`hcc-i18n-tms-sync`](https://github.com/apps/hcc-i18n-tms-sync). A `RedHatInsights` organization owner installs that App on each hub consumer; the skill requests it in the hub registration PR. In that mode the repository gets no Phrase callers or secrets. The alternative is standalone: the repository runs its own callers, using its own GitHub App or, as a fallback, `GITHUB_TOKEN`.
 
 `rbac-ui` can declare its FormatJS extraction/compile outputs and catalog checks without a custom validation script:
 

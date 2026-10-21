@@ -16,7 +16,7 @@ Both callers name the same environment (the template uses `phrase-pilot`). A reu
 The environment is protected, and its deployment refs are restricted to the default branch. It holds:
 
 - `PHRASE_PLATFORM_API_TOKEN`: a Platform API token of a dedicated technical user with access to the project (a person's token is acceptable for a pilot). Phrase Service Accounts cannot create jobs, so submit cannot use `PHRASE_SERVICE_ACCOUNT_CLIENT_ID` and `PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET`. A run with both kinds of Phrase credential set fails before it makes any request.
-- GitHub auth, set by the wizard answer:
+- GitHub auth, set by the approved plan:
   - **Own GitHub App (preferred):** `APP_CLIENT_ID` and `APP_PRIVATE_KEY`, both set. Use an App owned by this repository's team, installed on this repository with `contents: write` and `pull-requests: write`. Never use the i18n-hub App's key. Locale PRs are authored by `<app-slug>[bot]`, and their checks run normally.
   - **`GITHUB_TOKEN` (fallback):** leave both App secrets unset. Turn on the repository setting "Allow GitHub Actions to create and approve pull requests", and require Code Owner review on the default branch. GitHub may hold the `pull_request` checks of locale PRs until a maintainer approves them. Do not assume those checks start immediately.
 
