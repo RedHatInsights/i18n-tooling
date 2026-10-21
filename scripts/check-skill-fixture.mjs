@@ -39,8 +39,8 @@ const fixtures = {
     requiredText: [
       ["src/messages.js", 'defaultMessage: "Stop the bill for service."'],
       ["src/messages.js", 'defaultMessage: "{count, plural, one {# result} other {# results}}"'],
-      // Every repository joins the shared HCC Phrase project.
-      ["i18n/phrase-tms.json", "yWWEIEQgpNVK650YBQhGx6"],
+      // Every repository uses the built-in shared HCC UI preset.
+      ["i18n/phrase-tms.json", '"preset": "hcc-ui"'],
     ],
   },
   "formatjs-generated-ids": {

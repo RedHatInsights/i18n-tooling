@@ -18,39 +18,30 @@ When a repository has both, report it as a conflict for the developer to resolve
 
 ## Shared project
 
-Both modes use the shared HCC Phrase project, `yWWEIEQgpNVK650YBQhGx6` in region `eu`, created from the `[HCC UI]` template with shared translation memories and term bases. Developers do not know these details, so write them into the config directly. Its file import settings fit FormatJS JSON, so set `useProjectFileImportSettings: true`. Its Phrase locale for `zh-CN` is `zh_cn`; `fr`, `ja`, and `ko` match the repository codes. Use another project only when the developer names its UID and region. The i18n-hub's `docs/operations.md` records the shared project; when it is readable and disagrees, follow it and report the difference.
+Both modes use the shared Phrase project named `hcc-ui`, UID `LFsYhKphLpXQ0WWa47VZ19`, in region `eu`. It is created from the `[HCC UI]` project template; the template is not itself a project. The `hcc-ui` preset supplies its FormatJS settings, project file-import settings, and locale mapping: Phrase `fr`, `ja`, `ko`, and `zh_cn` map to repository `fr`, `ja`, `ko`, and `zh-CN`.
 
 ## Config (both modes)
 
-Write `i18n/phrase-tms.json` (or keep the repository's existing location). Keep the extracted FormatJS source catalog in the repository change, normally at `locales/translation-template.json`. Phrase submission reads that file from the commit it syncs; it does not extract messages. Set `sourceCatalog.adapter` to `formatjs-json`, keep `description` as translator context, and confirm the Phrase project parses ICU. A minimal `phrase-tms.json` has this shape:
+Write `i18n/phrase-tms.json` (or keep the repository's existing location). Keep the extracted FormatJS source catalog in the repository change, normally at `locales/translation-template.json`. Phrase submission reads that file from the commit it syncs; it does not extract messages. Keep `description` as translator context and confirm the Phrase project parses ICU. A minimal shared-project config has this shape:
 
 ```json
 {
-  "provider": "phrase",
-  "project": { "uid": "yWWEIEQgpNVK650YBQhGx6", "region": "eu" },
-  "state": { "branch": "i18n-tms-state" },
+  "preset": "hcc-ui",
   "sourceCatalog": {
     "path": "locales/translation-template.json",
-    "filename": "<repository-name>.ui.en.json",
-    "adapter": "formatjs-json",
-    "locale": "en",
-    "useProjectFileImportSettings": true
+    "filename": "<repository-name>.ui.en.json"
   },
-  "targetAdapter": "formatjs-json",
-  "targetLocales": [
-    {
-      "phraseLocale": "fr",
-      "repositoryLocale": "fr-CA",
-      "outputPath": "src/locales/fr-CA.json"
-    }
-  ],
-  "completionPolicy": { "default": "per-locale" }
+  "targetOutputPath": "src/locales/{locale}.json"
 }
 ```
 
 Set `sourceCatalog.filename` to `<repository-name>.<catalog>.en.json`, where `<catalog>` is `ui` for application messages and `feo` for FEO's catalog (for example `insights-rbac-ui.ui.en.json`). This is the shared HCC Phrase project's convention: the name the file gets in Phrase shows which app and catalog it belongs to. Without it, the pipeline uploads the source path's basename, which for most apps is the generic `translation-template.json`. The repository file keeps its path.
 
-Use either `sourceCatalog.importSettingsUid` or `useProjectFileImportSettings`, not both. Map each Phrase locale to its repository locale once, in `targetLocales`. `catalog-validation.json` can use `tmsConfig` to derive those target checks; do not list them again.
+For an FEO config, use `deploy/locales/translation-template.json` and `<repository-name>.feo.en.json`, set `targetOutputPath` to `deploy/locales/{locale}.json`, and add `"frontendTemplate": { "path": "deploy/frontend.yaml", "generateSourceCatalog": true }`.
+
+After the preset and required source catalog path and filename, add only fields that override the preset: use `locales` for a subset of its repository locales, set `project` only when the developer names another Phrase project, and write a full `targetLocales` array only when the locale mapping differs. Repository objects merge recursively; arrays and scalar values replace the preset values. A changed preset changes the batch identity for every consumer that uses it, so its next run resubmits the source to Phrase. `i18n-pipeline tms config --config <path>` prints the expanded config. The preset turns on `useProjectFileImportSettings`, so a config that sets `sourceCatalog.importSettingsUid` must also set `useProjectFileImportSettings: false`.
+
+A preset config needs an `i18n-pipeline` build and a pinned validation workflow that know presets. If `i18n-pipeline tms config --help` fails, rebuild the CLI from current `i18n-tooling` main, and pin the locale validation caller to an `i18n-tooling` commit that has `tms config`. `catalog-validation.json` can use `tmsConfig` to derive target checks; do not list them again.
 
 Point the validation config's `tmsConfig` at `phrase-tms.json` in the same change. A target file that has not arrived yet, or that is an empty `{}` placeholder the app imports before delivery, is pending, not a validation error. Keep such placeholders.
 
