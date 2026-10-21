@@ -187,7 +187,7 @@ Start with the Actions run summary. Submit shows whether it created a batch or r
 | `failed`              | A pipeline step failed. Inspect the job log and fix the Phrase job or configuration before retrying. If the message says `No Phrase job was created for this batch; voided after 15 minutes`, dispatch submit again. |
 | `invalid-translation` | A locale PR was delivered with translation errors. Fix the translation in Phrase, keep the final jobs `COMPLETED`, and reconcile updates the same PR. The PR comment contains the findings.                          |
 | `pr-created`          | Review the draft locale PR. Its validation findings are shown in the summary and in the 🌐 Translation check comment.                                                                                                |
-| `superseded`          | Newer source was submitted. Follow the newer batch; the old Phrase jobs are not cancelled automatically.                                                                                                             |
+| `superseded`          | Newer source was submitted. Follow the newer batch; the old locale PR closes automatically once its replacement opens unless it has reviewer commits. The old Phrase jobs are not cancelled automatically.           |
 
 Ambiguous recovery reports `Phrase returned candidate jobs with missing or invalid recovery metadata.`, `Phrase jobs exist for this batch, but no creation-time group matches its pending locales.`, or `More than one Phrase creation-time group matches this batch.` It then lists `Candidate jobs grouped by creation time: <candidates>.` and says `Move the jobs that do not belong to this batch to the Phrase recycle bin, then rerun.` Check those candidates before rerunning.
 

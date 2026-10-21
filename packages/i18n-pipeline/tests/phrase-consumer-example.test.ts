@@ -133,6 +133,7 @@ describe("Phrase consumer example", () => {
       async getPullRequestState() {
         return { state: "open", headSha: "tooling-commit" };
       },
+      async closePullRequest() {},
       async createOrUpdatePullRequest(input) {
         pullRequests.push(input);
         return "https://github.com/example/consumer/pull/1";
@@ -331,6 +332,7 @@ describe("Phrase consumer example", () => {
       async getPullRequestState() {
         return { state: "open", headSha: "tooling-commit" };
       },
+      async closePullRequest() {},
       async createOrUpdatePullRequest(input) {
         pullRequests.push(input);
         return "https://github.com/example/consumer/pull/2";
