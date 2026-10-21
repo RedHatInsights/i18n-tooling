@@ -60,6 +60,6 @@ When the Phrase track is also selected, the FEO catalog gets its own Phrase conf
 - `state.branch` is `i18n-tms-state-feo`. Every config in a repository needs its own state branch.
 - `sourceCatalog.path` is `deploy/locales/translation-template.json`, and `sourceCatalog.filename` is `<repository-name>.feo.en.json`.
 - `"frontendTemplate": { "path": "deploy/frontend.yaml", "generateSourceCatalog": true }` makes submission extract the source from the YAML and makes reconciliation add `spec.locales.<locale>` to the same PR as the locale file.
-- `targetLocales` uses the same locales as `feo.locales`, with `outputPath` `deploy/locales/<locale>.json`.
+- Use `locales` for a subset of the preset's repository locales and set `targetOutputPath` to `deploy/locales/{locale}.json`. Write a full `targetLocales` array only when FEO needs a different Phrase-to-repository mapping.
 
 Validation keeps `tmsConfig` on the app's config; the `feo` entry already checks the FEO locales. In hub mode, register this config as its own `consumers.json` entry (see [phrase-hub.md](phrase-hub.md#registry-entry)). In standalone mode, add a second pair of callers with this config path. Until the installed FEC schema accepts `spec.locales`, keep this config out of the change and list it as blocked by the FEC upgrade, because its locale PRs would fail that schema.

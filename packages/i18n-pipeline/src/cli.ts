@@ -26,7 +26,7 @@ import {
 import { GitHubPhraseRepository } from "./github-phrase-repository.js";
 import { PhraseClient, type PhraseClientOptions } from "./phrase-client.js";
 import { overlongFeoTranslationsWarning } from "./feo-locale.js";
-import { parsePhraseTmsConfig, targetAdapterId } from "./phrase-config.js";
+import { parsePhraseTmsConfig, resolvePhraseTmsConfig, targetAdapterId } from "./phrase-config.js";
 import {
   phraseFinalWorkflowJob,
   PhraseWorkflow,
@@ -65,7 +65,7 @@ Commands:
   validate-project  Check configured catalogs and generated-catalog sync
   validate-ci       Discover and validate a consumer repository for CI
   convert           Convert a catalog between adapters
-  tms               Submit and reconcile translation batches
+  tms               Inspect config, submit, and reconcile translation batches
   feo               Extract and inline Frontend and FrontendEnvironment translations
   version           Print the package version
   help              Show help, optionally for one command
@@ -119,7 +119,7 @@ Options:
   --source-config <path> Source adapter JSON config
   --target-config <path> Target adapter JSON config
   -h, --help             Show this help`,
-  tms: `Usage: i18n-pipeline tms <submit|reconcile> [options]
+  tms: `Usage: i18n-pipeline tms <config|submit|reconcile> [options]
 
 Use i18n-pipeline tms <command> --help for command options.
 
@@ -129,6 +129,13 @@ Environment:
   PHRASE_SERVICE_ACCOUNT_CLIENT_SECRET
                               Service Account; reconciliation support remains unverified
   GITHUB_TOKEN                State-branch and pull-request access`,
+  "tms config": `Usage: i18n-pipeline tms config --config <path>
+
+Print the resolved Phrase TMS config as JSON. This command needs no credentials and makes no network calls.
+
+Options:
+  --config <path>  TMS JSON config path
+  -h, --help       Show this help`,
   "tms submit": `Usage: i18n-pipeline tms submit --config <path> [options]
 
 Options:
@@ -192,7 +199,14 @@ async function readJson(path: string, label: string): Promise<unknown> {
   }
 }
 
-async function resolveTmsInputPath(cwd: string, inputPath: string, label: string): Promise<string> {
+// Submit and reconcile run with credentials, so their inputs must stay inside the working
+// directory; read-only `tms config` may inspect a config anywhere.
+async function resolveTmsInputPath(
+  cwd: string,
+  inputPath: string,
+  label: string,
+  { allowOutsideWorkingDirectory = false } = {},
+): Promise<string> {
   const absolutePath = resolve(cwd, inputPath);
   let workingDirectory: string;
   try {
@@ -230,9 +244,10 @@ async function resolveTmsInputPath(cwd: string, inputPath: string, label: string
   }
   const pathFromWorkingDirectory = relative(workingDirectory, realPath);
   if (
-    pathFromWorkingDirectory === ".." ||
-    pathFromWorkingDirectory.startsWith(`..${sep}`) ||
-    isAbsolute(pathFromWorkingDirectory)
+    !allowOutsideWorkingDirectory &&
+    (pathFromWorkingDirectory === ".." ||
+      pathFromWorkingDirectory.startsWith(`..${sep}`) ||
+      isAbsolute(pathFromWorkingDirectory))
   ) {
     throw new Error(`${label} path "${inputPath}" resolves outside the working directory`);
   }
@@ -718,6 +733,22 @@ async function runTmsCommand(
   }
 }
 
+async function runTmsConfigCommand(
+  args: string[],
+  options: Required<Pick<CliOptions, "cwd" | "stdout">>,
+): Promise<number> {
+  const values = parseOptions(args, { config: { type: "string" } });
+  if (!values.config) throw new Error("TMS command requires --config");
+  const safeConfigPath = await resolveTmsInputPath(options.cwd, values.config, "TMS config", {
+    allowOutsideWorkingDirectory: true,
+  });
+  const config = await readJson(safeConfigPath, "TMS config");
+  const resolved = resolvePhraseTmsConfig(config);
+  parsePhraseTmsConfig(config);
+  options.stdout(JSON.stringify(resolved, null, 2));
+  return 0;
+}
+
 async function convertCatalog(
   args: string[],
   { cwd, stdout }: Required<Pick<CliOptions, "cwd" | "stdout">>,
@@ -900,7 +931,9 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
   if (command === "tms") {
     const [subcommand, ...subargs] = args;
     const helpCommand =
-      subcommand === "submit" || subcommand === "reconcile" ? `tms ${subcommand}` : "tms";
+      subcommand === "config" || subcommand === "submit" || subcommand === "reconcile"
+        ? `tms ${subcommand}`
+        : "tms";
     if (
       !subcommand ||
       subcommand === "help" ||
@@ -920,6 +953,9 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
   try {
     if (command === "tms") {
       const [subcommand, ...subargs] = args;
+      if (subcommand === "config") {
+        return await runTmsConfigCommand(subargs, { cwd, stdout });
+      }
       if (subcommand !== "submit" && subcommand !== "reconcile") {
         throw new Error(`Unknown TMS command "${subcommand ?? ""}"`);
       }

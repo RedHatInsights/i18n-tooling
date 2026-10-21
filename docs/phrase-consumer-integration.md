@@ -11,6 +11,8 @@ For maintainer guidance on run schedules, Phrase job links, locale PRs, and outc
 3. Reconciliation writes one flat `id -> message string` file per repository locale, for example `src/locales/fr.json`. Do not point `outputPath` at an aggregate file such as `src/locales/data.json`.
 4. Run the consumer's native compile/aggregation and build checks on the generated locale PR. The reusable Phrase workflow validates catalog IDs and ICU arguments, but does not run application-specific build steps.
 
+The checked-in example keeps a full non-preset config. Consumers of the shared HCC UI project can use the `hcc-ui` preset, `locales` for a subset, and `targetOutputPath` for repository-specific output paths. Run `i18n-pipeline tms config --config <path>` to print the expanded config. Changing a preset value changes the batch identity and resubmits each consumer's source on its next run.
+
 The checked-in example files:
 
 - [Phrase config](../examples/phrase-consumer/.github/i18n/phrase-tms.json)

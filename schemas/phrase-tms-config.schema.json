@@ -2,9 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://redhat.com/schemas/i18n-pipeline/phrase-tms-config.json",
   "title": "Phrase TMS workflow configuration",
-  "description": "Consumer-repository configuration for reusable Phrase submission and reconciliation workflows. Credentials must be provided as protected workflow secrets; the CLI rejects credential-like keys anywhere in this file.",
+  "description": "Consumer-repository configuration for reusable Phrase submission and reconciliation workflows. The hcc-ui preset supplies shared project and locale settings. Credentials must be provided as protected workflow secrets; the CLI rejects credential-like keys anywhere in this file.",
   "type": "object",
-  "required": ["provider", "project", "sourceCatalog", "targetLocales"],
+  "required": ["sourceCatalog"],
   "$defs": {
     "builtInAdapter": {
       "description": "tms submit and tms reconcile run with Phrase and GitHub write credentials, so they load only the CLI's built-in catalog adapters.",
@@ -12,12 +12,32 @@
     }
   },
   "properties": {
+    "preset": {
+      "enum": ["hcc-ui"]
+    },
+    "locales": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["fr", "ja", "ko", "zh-CN"]
+      },
+      "description": "Repository locales selected from the named preset, kept in this list's order."
+    },
+    "targetOutputPath": {
+      "type": "string",
+      "minLength": 1,
+      "allOf": [
+        { "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*/$)(?!.*(?:^|/)\\.\\.?(/|$)).+$" },
+        { "pattern": "\\{locale\\}" }
+      ],
+      "description": "Repository-relative output path template, with the same path rules as outputPath. The parser substitutes each target's repository locale when outputPath is omitted."
+    },
     "provider": {
       "const": "phrase"
     },
     "project": {
       "type": "object",
-      "required": ["uid", "region"],
       "properties": {
         "uid": {
           "type": "string",
@@ -46,7 +66,7 @@
     "sourceCatalog": {
       "type": "object",
       "description": "Phrase source catalog settings. For generated FEO source, the template path is the source input while path remains the logical catalog location.",
-      "required": ["path", "adapter", "locale"],
+      "required": ["path"],
       "properties": {
         "path": {
           "type": "string",
@@ -109,7 +129,7 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["phraseLocale", "repositoryLocale", "outputPath"],
+        "required": ["phraseLocale", "repositoryLocale"],
         "properties": {
           "phraseLocale": {
             "type": "string",
@@ -150,6 +170,99 @@
   "allOf": [
     {
       "if": {
+        "required": ["preset"],
+        "properties": {
+          "preset": {}
+        }
+      },
+      "then": {
+        "anyOf": [
+          {
+            "required": ["targetOutputPath"],
+            "properties": {
+              "targetOutputPath": {}
+            }
+          },
+          {
+            "required": ["targetLocales"],
+            "properties": {
+              "targetLocales": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["outputPath"],
+                  "properties": { "outputPath": {} }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "else": {
+        "required": ["provider", "project", "targetLocales"],
+        "properties": {
+          "provider": {},
+          "project": {
+            "type": "object",
+            "required": ["uid", "region"],
+            "properties": {
+              "uid": {},
+              "region": {}
+            }
+          },
+          "sourceCatalog": {
+            "type": "object",
+            "required": ["adapter", "locale"],
+            "properties": {
+              "adapter": {},
+              "locale": {}
+            }
+          },
+          "targetLocales": {}
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["locales"],
+        "properties": {
+          "locales": {}
+        }
+      },
+      "then": {
+        "required": ["preset"],
+        "properties": {
+          "preset": {}
+        },
+        "not": {
+          "type": "object",
+          "required": ["targetLocales"],
+          "properties": { "targetLocales": {} }
+        }
+      }
+    },
+    {
+      "if": {
+        "not": {
+          "required": ["targetOutputPath"],
+          "properties": { "targetOutputPath": {} }
+        }
+      },
+      "then": {
+        "properties": {
+          "targetLocales": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["outputPath"],
+              "properties": { "outputPath": {} }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
         "required": ["frontendTemplate"],
         "properties": {
           "frontendTemplate": { "type": "object" }
@@ -159,7 +272,6 @@
         "properties": {
           "sourceCatalog": {
             "type": "object",
-            "required": ["adapter", "locale"],
             "properties": {
               "adapter": { "const": "formatjs-json" },
               "locale": { "const": "en" }

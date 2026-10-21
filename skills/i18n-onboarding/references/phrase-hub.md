@@ -16,7 +16,7 @@ Work out one `consumers.json` entry per Phrase config: one for the app catalog a
   "repository": "RedHatInsights/<repository-name>",
   "baseRef": "<default-branch>",
   "configPath": "<path-to-phrase-tms.json>",
-  "phraseProject": "yWWEIEQgpNVK650YBQhGx6",
+  "phraseProject": "LFsYhKphLpXQ0WWa47VZ19",
   "phraseFile": "<repository-name>.ui.en.json"
 }
 ```

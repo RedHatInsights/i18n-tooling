@@ -255,6 +255,21 @@ Consumer configuration follows [the Phrase TMS config schema](schemas/phrase-tms
 }
 ```
 
+Consumers of the shared HCC UI Phrase project can use the `hcc-ui` preset instead of repeating its project, FormatJS, import-settings, and locale-mapping values:
+
+```json
+{
+  "preset": "hcc-ui",
+  "sourceCatalog": {
+    "path": "locales/translation-template.json",
+    "filename": "<repository-name>.ui.en.json"
+  },
+  "targetOutputPath": "locales/{locale}.json"
+}
+```
+
+The preset maps Phrase `fr`, `ja`, `ko`, and `zh_cn` to repository `fr`, `ja`, `ko`, and `zh-CN`. `locales` can select a non-empty subset by repository locale and keeps the listed order. Objects merge recursively with the repository config; its arrays and scalar values replace preset values. Use a full `targetLocales` array only for a different mapping. `targetOutputPath` fills missing target `outputPath` values after replacing `{locale}` with the repository locale; an explicit `outputPath` takes precedence. `i18n-pipeline tms config --config <path>` prints the expanded config as JSON without credentials or network access. A preset change changes the batch identity of every consumer that uses it, so each consumer's next run resubmits its source to Phrase.
+
 Set `sourceCatalog.importSettingsUid` or `useProjectFileImportSettings` when the Phrase project requires a particular import format. `sourceCatalog.filename` defaults to the source path's basename. `project.region` selects the Platform OAuth and TMS API hosts (`eu` or `us`).
 
 Phrase credentials come from one of two secret sets. The CLI chooses by **which secret names are set**; it never inspects a value to guess its kind, so a value stored under the wrong name is sent with the wrong login flow and Phrase rejects it:

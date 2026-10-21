@@ -1,4 +1,5 @@
 import { FEO_MAX_LOCALES, assertFeoLocaleId } from "./feo-locale.js";
+import { PHRASE_TMS_PRESETS, type PhraseTmsPresetName } from "./phrase-presets.js";
 import type { LocaleCompletionPolicy, PhraseWorkflowConfig } from "./phrase-workflow.js";
 
 export interface PhraseTmsConfig {
@@ -107,6 +108,149 @@ export function validateRepoPath(path: string, label: string): void {
   }
 }
 
+function cloneConfigValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(cloneConfigValue);
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [key, cloneConfigValue(child)]),
+    );
+  }
+  return value;
+}
+
+function mergeConfigValues(base: unknown, override: unknown): unknown {
+  if (!isRecord(base) || !isRecord(override)) return cloneConfigValue(override);
+  const merged = new Map(
+    Object.entries(base).map(([key, value]) => [key, cloneConfigValue(value)]),
+  );
+  for (const [key, value] of Object.entries(override)) {
+    merged.set(
+      key,
+      Object.hasOwn(base, key) ? mergeConfigValues(base[key], value) : cloneConfigValue(value),
+    );
+  }
+  return Object.fromEntries(merged);
+}
+
+/** Expands a named preset and the config-only locale/output path conveniences. */
+export function resolvePhraseTmsConfig(value: unknown): Record<string, unknown> {
+  rejectCredentialFields(value);
+  const input = recordValue(value, "TMS config");
+  const hasPreset = Object.hasOwn(input, "preset");
+  let presetName: PhraseTmsPresetName | undefined;
+  if (hasPreset) {
+    if (typeof input.preset !== "string") {
+      throw new TypeError('TMS config "preset" must be a string');
+    }
+    if (!Object.hasOwn(PHRASE_TMS_PRESETS, input.preset)) {
+      const available = Object.keys(PHRASE_TMS_PRESETS).join(", ");
+      throw new TypeError(
+        `Unknown TMS config preset "${input.preset}". Available presets: ${available}`,
+      );
+    }
+    presetName = input.preset as PhraseTmsPresetName;
+  }
+
+  rejectUnknownKeys(
+    input,
+    [
+      "preset",
+      "locales",
+      "targetOutputPath",
+      "provider",
+      "project",
+      "state",
+      "sourceCatalog",
+      "targetAdapter",
+      "targetOptions",
+      "frontendTemplate",
+      "targetLocales",
+      "completionPolicy",
+    ],
+    "TMS config",
+  );
+
+  if (Object.hasOwn(input, "provider") && input.provider !== "phrase") {
+    throw new TypeError('TMS config "provider" must be "phrase"');
+  }
+  if (!hasPreset && input.provider !== "phrase") {
+    throw new TypeError('TMS config "provider" must be "phrase"');
+  }
+
+  const hasLocales = Object.hasOwn(input, "locales");
+  if (hasLocales && !presetName) {
+    throw new TypeError('TMS config "locales" is only valid with a preset');
+  }
+  if (hasLocales && Object.hasOwn(input, "targetLocales")) {
+    throw new TypeError('TMS config "locales" cannot be combined with "targetLocales"');
+  }
+
+  const targetOutputPath = optionalString(input.targetOutputPath, 'TMS config "targetOutputPath"');
+  if (targetOutputPath !== undefined && !targetOutputPath.includes("{locale}")) {
+    throw new TypeError('TMS config "targetOutputPath" must contain "{locale}"');
+  }
+
+  const repositoryConfig = Object.fromEntries(
+    Object.entries(input).filter(
+      ([key]) => !["preset", "locales", "targetOutputPath"].includes(key),
+    ),
+  );
+  const resolved = (
+    presetName
+      ? mergeConfigValues(PHRASE_TMS_PRESETS[presetName], repositoryConfig)
+      : cloneConfigValue(repositoryConfig)
+  ) as Record<string, unknown>;
+
+  if (hasLocales) {
+    if (!Array.isArray(input.locales) || input.locales.length === 0) {
+      throw new TypeError('TMS config "locales" must be a non-empty array');
+    }
+    const targets = resolved.targetLocales;
+    if (!Array.isArray(targets)) {
+      throw new TypeError('TMS config "targetLocales" must be an array');
+    }
+    const availableLocales = targets.flatMap((target) =>
+      isRecord(target) && typeof target.repositoryLocale === "string"
+        ? [target.repositoryLocale]
+        : [],
+    );
+    const availableSet = new Set(availableLocales);
+    const selectedLocales = new Set<string>();
+    const selectedTargets: unknown[] = [];
+    for (const locale of input.locales) {
+      if (typeof locale !== "string" || !locale.trim()) {
+        throw new TypeError('Each entry in TMS config "locales" must be a non-empty string');
+      }
+      if (selectedLocales.has(locale)) {
+        throw new TypeError(`Duplicate repository locale in TMS config "locales": ${locale}`);
+      }
+      if (!availableSet.has(locale)) {
+        throw new TypeError(
+          `Unknown repository locale "${locale}" in TMS config "locales". Available: ${availableLocales.join(", ")}`,
+        );
+      }
+      selectedLocales.add(locale);
+      selectedTargets.push(
+        targets.find((target) => isRecord(target) && target.repositoryLocale === locale),
+      );
+    }
+    resolved.targetLocales = selectedTargets;
+  }
+
+  if (targetOutputPath !== undefined && Array.isArray(resolved.targetLocales)) {
+    resolved.targetLocales = resolved.targetLocales.map((target) => {
+      if (!isRecord(target) || target.outputPath !== undefined) return target;
+      if (typeof target.repositoryLocale !== "string") return target;
+      return {
+        ...target,
+        outputPath: targetOutputPath.replaceAll("{locale}", target.repositoryLocale),
+      };
+    });
+  }
+
+  return resolved;
+}
+
 /**
  * Target catalogs use the source adapter unless the config names another. Stored batch configs
  * keep `targetAdapter` optional, so resolve it here rather than when parsing.
@@ -192,7 +336,7 @@ export function validatePhraseWorkflowConfig(config: PhraseWorkflowConfig): void
  * Parses consumer JSON (see schemas/phrase-tms-config.schema.json) into workflow config.
  * Structural checks live here; semantic checks run through `validatePhraseWorkflowConfig`.
  */
-export function parsePhraseTmsConfig(value: unknown): PhraseTmsConfig {
+function parseResolvedPhraseTmsConfig(value: unknown): PhraseTmsConfig {
   rejectCredentialFields(value);
   const root = recordValue(value, "TMS config");
   rejectUnknownKeys(
@@ -337,4 +481,9 @@ export function parsePhraseTmsConfig(value: unknown): PhraseTmsConfig {
     optionalString(state.directory, 'TMS config "state.directory"') ?? DEFAULT_STATE_DIRECTORY;
   validateRepoPath(stateDirectory, 'TMS config "state.directory"');
   return { workflow, stateBranch, stateDirectory };
+}
+
+/** Parses consumer JSON after expanding any named preset and config-only conveniences. */
+export function parsePhraseTmsConfig(value: unknown): PhraseTmsConfig {
+  return parseResolvedPhraseTmsConfig(resolvePhraseTmsConfig(value));
 }
