@@ -27,8 +27,11 @@
     "targetOutputPath": {
       "type": "string",
       "minLength": 1,
-      "pattern": "\\{locale\\}",
-      "description": "Repository-relative output path template. The parser substitutes each target's repository locale when outputPath is omitted."
+      "allOf": [
+        { "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*/$)(?!.*(?:^|/)\\.\\.?(/|$)).+$" },
+        { "pattern": "\\{locale\\}" }
+      ],
+      "description": "Repository-relative output path template, with the same path rules as outputPath. The parser substitutes each target's repository locale when outputPath is omitted."
     },
     "provider": {
       "const": "phrase"
