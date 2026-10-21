@@ -118,6 +118,10 @@ export interface PhraseLocaleRecord {
   pullRequestFinalized?: boolean;
   /** A merged PR is permanently final and is not looked up again. */
   pullRequestMerged?: boolean;
+  /** The superseded-PR notice was successfully posted. */
+  pullRequestSupersededNoticePosted?: true;
+  /** Reviewer commits were found on a superseded PR, so it must stay open. */
+  pullRequestSupersededReviewerCommits?: true;
   /** Last generated description; missing digest refreshes pre-upgrade PR safety notes once. */
   pullRequestBodyDigest?: string;
   /** Retry the PR title and description update if it failed after a commit. */
@@ -215,6 +219,7 @@ export interface PhraseWorkflowRepository {
   }): Promise<string[]>;
   addPullRequestAssignees(pullRequestUrl: string, logins: string[]): Promise<string[]>;
   getPullRequestState(pullRequestUrl: string): Promise<PhrasePullRequestState>;
+  closePullRequest(pullRequestUrl: string): Promise<void>;
   createOrUpdatePullRequest(input: PhraseLocalePullRequest): Promise<string>;
   createOrUpdatePullRequestWithCommit(
     input: PhraseLocalePullRequest,
@@ -422,6 +427,10 @@ interface PhraseReconcileContext {
   fallbackAssignees: string[];
   repairScope?: PhraseRepairScope;
   assignmentWarnings: Map<string, { batchKey: string; phraseLocale: string; reason: string }>;
+  supersededPullRequestWarnings: Map<
+    string,
+    { batchKey: string; phraseLocale: string; reason: string }
+  >;
   /** Source-change authors per batch key, resolved once per run for all of its locales. */
   sourceChangeAuthors: Map<string, Promise<string[]>>;
   verifiedJobs: Map<string, PhraseJobPart[]>;
@@ -809,12 +818,12 @@ function sourceInputPath(config: PhraseWorkflowConfig): string {
     : config.sourceCatalog.path;
 }
 
-function previousSourceCommit(
+function earlierMatchingSourceBatches(
   record: PhraseBatchRecord,
   candidates: readonly PhraseBatchRecord[],
-): string | undefined {
+): PhraseBatchRecord[] {
   const createdAt = Date.parse(record.createdAt);
-  if (!Number.isFinite(createdAt)) return undefined;
+  if (!Number.isFinite(createdAt)) return [];
   return candidates
     .filter((candidate) => {
       const candidateCreatedAt = Date.parse(candidate.createdAt);
@@ -832,11 +841,29 @@ function previousSourceCommit(
     .sort((left, right) => {
       const byCreatedAt = Date.parse(right.createdAt) - Date.parse(left.createdAt);
       return byCreatedAt || right.key.localeCompare(left.key);
-    })[0]?.sourceCommit;
+    });
+}
+
+function previousSourceCommit(
+  record: PhraseBatchRecord,
+  candidates: readonly PhraseBatchRecord[],
+): string | undefined {
+  return earlierMatchingSourceBatches(record, candidates)[0]?.sourceCommit;
 }
 
 function assignmentWarningKey(batchKey: string, phraseLocale: string): string {
   return JSON.stringify([batchKey, phraseLocale]);
+}
+
+const MAX_SUPERSEDED_PULL_REQUESTS_PER_LOCALE = 5;
+
+function pullRequestNumberFromUrl(pullRequestUrl: string): string {
+  const segments = new URL(pullRequestUrl).pathname.split("/").filter(Boolean);
+  const [, , resource, number] = segments;
+  if (resource !== "pull" || !number || !/^\d+$/.test(number)) {
+    throw new TypeError("Phrase pull request URL is invalid");
+  }
+  return number;
 }
 
 function isTransientAssignmentError(error: unknown): boolean {
@@ -1435,6 +1462,7 @@ export class PhraseWorkflow {
       fallbackAssignees: options.fallbackAssignees ?? [],
       repairScope: options.repairScope,
       assignmentWarnings: new Map(),
+      supersededPullRequestWarnings: new Map(),
       sourceChangeAuthors: new Map(),
       verifiedJobs: new Map(),
       reportedJobs: new Map(),
@@ -1554,6 +1582,50 @@ export class PhraseWorkflow {
       }
     }
 
+    const prepassCandidates = [...context.storedBatches.values()].sort((left, right) => {
+      const byCreatedAt = Date.parse(right.record.createdAt) - Date.parse(left.record.createdAt);
+      return byCreatedAt || right.record.key.localeCompare(left.record.key);
+    });
+    const prepassCleanupCounts = new Map<string, number>();
+    const prepassReplacementUrls = new Set<string>();
+    for (const stored of prepassCandidates) {
+      const cached = context.storedBatches.get(stored.record.key);
+      if (!cached || rejectedBatchKeys.has(cached.record.key)) continue;
+      const { record } = cached;
+      if (record.phase === "superseded") continue;
+      if (hasPhrasePins(context.pins)) {
+        try {
+          assertExpectedBatchConfig(record, context.pins);
+        } catch {
+          continue;
+        }
+      }
+      for (const [phraseLocale, locale] of Object.entries(record.locales)) {
+        if (
+          locale.phase !== "pr-created" ||
+          !locale.pullRequestUrl ||
+          locale.pullRequestReexportDelegated ||
+          (locale.pullRequestBatchKey && locale.pullRequestBatchKey !== record.key)
+        ) {
+          continue;
+        }
+        const replacementKey = JSON.stringify([phraseLocale, locale.pullRequestUrl]);
+        if (prepassReplacementUrls.has(replacementKey)) continue;
+        prepassReplacementUrls.add(replacementKey);
+        const alreadyProcessed = prepassCleanupCounts.get(phraseLocale) ?? 0;
+        const remaining = MAX_SUPERSEDED_PULL_REQUESTS_PER_LOCALE - alreadyProcessed;
+        if (remaining <= 0) continue;
+        const processed = await this.processSupersededPullRequestsForLocale(
+          context,
+          record,
+          phraseLocale,
+          locale.pullRequestUrl,
+          remaining,
+        );
+        prepassCleanupCounts.set(phraseLocale, alreadyProcessed + processed);
+      }
+    }
+
     const latestPullRequestRecords = new Map<string, PhraseBatchRecord>();
     const recordsByKey = new Map(storedBatches.map(({ record }) => [record.key, record]));
     for (const { record } of storedBatches) {
@@ -1611,6 +1683,32 @@ export class PhraseWorkflow {
       }
     }
     for (const warning of context.assignmentWarnings.values()) {
+      let matchingResult: PhraseReconcileResult | undefined;
+      for (let index = results.length - 1; index >= 0; index -= 1) {
+        const result = results[index]!;
+        if (result.batchKey === warning.batchKey && result.phraseLocale === warning.phraseLocale) {
+          matchingResult = result;
+          break;
+        }
+      }
+      if (matchingResult) {
+        matchingResult.reason = [matchingResult.reason, warning.reason].filter(Boolean).join("; ");
+        continue;
+      }
+      const locale = context.storedBatches.get(warning.batchKey)?.record.locales[
+        warning.phraseLocale
+      ];
+      if (locale?.phase === "pr-created") {
+        results.push({
+          batchKey: warning.batchKey,
+          phraseLocale: warning.phraseLocale,
+          phase: "pr-created",
+          ...(locale.pullRequestUrl ? { pullRequestUrl: locale.pullRequestUrl } : {}),
+          reason: warning.reason,
+        });
+      }
+    }
+    for (const warning of context.supersededPullRequestWarnings.values()) {
       let matchingResult: PhraseReconcileResult | undefined;
       for (let index = results.length - 1; index >= 0; index -= 1) {
         const result = results[index]!;
@@ -1807,6 +1905,190 @@ export class PhraseWorkflow {
       revision: updatedRevision,
       ...(warning ? { warning } : {}),
     };
+  }
+
+  private async processSupersededPullRequestsForLocale(
+    context: PhraseReconcileContext,
+    replacementRecord: PhraseBatchRecord,
+    phraseLocale: string,
+    replacementPullRequestUrl: string,
+    limit = MAX_SUPERSEDED_PULL_REQUESTS_PER_LOCALE,
+  ): Promise<number> {
+    let replacementNumber: string;
+    try {
+      replacementNumber = pullRequestNumberFromUrl(replacementPullRequestUrl);
+    } catch (error) {
+      this.addSupersededPullRequestWarning(
+        context,
+        replacementRecord,
+        phraseLocale,
+        replacementPullRequestUrl,
+        error,
+      );
+      return 0;
+    }
+
+    const candidateRecords = earlierMatchingSourceBatches(
+      replacementRecord,
+      [...context.storedBatches.values()].map(({ record }) => record),
+    )
+      .filter((record) => record.phase === "superseded")
+      .map((record) => context.storedBatches.get(record.key))
+      .filter((stored): stored is StoredPhraseBatch => stored !== undefined)
+      .filter((stored) => {
+        const locale = stored.record.locales[phraseLocale];
+        return (
+          locale !== undefined &&
+          Boolean(locale.pullRequestUrl) &&
+          locale.pullRequestUrl !== replacementPullRequestUrl &&
+          !locale.pullRequestMerged &&
+          !locale.pullRequestFinalized &&
+          !locale.pullRequestReexportDelegated &&
+          locale.pullRequestSupersededReviewerCommits !== true
+        );
+      })
+      .slice(0, limit);
+
+    const replacementNotice = `Replaced by #${replacementNumber} (batch \`${replacementRecord.key.slice(0, 12)}\`, source \`${replacementRecord.sourceCommit.slice(0, 7)}\`).`;
+
+    for (const stored of candidateRecords) {
+      const oldLocale = stored.record.locales[phraseLocale];
+      if (!oldLocale?.pullRequestUrl) continue;
+      try {
+        const pullRequestState = await this.dependencies.repository.getPullRequestState(
+          oldLocale.pullRequestUrl,
+        );
+        if (pullRequestState.state !== "open") {
+          await this.saveSupersededLocaleState(context, stored, phraseLocale, {
+            pullRequestFinalized: true,
+            ...(pullRequestState.state === "merged" ? { pullRequestMerged: true } : {}),
+          });
+          continue;
+        }
+
+        const ownedCommitShas = mergeToolingCommitShas(
+          oldLocale.toolingCommitSha ? [oldLocale.toolingCommitSha] : undefined,
+          oldLocale.toolingCommitShas,
+          oldLocale.pendingToolingCommitSha ? [oldLocale.pendingToolingCommitSha] : undefined,
+        );
+        const headIsToolingOwned = ownedCommitShas.includes(pullRequestState.headSha);
+        if (headIsToolingOwned) {
+          if (oldLocale.pullRequestSupersededNoticePosted !== true) {
+            const notice = `${replacementNotice} This PR is closed because a newer source catalog superseded batch \`${stored.record.key.slice(0, 12)}\`.`;
+            const posted = await this.postSupersededPullRequestNotice(
+              context,
+              stored,
+              phraseLocale,
+              oldLocale.pullRequestUrl,
+              notice,
+            );
+            if (!posted) continue;
+            await this.saveSupersededLocaleState(context, stored, phraseLocale, {
+              pullRequestSupersededNoticePosted: true,
+            });
+          }
+          await this.dependencies.repository.closePullRequest(oldLocale.pullRequestUrl);
+          await this.saveSupersededLocaleState(context, stored, phraseLocale, {
+            pullRequestFinalized: true,
+          });
+          continue;
+        }
+
+        if (oldLocale.pullRequestSupersededNoticePosted !== true) {
+          const notice = `${replacementNotice} Left open because it has commits not made by i18n-pipeline; close it when you no longer need them.`;
+          const posted = await this.postSupersededPullRequestNotice(
+            context,
+            stored,
+            phraseLocale,
+            oldLocale.pullRequestUrl,
+            notice,
+          );
+          if (!posted) continue;
+        }
+        await this.saveSupersededLocaleState(context, stored, phraseLocale, {
+          pullRequestSupersededNoticePosted: true,
+          pullRequestSupersededReviewerCommits: true,
+        });
+      } catch (error) {
+        this.addSupersededPullRequestWarning(
+          context,
+          replacementRecord,
+          phraseLocale,
+          oldLocale.pullRequestUrl,
+          error,
+        );
+      }
+    }
+    return candidateRecords.length;
+  }
+
+  private async postSupersededPullRequestNotice(
+    context: PhraseReconcileContext,
+    stored: StoredPhraseBatch,
+    phraseLocale: string,
+    pullRequestUrl: string,
+    body: string,
+  ): Promise<boolean> {
+    const posted = await this.dependencies.repository.createPullRequestComment(
+      pullRequestUrl,
+      body,
+    );
+    if (posted) return true;
+
+    const state = await this.dependencies.repository.getPullRequestState(pullRequestUrl);
+    if (state.state === "open") {
+      throw new PhraseRepositoryError(
+        "GitHub did not confirm the superseded locale PR comment",
+        500,
+      );
+    }
+    await this.saveSupersededLocaleState(context, stored, phraseLocale, {
+      pullRequestFinalized: true,
+      ...(state.state === "merged" ? { pullRequestMerged: true } : {}),
+    });
+    return false;
+  }
+
+  private async saveSupersededLocaleState(
+    context: PhraseReconcileContext,
+    stored: StoredPhraseBatch,
+    phraseLocale: string,
+    update: Partial<PhraseLocaleRecord>,
+  ): Promise<void> {
+    const locale = stored.record.locales[phraseLocale];
+    if (!locale) return;
+    const updatedRecord: PhraseBatchRecord = {
+      ...stored.record,
+      locales: {
+        ...stored.record.locales,
+        [phraseLocale]: { ...locale, ...update },
+      },
+    };
+    const revision = await this.dependencies.state.updateBatch(updatedRecord, stored.revision);
+    stored.record = updatedRecord;
+    stored.revision = revision;
+    context.storedBatches.set(updatedRecord.key, stored);
+  }
+
+  private addSupersededPullRequestWarning(
+    context: PhraseReconcileContext,
+    replacementRecord: PhraseBatchRecord,
+    phraseLocale: string,
+    oldPullRequestUrl: string,
+    error: unknown,
+  ): void {
+    const key = assignmentWarningKey(replacementRecord.key, phraseLocale);
+    const warning = {
+      batchKey: replacementRecord.key,
+      phraseLocale,
+      reason: `Could not process superseded locale PR ${oldPullRequestUrl}; cleanup will retry on the next reconcile: ${safeFailureReason(error)}`,
+    };
+    const existing = context.supersededPullRequestWarnings.get(key);
+    if (existing) {
+      existing.reason = [existing.reason, warning.reason].join("; ");
+    } else {
+      context.supersededPullRequestWarnings.set(key, warning);
+    }
   }
 
   private async createSubmission(
@@ -3241,6 +3523,12 @@ export class PhraseWorkflow {
               cached.record = record;
               cached.revision = revision;
             }
+            await this.processSupersededPullRequestsForLocale(
+              context,
+              record,
+              target.phraseLocale,
+              created.pullRequestUrl,
+            );
           }
           if (created.pullRequestFinalized) {
             if (created.bodyError) {

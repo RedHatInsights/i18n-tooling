@@ -377,6 +377,14 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     return { state: "open", headSha: value.head.sha };
   }
 
+  async closePullRequest(pullRequestUrl: string): Promise<void> {
+    const number = this.pullRequestNumber(pullRequestUrl);
+    await this.request(this.repositoryPath + "/pulls/" + number, {
+      method: "PATCH",
+      body: JSON.stringify({ state: "closed" }),
+    });
+  }
+
   async createOrUpdatePullRequestWithCommit(
     input: PhraseLocalePullRequest,
   ): Promise<PhraseLocalePullRequestCreated> {

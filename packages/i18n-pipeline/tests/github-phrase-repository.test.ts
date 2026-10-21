@@ -1550,6 +1550,50 @@ describe("GitHubPhraseRepository", () => {
     expect(calls).toHaveLength(3);
   });
 
+  it("closes a pull request through the REST endpoint and maps API errors", async () => {
+    const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async (input, init) => {
+        const url = input instanceof Request ? input.url : String(input);
+        const method = (init?.method ?? "GET").toUpperCase();
+        calls.push({
+          url,
+          method,
+          ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+        });
+        return response({ state: "closed" });
+      },
+    });
+
+    await repository.closePullRequest("https://github.com/example/app/pull/7");
+
+    expect(calls).toEqual([
+      {
+        url: "https://api.github.com/repos/example/app/pulls/7",
+        method: "PATCH",
+        body: { state: "closed" },
+      },
+    ]);
+
+    const forbidden = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async () => response({ message: "Resource not accessible by integration" }, 403),
+    });
+    await expect(
+      forbidden.closePullRequest("https://github.com/example/app/pull/7"),
+    ).rejects.toMatchObject({
+      name: "GitHubRepositoryError",
+      status: 403,
+      permanent: false,
+      message: expect.stringContaining("pull-requests: write"),
+    });
+  });
+
   it("intersects paginated path history with the compare range in newest-first order", async () => {
     const baseCommit = "e".repeat(40);
     const headCommit = "f".repeat(40);

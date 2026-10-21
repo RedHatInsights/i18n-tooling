@@ -9,6 +9,7 @@ import {
   type PhraseBatchRecord,
   type PhraseBatchStateStore,
   type PhraseLocalePullRequestCreated,
+  type PhraseLocaleRecord,
   type PhraseLocalePullRequest,
   type PhraseLocalePullRequestUpdate,
   type PhraseLocalePullRequestUpdateResult,
@@ -267,7 +268,10 @@ class FakeRepository implements PhraseWorkflowRepository {
   readonly createDraftRequirements: Array<boolean | undefined> = [];
   readonly resolvedRefs: string[] = [];
   readonly pullRequestStates = new Map<string, "open" | "merged" | "closed">();
+  readonly pullRequestStateRequests: string[] = [];
   pullRequestStateCalls = 0;
+  readonly closePullRequestCalls: string[] = [];
+  readonly closePullRequestErrors: Error[] = [];
   readonly branchHeads = new Map<string, string>();
   readonly branchFiles = new Map<string, Map<string, Uint8Array>>();
   readonly branchCommits = new Map<string, { sha: string; paths: string[] }[]>();
@@ -341,6 +345,7 @@ class FakeRepository implements PhraseWorkflowRepository {
 
   async getPullRequestState(pullRequestUrl: string): Promise<PhrasePullRequestState> {
     this.pullRequestStateCalls += 1;
+    this.pullRequestStateRequests.push(pullRequestUrl);
     const state = this.pullRequestStates.get(pullRequestUrl) ?? "open";
     if (state !== "open") return { state };
     const branch = this.pullRequestBranches.get(pullRequestUrl);
@@ -348,6 +353,13 @@ class FakeRepository implements PhraseWorkflowRepository {
       this.preverifiedRefUpdateHeadSha ?? (branch ? this.branchHeads.get(branch) : undefined);
     if (!headSha) throw new PhraseRepositoryError("Fake pull request has no branch head", 500);
     return { state: "open", headSha };
+  }
+
+  async closePullRequest(pullRequestUrl: string): Promise<void> {
+    this.closePullRequestCalls.push(pullRequestUrl);
+    const error = this.closePullRequestErrors.shift();
+    if (error) throw error;
+    this.pullRequestStates.set(pullRequestUrl, "closed");
   }
 
   async createOrUpdatePullRequestWithCommit(
@@ -6956,5 +6968,413 @@ describe("PhraseWorkflow submit outcome", () => {
     expect(repeated.createdThisRun).toBe(false);
     expect(repeated.batch.key).toBe(first.batch.key);
     expect(scenario.phrase.createJobCalls).toBe(1);
+  });
+});
+
+interface SupersededBatchFixtureOptions {
+  key: string;
+  pullRequestUrl: string;
+  createdAt: string;
+  sourceCommit?: string;
+  phase?: PhraseBatchRecord["phase"];
+  repository?: string;
+  baseRef?: string;
+  projectUid?: string;
+  sourceFilename?: string;
+  toolingCommitSha?: string;
+  locale?: Partial<PhraseLocaleRecord>;
+}
+
+function makeSupersededBatchFixture(
+  current: PhraseBatchRecord,
+  options: SupersededBatchFixtureOptions,
+): PhraseBatchRecord {
+  const record = structuredClone(current);
+  const toolingCommitSha = options.toolingCommitSha ?? "owned-" + options.key.slice(0, 8);
+  record.key = options.key;
+  record.phase = options.phase ?? "superseded";
+  record.sourceCommit = options.sourceCommit ?? "old-" + options.key.slice(0, 8);
+  record.sourceDigest = "c".repeat(64);
+  record.createdAt = options.createdAt;
+  record.repository = options.repository ?? current.repository;
+  record.baseRef = options.baseRef ?? current.baseRef;
+  record.config = {
+    ...record.config,
+    ...(options.projectUid ? { projectUid: options.projectUid } : {}),
+    sourceCatalog: {
+      ...record.config.sourceCatalog,
+      ...(options.sourceFilename ? { filename: options.sourceFilename } : {}),
+    },
+  };
+  record.locales = {
+    ...record.locales,
+    fr: {
+      phase: "pr-created",
+      pullRequestUrl: options.pullRequestUrl,
+      pullRequestBranch: "i18n/phrase-" + options.key.slice(0, 16) + "-fr",
+      pullRequestBatchKey: options.key,
+      toolingCommitSha,
+      toolingCommitShas: [toolingCommitSha],
+      ...options.locale,
+    },
+  };
+  return record;
+}
+
+async function seedSupersededBatchFixture(
+  scenario: Awaited<ReturnType<typeof makeSupersededPullRequestScenario>>,
+  options: SupersededBatchFixtureOptions & { headSha?: string },
+): Promise<PhraseBatchRecord> {
+  const record = makeSupersededBatchFixture(scenario.batch, options);
+  await scenario.state.createBatch(record);
+  const locale = record.locales.fr!;
+  const branch = locale.pullRequestBranch!;
+  const headSha = options.headSha ?? locale.toolingCommitSha!;
+  scenario.repository.pullRequestStates.set(options.pullRequestUrl, "open");
+  scenario.repository.pullRequestBranches.set(options.pullRequestUrl, branch);
+  scenario.repository.branchHeads.set(branch, headSha);
+  scenario.repository.branchCommits.set(branch, [{ sha: headSha, paths: ["locales/fr.json"] }]);
+  return record;
+}
+
+async function makeSupersededPullRequestScenario() {
+  const state = new MemoryStateStore();
+  const phrase = new FakePhrase();
+  const repository = new FakeRepository();
+  const workflow = new PhraseWorkflow({
+    phrase,
+    state,
+    repository,
+    catalogAdapters: new CatalogAdapterRegistry(),
+    now: () => Date.parse("2026-10-20T12:00:00.000Z"),
+  });
+  const batch = await workflow.submit({
+    repository: "example/app",
+    baseRef: "phrase-pilot",
+    sourceCommit: "1234567abcdef0123456789",
+    sourceBytes,
+    config,
+  });
+  phrase.jobStatus = "COMPLETED";
+  return { state, phrase, repository, workflow, batch };
+}
+
+function replacementNoticePrefix(replacement: PhraseBatchRecord): string {
+  const codeQuote = "\u0060";
+  return (
+    "Replaced by #42 (batch " +
+    codeQuote +
+    replacement.key.slice(0, 12) +
+    codeQuote +
+    ", source " +
+    codeQuote +
+    replacement.sourceCommit.slice(0, 7) +
+    codeQuote +
+    ")."
+  );
+}
+
+describe("superseded locale pull requests", () => {
+  it("closes a tooling-owned superseded PR after posting the exact replacement notice", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const old = await seedSupersededBatchFixture(scenario, {
+      key: "a".repeat(64),
+      pullRequestUrl: "https://github.com/example/app/pull/19",
+      createdAt: "2026-10-20T10:00:00.000Z",
+    });
+
+    const [result] = await scenario.workflow.reconcile();
+    const savedOld = await scenario.state.readBatch(old.key);
+    const oldLocale = savedOld?.record.locales.fr;
+
+    expect(result?.phase).toBe("pr-created");
+    expect(
+      scenario.repository.pullRequestComments.filter(
+        (comment) => comment.pullRequestUrl === old.locales.fr?.pullRequestUrl,
+      ),
+    ).toEqual([
+      {
+        pullRequestUrl: old.locales.fr?.pullRequestUrl,
+        body:
+          replacementNoticePrefix(scenario.batch) +
+          " This PR is closed because a newer source catalog superseded batch " +
+          "\u0060" +
+          old.key.slice(0, 12) +
+          "\u0060.",
+        authorType: "Bot",
+      },
+    ]);
+    expect(scenario.repository.closePullRequestCalls).toEqual([
+      "https://github.com/example/app/pull/19",
+    ]);
+    expect(oldLocale).toMatchObject({
+      pullRequestFinalized: true,
+      pullRequestSupersededNoticePosted: true,
+    });
+    expect(savedOld?.record.phase).toBe("superseded");
+  });
+
+  it("leaves a reviewer-owned superseded PR open and saves a one-time notice flag", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const old = await seedSupersededBatchFixture(scenario, {
+      key: "b".repeat(64),
+      pullRequestUrl: "https://github.com/example/app/pull/21",
+      createdAt: "2026-10-20T10:00:00.000Z",
+      headSha: "reviewer-commit",
+    });
+    const reviewerNotice =
+      replacementNoticePrefix(scenario.batch) +
+      " Left open because it has commits not made by i18n-pipeline; close it when you no longer need them.";
+
+    await scenario.workflow.reconcile();
+    await scenario.workflow.reconcile();
+
+    const savedOld = await scenario.state.readBatch(old.key);
+    expect(
+      scenario.repository.pullRequestComments.filter(
+        (comment) => comment.pullRequestUrl === old.locales.fr?.pullRequestUrl,
+      ),
+    ).toEqual([
+      {
+        pullRequestUrl: old.locales.fr?.pullRequestUrl,
+        body: reviewerNotice,
+        authorType: "Bot",
+      },
+    ]);
+    expect(scenario.repository.closePullRequestCalls).toEqual([]);
+    expect(scenario.repository.pullRequestStates.get(old.locales.fr!.pullRequestUrl!)).toBe("open");
+    expect(savedOld?.record.locales.fr).toMatchObject({
+      pullRequestSupersededNoticePosted: true,
+      pullRequestSupersededReviewerCommits: true,
+    });
+  });
+
+  it.each(["merged", "closed"] as const)(
+    "only records an already %s superseded PR",
+    async (state) => {
+      const scenario = await makeSupersededPullRequestScenario();
+      const old = await seedSupersededBatchFixture(scenario, {
+        key: state === "merged" ? "c".repeat(64) : "d".repeat(64),
+        pullRequestUrl:
+          state === "merged"
+            ? "https://github.com/example/app/pull/22"
+            : "https://github.com/example/app/pull/23",
+        createdAt: "2026-10-20T10:00:00.000Z",
+      });
+      scenario.repository.pullRequestStates.set(old.locales.fr!.pullRequestUrl!, state);
+
+      await scenario.workflow.reconcile();
+
+      const savedOld = await scenario.state.readBatch(old.key);
+      expect(savedOld?.record.locales.fr?.pullRequestFinalized).toBe(true);
+      expect(savedOld?.record.locales.fr?.pullRequestMerged).toBe(
+        state === "merged" ? true : undefined,
+      );
+      expect(
+        scenario.repository.pullRequestComments.filter(
+          (comment) => comment.pullRequestUrl === old.locales.fr?.pullRequestUrl,
+        ),
+      ).toEqual([]);
+      expect(scenario.repository.closePullRequestCalls).toEqual([]);
+    },
+  );
+
+  it("does not touch retry or other non-superseded batches", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const completed = await seedSupersededBatchFixture(scenario, {
+      key: "e".repeat(64),
+      pullRequestUrl: "https://github.com/example/app/pull/24",
+      createdAt: "2026-10-20T09:00:00.000Z",
+      phase: "completed",
+      locale: { pullRequestFinalized: true },
+    });
+    const retry = await seedSupersededBatchFixture(scenario, {
+      key: "f".repeat(64),
+      pullRequestUrl: "https://github.com/example/app/pull/25",
+      createdAt: "2026-10-20T09:30:00.000Z",
+      phase: "failed",
+      locale: {
+        phase: "failed",
+        failureReason: "Retried in Phrase batch " + scenario.batch.key,
+        pullRequestReexportDelegated: true,
+      },
+    });
+    const delegated = await seedSupersededBatchFixture(scenario, {
+      key: "1".repeat(64),
+      pullRequestUrl: "https://github.com/example/app/pull/26",
+      createdAt: "2026-10-20T09:45:00.000Z",
+      locale: { pullRequestReexportDelegated: true },
+    });
+
+    await scenario.workflow.reconcile();
+
+    const oldUrls = [
+      completed.locales.fr!.pullRequestUrl!,
+      retry.locales.fr!.pullRequestUrl!,
+      delegated.locales.fr!.pullRequestUrl!,
+    ];
+    for (const url of oldUrls) {
+      expect(scenario.repository.pullRequestStateRequests).not.toContain(url);
+    }
+    expect(scenario.repository.closePullRequestCalls).toEqual([]);
+    expect(
+      scenario.repository.pullRequestComments.filter((comment) =>
+        oldUrls.includes(comment.pullRequestUrl),
+      ),
+    ).toEqual([]);
+  });
+
+  it.each([
+    ["repository", { repository: "other/app" }],
+    ["ref", { baseRef: "main" }],
+    ["project", { projectUid: "other-project" }],
+    ["filename", { sourceFilename: "other-source.json" }],
+  ] as const)("ignores a superseded batch with a different %s", async (_scope, override) => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const old = await seedSupersededBatchFixture(scenario, {
+      key: "2".repeat(64),
+      pullRequestUrl: "https://github.com/example/app/pull/27",
+      createdAt: "2026-10-20T10:00:00.000Z",
+      ...override,
+    });
+
+    await scenario.workflow.reconcile();
+
+    expect(scenario.repository.pullRequestStateRequests).not.toContain(
+      old.locales.fr!.pullRequestUrl,
+    );
+    expect(scenario.repository.pullRequestComments).toEqual(
+      expect.not.arrayContaining([
+        expect.objectContaining({ pullRequestUrl: old.locales.fr!.pullRequestUrl }),
+      ]),
+    );
+    expect(scenario.repository.closePullRequestCalls).toEqual([]);
+  });
+
+  it("keeps the new PR and locale phases when closing fails, then retries in the pre-pass", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const old = await seedSupersededBatchFixture(scenario, {
+      key: "3".repeat(64),
+      pullRequestUrl: "https://github.com/example/app/pull/28",
+      createdAt: "2026-10-20T10:00:00.000Z",
+    });
+    scenario.repository.closePullRequestErrors.push(
+      new PhraseRepositoryError("GitHub API returned HTTP 403", 403),
+    );
+
+    const [first] = await scenario.workflow.reconcile();
+    const afterFailure = await scenario.state.readBatch(scenario.batch.key);
+    const oldAfterFailure = await scenario.state.readBatch(old.key);
+
+    expect(first?.phase).toBe("pr-created");
+    expect(first?.reason).toContain("403");
+    expect(afterFailure?.record.locales.fr?.phase).toBe("pr-created");
+    expect(oldAfterFailure?.record.phase).toBe("superseded");
+    expect(oldAfterFailure?.record.locales.fr?.pullRequestFinalized).toBeUndefined();
+    expect(scenario.repository.pullRequestStates.get(old.locales.fr!.pullRequestUrl!)).toBe("open");
+
+    const [retry] = await scenario.workflow.reconcile();
+    const oldAfterRetry = await scenario.state.readBatch(old.key);
+
+    expect(retry?.phase).toBe("pr-created");
+    expect(oldAfterRetry?.record.phase).toBe("superseded");
+    expect(oldAfterRetry?.record.locales.fr?.pullRequestFinalized).toBe(true);
+    expect(scenario.repository.pullRequestStates.get(old.locales.fr!.pullRequestUrl!)).toBe(
+      "closed",
+    );
+    expect(scenario.repository.closePullRequestCalls).toEqual([
+      old.locales.fr!.pullRequestUrl,
+      old.locales.fr!.pullRequestUrl,
+    ]);
+    expect(
+      scenario.repository.pullRequestComments.filter(
+        (comment) => comment.pullRequestUrl === old.locales.fr?.pullRequestUrl,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("handles two superseded predecessors newest first", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const older = await seedSupersededBatchFixture(scenario, {
+      key: "4".repeat(64),
+      pullRequestUrl: "https://github.com/example/app/pull/34",
+      createdAt: "2026-10-20T10:00:00.000Z",
+    });
+    const newer = await seedSupersededBatchFixture(scenario, {
+      key: "5".repeat(64),
+      pullRequestUrl: "https://github.com/example/app/pull/35",
+      createdAt: "2026-10-20T11:00:00.000Z",
+    });
+
+    await scenario.workflow.reconcile();
+
+    expect(scenario.repository.pullRequestStateRequests).toEqual([
+      newer.locales.fr!.pullRequestUrl,
+      older.locales.fr!.pullRequestUrl,
+    ]);
+    expect(scenario.repository.closePullRequestCalls).toEqual([
+      newer.locales.fr!.pullRequestUrl,
+      older.locales.fr!.pullRequestUrl,
+    ]);
+  });
+
+  it("caps a quiet pre-pass at five superseded PRs per locale", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    await scenario.workflow.reconcile();
+    const predecessors = [];
+    for (let index = 0; index < 6; index += 1) {
+      predecessors.push(
+        await seedSupersededBatchFixture(scenario, {
+          key: String(index + 4).repeat(64),
+          pullRequestUrl: "https://github.com/example/app/pull/" + String(30 + index),
+          createdAt: "2026-10-20T" + String(6 + index).padStart(2, "0") + ":00:00.000Z",
+        }),
+      );
+    }
+
+    await scenario.workflow.reconcile();
+
+    const expected = predecessors
+      .slice(1)
+      .reverse()
+      .map((record) => record.locales.fr!.pullRequestUrl);
+    expect(scenario.repository.pullRequestStateRequests.slice(0, 5)).toEqual(expected);
+    expect(scenario.repository.closePullRequestCalls).toEqual(expected);
+    expect(scenario.repository.pullRequestStateRequests).not.toContain(
+      predecessors[0]?.locales.fr?.pullRequestUrl,
+    );
+  });
+
+  it("recovers after close succeeds but the finalized state write fails without reposting", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const old = await seedSupersededBatchFixture(scenario, {
+      key: "9".repeat(64),
+      pullRequestUrl: "https://github.com/example/app/pull/39",
+      createdAt: "2026-10-20T10:00:00.000Z",
+    });
+    scenario.state.failUpdateMatching = (record) =>
+      record.key === old.key && record.locales.fr?.pullRequestFinalized === true;
+
+    const [first] = await scenario.workflow.reconcile();
+    const afterFailure = await scenario.state.readBatch(old.key);
+    expect(first?.reason).toContain("Could not process superseded locale PR");
+    expect(afterFailure?.record.locales.fr).toMatchObject({
+      pullRequestSupersededNoticePosted: true,
+    });
+    expect(afterFailure?.record.locales.fr?.pullRequestFinalized).toBeUndefined();
+    expect(scenario.repository.pullRequestStates.get(old.locales.fr!.pullRequestUrl!)).toBe(
+      "closed",
+    );
+
+    await scenario.workflow.reconcile();
+
+    const afterRetry = await scenario.state.readBatch(old.key);
+    expect(afterRetry?.record.locales.fr?.pullRequestFinalized).toBe(true);
+    expect(
+      scenario.repository.pullRequestComments.filter(
+        (comment) => comment.pullRequestUrl === old.locales.fr?.pullRequestUrl,
+      ),
+    ).toHaveLength(1);
+    expect(scenario.repository.closePullRequestCalls).toEqual([old.locales.fr!.pullRequestUrl]);
   });
 });

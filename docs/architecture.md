@@ -99,6 +99,8 @@ The state record is keyed by repository, base ref, exact source bytes, and the P
 
 The first creation of each locale PR best-effort assigns the GitHub users who changed its source input since the previous matching batch, using the hub's fallback assignees when none can be assigned; state retries transient failures without repeating completed assignments.
 
+When a newer source batch opens a locale PR, reconciliation closes matching locale PRs from earlier superseded batches unless their heads contain reviewer commits; those PRs stay open with a notice.
+
 In `tms reconcile`, translation-validation findings do not fail the command: GitHub Actions emits warning annotations alongside the PR's 🌐 Translation check comment, and only pipeline failures exit 1.
 
 The reusable submit and reconcile workflows use protected environment secrets for Phrase credentials (a user's Platform API token, preferably a dedicated technical user's; Phrase Service Accounts cannot create jobs, so submit cannot use them) and either the run-scoped `GITHUB_TOKEN` for the calling repository or an optional GitHub App token scoped to the target repository for GitHub operations. Consumer-owned callers use their own App; hub callers use the hub App installed on each target consumer. They do not auto-merge or add consumer-specific schedules/configuration. In `GITHUB_TOKEN` mode, GitHub may hold `pull_request` checks from a bot-created PR for maintainer approval; generated PRs must not be assumed to have immediately running checks.
