@@ -45,6 +45,26 @@ const valid = [
     options: [{ catalog }],
   },
   {
+    code: 'import { messages } from "./messages"; intl.formatMessage(messages.title);',
+    options: [{ catalog }],
+  },
+  {
+    code: 'import { messages } from "@/i18n/messages"; intl.formatMessage(messages.title);',
+    options: [{ catalog }],
+  },
+  {
+    code: 'import { messages } from "#messages"; intl.formatMessage(messages.title);',
+    options: [{ catalog }],
+  },
+  {
+    code: 'import { messages } from "my-app/messages"; intl.formatMessage(messages.title);',
+    options: [{ catalog }],
+  },
+  {
+    code: "const unused = 1;",
+    options: [{ catalog: path.join(here, "fixtures/missing.json") }],
+  },
+  {
     code: "intl.formatMessage({ id: `example.title` });",
     options: [{ catalog }],
   },

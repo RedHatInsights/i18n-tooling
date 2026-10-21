@@ -290,17 +290,12 @@ const rule: Rule.RuleModule = {
         }
 
         const importDefinition = variable.defs.find((item) => item.type === "ImportBinding");
-        const importSource = importDefinition?.parent.source.value;
-        return typeof importSource === "string" && importSource.startsWith(".");
+        return Boolean(importDefinition);
       }
       return false;
     }
 
     return {
-      Program(node) {
-        ensureCatalog(node);
-      },
-
       CallExpression(node) {
         if (!isFormatJsMessageCall(node.callee)) return;
         const descriptor = node.arguments[0];
