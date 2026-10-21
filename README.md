@@ -2,6 +2,33 @@
 
 Shared product-UI internationalization tooling for HCC and other Red Hat frontend applications.
 
+## Quick start: onboard a repository
+
+The `i18n-onboarding` agent skill does the onboarding for you, in Claude Code, Codex CLI, opencode or Pi.
+
+1. **Build the CLI.** This step is needed until the first npm release. Export the variable in the shell you start the agent from.
+
+   ```bash
+   git clone https://github.com/RedHatInsights/i18n-tooling.git ~/src/i18n-tooling
+   cd ~/src/i18n-tooling && npm ci --ignore-scripts && npm run build
+   export I18N_PIPELINE_CLI=~/src/i18n-tooling/packages/i18n-pipeline/dist/cli.js
+   ```
+
+2. **Install the skill:**
+
+   ```bash
+   npx skills add RedHatInsights/i18n-tooling -g -s i18n-onboarding -a claude-code -a codex -a opencode -a pi -y
+   ```
+
+3. **Run it.** In the repository to onboard, ask the agent to "onboard this repository to i18n tooling". It inspects the repository and asks one set of questions: tracks, Jira tickets, branch layout, how far to go and Phrase mode. It then adds catalog validation and the tracks you chose.
+4. **Finish the Phrase setup.** In the default hub mode, the skill opens or drafts a registration PR in `RedHatInsights/i18n-hub`. Two admin steps remain:
+   - A `RedHatInsights` organization owner installs the [`hcc-i18n-tms-sync`](https://github.com/apps/hcc-i18n-tms-sync) App on the repository.
+   - If the repository restricts branch creation with rulesets, an admin excludes `i18n-tms-state` and `i18n/phrase-*`.
+
+   After the registration merges, the hub runs on its schedule. A merged source change goes to Phrase. Each locale comes back as a draft PR once translated, assigned to the people who changed the source strings.
+
+To onboard by hand, without an agent, follow the [consumer onboarding checklist](docs/consumer-onboarding.md). [Onboarding skill](#onboarding-skill) covers other install methods and standalone Phrase mode. [Where is my translation?](#where-is-my-translation) explains how to follow a string through Phrase.
+
 ## Why this repository
 
 `hcc-i18n` is the architecture and workflow initiative. This repository is the reusable implementation layer, named simply `i18n-tooling` because it may serve more than one frontend product:
