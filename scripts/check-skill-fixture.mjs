@@ -192,7 +192,7 @@ fixtures["formatjs-frontend-standalone"] = {
       ]),
     ),
   ],
-  // The wizard's standalone default is App mode, so the App lines are uncommented.
+  // The plan's standalone default is App mode, so the App lines are uncommented.
   forbiddenText: ["phrase-submit.yml", "phrase-reconcile.yml"].flatMap((name) =>
     ["# APP_CLIENT_ID:", "# APP_PRIVATE_KEY:"].map((text) => [`.github/workflows/${name}`, text]),
   ),

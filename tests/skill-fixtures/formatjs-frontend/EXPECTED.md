@@ -6,7 +6,7 @@
 - Mechanically add the missing `other` branch to `results.count` in `src/messages.js` as its own unit.
 - Leave `service.pause.billing` wording unchanged. Report the wording question with its source line; the comment in `src/Services.jsx` says billing policy varies by service.
 - Draft `description` fields for the four descriptors that lack them. Keep those drafts in a separate unit and mark them for human review before Phrase.
-- Use explicit IDs and the committed source catalog. Phrase target locales come from the wizard answers; the fixture does not contain them. With the answer "`fr` only", use the `hcc-ui` preset with `locales: ["fr"]`. The shared project is `hcc-ui` (`LFsYhKphLpXQ0WWa47VZ19`, region `eu`), created from the `[HCC UI]` template; do not ask for these shared values.
+- Use explicit IDs and the committed source catalog. Phrase target locales come from the approved plan; the fixture does not contain them. With the answer "`fr` only", use the `hcc-ui` preset with `locales: ["fr"]`. The shared project is `hcc-ui` (`LFsYhKphLpXQ0WWa47VZ19`, region `eu`), created from the `[HCC UI]` template; do not ask for these shared values.
 
 ## Required files and config
 
