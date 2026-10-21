@@ -71,7 +71,7 @@ function resolveSchema(
         `Circular OpenAPI component schema reference at "${schema.$ref}"`,
       );
     }
-    const referencedSchema = schemas[name];
+    const referencedSchema = Object.hasOwn(schemas, name) ? schemas[name] : undefined;
     if (referencedSchema === undefined) {
       throw new CatalogFormatError(`OpenAPI component schema "${name}" was not found`);
     }
@@ -117,7 +117,9 @@ function schemaMatches(
   } catch {
     return false;
   }
-  if (referenceChain.has(name) || !isRecord(schemas[name])) return false;
+  if (referenceChain.has(name) || !Object.hasOwn(schemas, name) || !isRecord(schemas[name])) {
+    return false;
+  }
   const nextChain = new Set(referenceChain);
   nextChain.add(name);
   return schemaMatches(schemas[name], schemas, predicate, nextChain);

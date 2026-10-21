@@ -194,6 +194,36 @@ describe("Catalog adapters", () => {
     );
   });
 
+  it.each(["__proto__", "constructor"])(
+    "rejects references to inherited component schema key %s",
+    (name) => {
+      const context = { locale: "en", role: "source" as const, options: {} };
+      const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");
+      const document = {
+        openapi: "3.1.0",
+        components: {
+          schemas: {
+            Problem: {
+              $ref: `#/components/schemas/${name}`,
+              required: ["code", "params"],
+              properties: {
+                code: {
+                  const: "insights-rbac.role.not-found",
+                  "x-i18n": { message: "Role not found." },
+                },
+                params: { type: "object" },
+              },
+            },
+          },
+        },
+      };
+      const read = () => adapter.read(document, context);
+
+      expect(read).toThrowError(CatalogFormatError);
+      expect(read).toThrowError(`OpenAPI component schema "${name}" was not found`);
+    },
+  );
+
   it("keeps required params from both allOf members", () => {
     const context = { locale: "en", role: "source" as const, options: {} };
     const adapter = new CatalogAdapterRegistry().get("openapi-problem-details");

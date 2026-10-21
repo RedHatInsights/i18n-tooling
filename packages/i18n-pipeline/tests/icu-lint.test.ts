@@ -328,6 +328,12 @@ describe("target plural checks", () => {
     ).toEqual(["warning:plural-count-dropped"]);
   });
 
+  it("ignores plural branches named after Object.prototype members", () => {
+    expect(
+      targetRules("{n, plural, toString {# x} other {# y}}", "{n, plural, other {# z}}", "zh"),
+    ).toEqual([]);
+  });
+
   it("does not report an extra target plural occurrence as a count drop", () => {
     expect(
       targetRules(

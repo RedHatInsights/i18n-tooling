@@ -546,6 +546,30 @@ objects:
     ).toThrow("Duplicate FEO message key");
   });
 
+  it("does not match a constructor source key against an inherited catalog property", () => {
+    const source = {
+      ...extractFeoCatalog(template),
+      constructor: { defaultMessage: "Constructor", description: "test" },
+    };
+    const original = Object.getOwnPropertyDescriptor(Object, "defaultMessage");
+
+    try {
+      Object.defineProperty(Object, "defaultMessage", {
+        configurable: true,
+        value: "Constructor",
+      });
+      expect(() => inlineFeoLocale(template, source, {}, "zh-CN")).toThrow(
+        "English source changed for constructor",
+      );
+    } finally {
+      if (original) {
+        Object.defineProperty(Object, "defaultMessage", original);
+      } else {
+        Reflect.deleteProperty(Object, "defaultMessage");
+      }
+    }
+  });
+
   it("rejects duplicate IDs even when different fields are populated", () => {
     const duplicateSearch = template.replace(
       "        - id: users\n          title: Users",
