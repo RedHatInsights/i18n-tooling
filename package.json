@@ -38,13 +38,13 @@
     "ajv-formats": "3.0.1",
     "eslint": "^9.0.0",
     "eslint-plugin-formatjs": "8.1.0",
-    "markdownlint-cli": "0.49.0",
+    "markdownlint-cli": "0.49.1",
     "prettier": "^3.0.0",
     "typescript-eslint": "^8.0.0"
   },
   "overrides": {
     "js-yaml": "4.3.2",
-    "markdown-it": "14.3.2",
+    "markdown-it": "14.3.3",
     "smol-toml": "1.9.1",
     "source-map-js": "1.2.2"
   }
