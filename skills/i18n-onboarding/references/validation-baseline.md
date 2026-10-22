@@ -16,6 +16,8 @@ The config requires `version: 1` and a `checks` array. Each check has a `source`
 
 Use the repository's own extract, compile, and aggregate scripts. Confirm that each honors the output argument without touching tracked files. FormatJS CLI options accept a second `--out-file`; use the package script with `-- --out-file {output}`. Do not copy generator arguments when the package script can be reused.
 
+When a generator cannot write elsewhere, because its script hard-codes the output path, add an output option to that script (for example `--out-file <path>`) that keeps the current default, in the validation unit. When an extractor writes the source catalog to an ignored path such as `build/`, point it at a committed path, normally `locales/translation-template.json`, and update every script that reads it; name the change in the plan.
+
 Add `catalogDirectories` for every directory holding catalogs. The default extension is `.json`. Every catalog file in those directories must be declared by `checks`, `tmsConfig`, `generated`, or FEO config. This catches undeclared locale files.
 
 ## Scope source lint
