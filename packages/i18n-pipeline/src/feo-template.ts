@@ -264,6 +264,9 @@ function collect(doc: Document): {
       const routes = item.get("routes", true);
       if (routes !== undefined)
         nav(routes, `${key}.routes`, `${runtimeKey}.routes`, `${source}.routes`);
+      const groupItems = item.get("navItems", true);
+      if (groupItems !== undefined)
+        nav(groupItems, `${key}.navItems`, `${runtimeKey}.navItems`, `${source}.navItems`);
     }
   }
   for (const [index, spec] of specs.entries()) {
@@ -307,6 +310,73 @@ function collect(doc: Document): {
         if (navItems !== undefined) nav(navItems, key, runtimeKey, `${source}.navItems`);
       }
     }
+    const navigationSegments = spec.get("navigationSegments", true);
+    if (navigationSegments !== undefined) {
+      if (!isSeq(navigationSegments)) throw new Error("navigationSegments must be a sequence");
+      for (const [index, raw] of navigationSegments.items.entries()) {
+        const item = mapping(raw, "navigationSegments");
+        const segmentId = feoIdentifier(item, "segmentId", "navigationSegments");
+        // Keyed by the owning Frontend's segment, not by the bundles that reference it, so one
+        // translation serves every segmentRef.
+        const key = `navigationSegments.${segmentId}.navItems`;
+        const source = `${frontendPrefix}navigationSegments[${index}] (segmentId=${JSON.stringify(segmentId)})`;
+        registerCatalogPath(`${frontendPrefix}${key}`, {}, source);
+        const navItems = item.get("navItems", true);
+        if (navItems !== undefined) nav(navItems, key, `navseg.${segmentId}`, `${source}.navItems`);
+      }
+    }
+    const widgets = spec.get("widgetRegistry", true);
+    if (widgets !== undefined) {
+      if (!isSeq(widgets)) throw new Error("widgetRegistry must be a sequence");
+      for (const [index, raw] of widgets.items.entries()) {
+        const item = mapping(raw, "widgetRegistry");
+        const scope = feoIdentifier(item, "scope", "widgetRegistry");
+        // Widgets have no id; the operator identifies them by scope, module and importName.
+        const widgetModule = text(item.get("module", true), "widgetRegistry.module");
+        const importNameNode = item.get("importName", true);
+        const importName =
+          importNameNode === undefined
+            ? "default"
+            : text(importNameNode, "widgetRegistry.importName");
+        const source =
+          `${frontendPrefix}widgetRegistry[${index}] ` +
+          `(scope=${JSON.stringify(scope)}, module=${JSON.stringify(widgetModule)}, ` +
+          `importName=${JSON.stringify(importName)})`;
+        const moduleSlug = aliasSlug(widgetModule);
+        const importSlug = aliasSlug(importName);
+        if (!moduleSlug || !importSlug) {
+          throw new Error(
+            `${source}: module and importName must each contain an ASCII letter or digit`,
+          );
+        }
+        const base = `widgetRegistry.${scope}.${moduleSlug}.${importSlug}`;
+        const runtimeBase = `widget.${scope}.${moduleSlug}.${importSlug}`;
+        const owner = {};
+        registerCatalogPath(`${frontendPrefix}${base}`, owner, source);
+        const config = item.get("config", true);
+        if (config === undefined) continue;
+        const configMap = mapping(config, `${base}.config`);
+        add(base, runtimeBase, configMap, "title", `${source}.config`, owner);
+        const headerLink = configMap.get("headerLink", true);
+        if (headerLink !== undefined)
+          add(
+            `${base}.headerLink`,
+            `${runtimeBase}.headerLink`,
+            mapping(headerLink, `${base}.headerLink`),
+            "title",
+            `${source}.config.headerLink`,
+            owner,
+          );
+      }
+    }
+    entries(spec, "baseWidgetLayouts", ["displayName"], (item, index) => {
+      const name = feoIdentifier(item, "name", "baseWidgetLayouts");
+      return {
+        catalogBase: `baseWidgetLayouts.${name}`,
+        runtimeBase: `widgetLayout.${name}`,
+        sourceContext: `${frontendPrefix}baseWidgetLayouts[${index}] (name=${JSON.stringify(name)})`,
+      };
+    });
     const module = spec.get("module", true);
     if (module !== undefined)
       add(

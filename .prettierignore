@@ -3,3 +3,4 @@ dist
 coverage
 package-lock.json
 tests/skill-fixtures/**
+packages/i18n-pipeline/tests/fixtures/fec/*.schema.json
