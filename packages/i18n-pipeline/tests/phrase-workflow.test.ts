@@ -6,6 +6,7 @@ import {
   PhraseRepositoryError,
   PhraseWorkflow,
   PhraseWorkflowError,
+  divergentSupersededMessageIds,
   type PhraseBatchRecord,
   type PhraseBatchStateStore,
   type PhraseLocalePullRequestCreated,
@@ -7376,5 +7377,131 @@ describe("superseded locale pull requests", () => {
       ),
     ).toHaveLength(1);
     expect(scenario.repository.closePullRequestCalls).toEqual([old.locales.fr!.pullRequestUrl]);
+  });
+});
+
+function catalogOf(locale: string, patterns: Record<string, string>) {
+  return {
+    locale,
+    messages: Object.fromEntries(
+      Object.entries(patterns).map(([id, pattern]) => [id, { pattern, metadata: {} }]),
+    ),
+  };
+}
+
+describe("divergentSupersededMessageIds", () => {
+  const source = catalogOf("en", {
+    greeting: "Hello {name}",
+    farewell: "Goodbye",
+    product: "OpenShift",
+  });
+
+  it("finds nothing when the replacement carries every translation", () => {
+    const target = catalogOf("fr", { greeting: "Bonjour {name}", farewell: "Au revoir" });
+    expect(
+      divergentSupersededMessageIds({
+        oldSource: source,
+        oldTarget: target,
+        newSource: source,
+        newTarget: target,
+      }),
+    ).toEqual([]);
+  });
+
+  it("lists unchanged English whose translation differs or is missing in the replacement", () => {
+    expect(
+      divergentSupersededMessageIds({
+        oldSource: source,
+        oldTarget: catalogOf("fr", { greeting: "Salut {name}", farewell: "Au revoir" }),
+        newSource: source,
+        newTarget: catalogOf("fr", { greeting: "Bonjour {name}" }),
+      }),
+    ).toEqual(["farewell", "greeting"]);
+  });
+
+  it("skips changed or removed English, untranslated copies, and invalid old translations", () => {
+    expect(
+      divergentSupersededMessageIds({
+        oldSource: source,
+        oldTarget: catalogOf("fr", {
+          greeting: "Salut",
+          farewell: "Au revoir",
+          product: "OpenShift",
+        }),
+        newSource: catalogOf("en", { greeting: "Hello {name}", product: "OpenShift" }),
+        newTarget: catalogOf("fr", { greeting: "Bonjour {name}", product: "Produit" }),
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("superseded locale pull requests with different translations", () => {
+  async function seedDivergentPredecessor(
+    scenario: Awaited<ReturnType<typeof makeSupersededPullRequestScenario>>,
+  ) {
+    const old = await seedSupersededBatchFixture(scenario, {
+      key: "d".repeat(64),
+      pullRequestUrl: "https://github.com/example/app/pull/51",
+      createdAt: "2026-10-20T10:00:00.000Z",
+    });
+    scenario.repository.branchFiles.set(
+      old.locales.fr!.pullRequestBranch!,
+      new Map([["locales/fr.json", new TextEncoder().encode('{"greeting":"Salut {name}"}')]]),
+    );
+    return old;
+  }
+
+  it("keeps the PR open with one notice listing the messages the replacement lacks", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const old = await seedDivergentPredecessor(scenario);
+
+    await scenario.workflow.reconcile();
+    await scenario.workflow.reconcile();
+
+    const savedOld = await scenario.state.readBatch(old.key);
+    expect(scenario.repository.closePullRequestCalls).toEqual([]);
+    expect(
+      scenario.repository.pullRequestComments
+        .filter((comment) => comment.pullRequestUrl === old.locales.fr?.pullRequestUrl)
+        .map((comment) => comment.body),
+    ).toEqual([
+      replacementNoticePrefix(scenario.batch) +
+        " Left open because #42 has different translations for 1 message whose English did not" +
+        " change: \u0060greeting\u0060. Copy the translations you want to keep into the newer" +
+        " Phrase job; this PR closes once #42 carries them. Close it yourself if the newer" +
+        " translations are intended.",
+    ]);
+    expect(savedOld?.record.locales.fr).toMatchObject({
+      pullRequestSupersededNoticePosted: true,
+      pullRequestSupersededDivergentIds: ["greeting"],
+    });
+    expect(savedOld?.record.locales.fr?.pullRequestFinalized).toBeUndefined();
+  });
+
+  it("closes the PR once the replacement carries the same translations", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const old = await seedDivergentPredecessor(scenario);
+
+    await scenario.workflow.reconcile();
+    // The translator copies the old translation into the newer job; the next run re-exports it.
+    scenario.phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+    await scenario.workflow.reconcile();
+    await scenario.workflow.reconcile();
+
+    const savedOld = await scenario.state.readBatch(old.key);
+    expect(scenario.repository.closePullRequestCalls).toEqual([old.locales.fr!.pullRequestUrl]);
+    expect(
+      scenario.repository.pullRequestComments
+        .filter((comment) => comment.pullRequestUrl === old.locales.fr?.pullRequestUrl)
+        .map((comment) => comment.body)
+        .at(-1),
+    ).toBe(
+      replacementNoticePrefix(scenario.batch) +
+        " This PR is closed because #42 now carries every translation from it.",
+    );
+    expect(savedOld?.record.locales.fr).toMatchObject({
+      pullRequestFinalized: true,
+      pullRequestSupersededDivergentIds: [],
+    });
   });
 });

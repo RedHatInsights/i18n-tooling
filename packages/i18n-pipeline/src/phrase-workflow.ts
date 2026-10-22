@@ -122,6 +122,12 @@ export interface PhraseLocaleRecord {
   pullRequestSupersededNoticePosted?: true;
   /** Reviewer commits were found on a superseded PR, so it must stay open. */
   pullRequestSupersededReviewerCommits?: true;
+  /**
+   * Messages whose translation on this superseded PR its replacement does not carry, as of the
+   * last notice; the PR stays open until the list is empty. An empty list records that the
+   * closing notice for a previously divergent PR was posted.
+   */
+  pullRequestSupersededDivergentIds?: string[];
   /** Last generated description; missing digest refreshes pre-upgrade PR safety notes once. */
   pullRequestBodyDigest?: string;
   /** Retry the PR title and description update if it failed after a commit. */
@@ -856,6 +862,55 @@ function assignmentWarningKey(batchKey: string, phraseLocale: string): string {
 }
 
 const MAX_SUPERSEDED_PULL_REQUESTS_PER_LOCALE = 5;
+const MAX_LISTED_DIVERGENT_MESSAGE_IDS = 20;
+
+export interface SupersededTranslationCatalogs {
+  oldSource: Catalog;
+  oldTarget: Catalog;
+  newSource: Catalog;
+  newTarget: Catalog;
+}
+
+/**
+ * Message IDs whose translation in the superseded PR would be lost by closing it: the English
+ * is identical in both sources, the old translation is valid and differs from the English, and
+ * the replacement does not carry the same translation.
+ */
+export function divergentSupersededMessageIds({
+  oldSource,
+  oldTarget,
+  newSource,
+  newTarget,
+}: SupersededTranslationCatalogs): string[] {
+  const invalidIds = new Set(
+    checkCatalogs(oldSource, oldTarget).argumentMismatches.map((mismatch) => mismatch.id),
+  );
+  for (const finding of lintTargetCatalog(oldSource, oldTarget)) {
+    if (finding.severity === "error") invalidIds.add(finding.id);
+  }
+  return Object.keys(oldTarget.messages)
+    .filter((id) => {
+      const english = oldSource.messages[id]?.pattern;
+      const translation = oldTarget.messages[id]!.pattern;
+      return (
+        english !== undefined &&
+        newSource.messages[id]?.pattern === english &&
+        translation !== english &&
+        !invalidIds.has(id) &&
+        newTarget.messages[id]?.pattern !== translation
+      );
+    })
+    .sort();
+}
+
+function divergentMessageList(ids: readonly string[]): string {
+  const listed = ids
+    .slice(0, MAX_LISTED_DIVERGENT_MESSAGE_IDS)
+    .map((id) => "`" + id.replaceAll("`", "'") + "`")
+    .join(", ");
+  const more = ids.length - MAX_LISTED_DIVERGENT_MESSAGE_IDS;
+  return more > 0 ? `${listed}, and ${more} more` : listed;
+}
 
 function pullRequestNumberFromUrl(pullRequestUrl: string): string {
   const segments = new URL(pullRequestUrl).pathname.split("/").filter(Boolean);
@@ -1973,7 +2028,54 @@ export class PhraseWorkflow {
         );
         const headIsToolingOwned = ownedCommitShas.includes(pullRequestState.headSha);
         if (headIsToolingOwned) {
-          if (oldLocale.pullRequestSupersededNoticePosted !== true) {
+          const divergentIds = await this.divergentSupersededTranslations(
+            stored.record,
+            replacementRecord,
+            phraseLocale,
+            pullRequestState.headSha,
+            replacementPullRequestUrl,
+          );
+          if (divergentIds.length) {
+            if (
+              stableJson(oldLocale.pullRequestSupersededDivergentIds ?? []) !==
+              stableJson(divergentIds)
+            ) {
+              const notice =
+                `${replacementNotice} Left open because #${replacementNumber} has different ` +
+                `translations for ${divergentIds.length} message${divergentIds.length === 1 ? "" : "s"} ` +
+                `whose English did not change: ${divergentMessageList(divergentIds)}. ` +
+                `Copy the translations you want to keep into the newer Phrase job; this PR closes ` +
+                `once #${replacementNumber} carries them. Close it yourself if the newer ` +
+                `translations are intended.`;
+              const posted = await this.postSupersededPullRequestNotice(
+                context,
+                stored,
+                phraseLocale,
+                oldLocale.pullRequestUrl,
+                notice,
+              );
+              if (!posted) continue;
+              await this.saveSupersededLocaleState(context, stored, phraseLocale, {
+                pullRequestSupersededNoticePosted: true,
+                pullRequestSupersededDivergentIds: divergentIds,
+              });
+            }
+            continue;
+          }
+          if (oldLocale.pullRequestSupersededDivergentIds?.length) {
+            const notice = `${replacementNotice} This PR is closed because #${replacementNumber} now carries every translation from it.`;
+            const posted = await this.postSupersededPullRequestNotice(
+              context,
+              stored,
+              phraseLocale,
+              oldLocale.pullRequestUrl,
+              notice,
+            );
+            if (!posted) continue;
+            await this.saveSupersededLocaleState(context, stored, phraseLocale, {
+              pullRequestSupersededDivergentIds: [],
+            });
+          } else if (oldLocale.pullRequestSupersededNoticePosted !== true) {
             const notice = `${replacementNotice} This PR is closed because a newer source catalog superseded batch \`${stored.record.key.slice(0, 12)}\`.`;
             const posted = await this.postSupersededPullRequestNotice(
               context,
@@ -2020,6 +2122,89 @@ export class PhraseWorkflow {
       }
     }
     return candidateRecords.length;
+  }
+
+  /**
+   * Compares the superseded PR's catalog with its replacement's before closing it. A missing
+   * old catalog has nothing to lose; any other unreadable input throws, so the PR stays open and
+   * cleanup retries on the next reconcile.
+   */
+  private async divergentSupersededTranslations(
+    oldRecord: PhraseBatchRecord,
+    replacementRecord: PhraseBatchRecord,
+    phraseLocale: string,
+    oldHeadSha: string,
+    replacementPullRequestUrl: string,
+  ): Promise<string[]> {
+    const oldTarget = oldRecord.config.targetLocales.find(
+      (target) => target.phraseLocale === phraseLocale,
+    );
+    const newTarget = replacementRecord.config.targetLocales.find(
+      (target) => target.phraseLocale === phraseLocale,
+    );
+    if (!oldTarget || !newTarget) return [];
+    const oldTargetBytes = await this.dependencies.repository.readFile(
+      oldTarget.outputPath,
+      oldHeadSha,
+    );
+    if (!oldTargetBytes) return [];
+
+    // A merged or closed replacement has no live head; its last tooling commit holds the export.
+    const replacementState =
+      await this.dependencies.repository.getPullRequestState(replacementPullRequestUrl);
+    const replacementHeadSha =
+      replacementState.state === "open"
+        ? replacementState.headSha
+        : replacementRecord.locales[phraseLocale]?.toolingCommitSha;
+    const [oldSource, newSource, newTargetBytes] = await Promise.all([
+      this.readSourceCatalog(oldRecord.config, oldRecord.sourceCommit),
+      this.readSourceCatalog(replacementRecord.config, replacementRecord.sourceCommit),
+      replacementHeadSha
+        ? this.dependencies.repository.readFile(newTarget.outputPath, replacementHeadSha)
+        : Promise.resolve(null),
+    ]);
+    const missing = !oldSource.bytes
+      ? `source catalog at ${oldRecord.sourceCommit}`
+      : !newSource.bytes
+        ? `source catalog at ${replacementRecord.sourceCommit}`
+        : !newTargetBytes
+          ? `${newTarget.outputPath} on ${replacementPullRequestUrl}`
+          : undefined;
+    if (missing) {
+      throw new PhraseRepositoryError(`Could not read the ${missing} to compare translations`, 404);
+    }
+    return divergentSupersededMessageIds({
+      oldSource: this.readCatalog(oldRecord.config, "source", oldSource.bytes!),
+      oldTarget: this.readCatalog(oldRecord.config, oldTarget, oldTargetBytes),
+      newSource: this.readCatalog(replacementRecord.config, "source", newSource.bytes!),
+      newTarget: this.readCatalog(replacementRecord.config, newTarget, newTargetBytes!),
+    });
+  }
+
+  private readCatalog(
+    config: PhraseWorkflowConfig,
+    target: PhraseTargetLocale | "source",
+    bytes: Uint8Array,
+  ): Catalog {
+    const adapter = this.dependencies.catalogAdapters.get(
+      target === "source" ? config.sourceCatalog.adapter : targetAdapterId(config),
+    );
+    const context =
+      target === "source"
+        ? {
+            locale: config.sourceCatalog.locale,
+            role: "source" as const,
+            options: config.sourceCatalog.options ?? {},
+          }
+        : {
+            locale: target.repositoryLocale,
+            role: "target" as const,
+            options: config.targetOptions ?? {},
+          };
+    return adapter.read(
+      parseCatalogDocument(new TextDecoder().decode(bytes), adapter, context),
+      context,
+    );
   }
 
   private async postSupersededPullRequestNotice(

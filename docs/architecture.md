@@ -99,7 +99,7 @@ The state record is keyed by repository, base ref, exact source bytes, and the P
 
 The first creation of each locale PR best-effort assigns the GitHub users who changed its source input since the previous matching batch, using the hub's fallback assignees when none can be assigned; state retries transient failures without repeating completed assignments.
 
-When a newer source batch opens a locale PR, reconciliation closes matching locale PRs from earlier superseded batches unless their heads contain reviewer commits; those PRs stay open with a notice.
+When a newer source batch opens a locale PR, reconciliation closes matching locale PRs from earlier superseded batches unless their heads contain reviewer commits, or the replacement lacks one of their translations; those PRs stay open with a notice. A translation counts as lacking when its English is unchanged between the two batches, it differs from the English, it has no validation error, and the replacement's catalog has a different value. Such a PR is checked again on every reconcile and closes, with a second notice, once the replacement carries the same translations.
 
 In `tms reconcile`, translation-validation findings do not fail the command: GitHub Actions emits warning annotations alongside the PR's 🌐 Translation check comment, and only pipeline failures exit 1.
 
