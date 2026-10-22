@@ -40,6 +40,7 @@ const resultNames = [
   "I18N_STATUS",
   "I18N_ERRORS",
   "I18N_WARNINGS",
+  "I18N_PENDING",
   "I18N_MODE",
   "I18N_CONFIG",
   "I18N_TOOL_VERSION",
@@ -75,7 +76,7 @@ const customAdapter = `export default {
   write(catalog) { return Object.fromEntries(Object.entries(catalog.messages).map(([id, message]) => [id, message.pattern])); }
 };`;
 const message = (id, defaultMessage) =>
-  `formatMessage({ id: ${JSON.stringify(id)}, defaultMessage: ${JSON.stringify(defaultMessage)} });`;
+  `formatMessage({ id: ${JSON.stringify(id)}, defaultMessage: ${JSON.stringify(defaultMessage)}, description: "Parity fixture" });`;
 // Each scenario overrides the valid baseline; `errors` scenarios fail in error mode.
 const scenarios = {
   valid: {},

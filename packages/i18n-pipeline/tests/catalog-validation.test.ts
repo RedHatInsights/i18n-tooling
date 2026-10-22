@@ -719,6 +719,7 @@ describe("catalog project validation", () => {
     const passed = await runValidation({ version: 1, tmsConfig: "phrase-tms.json", checks: [] });
     expect(passed.exitCode).toBe(0);
     expect(passed.output).toEqual([
+      'Pending translations:\n- TMS target "locales/zh-CN.json" is not delivered yet; skipping.',
       "Catalog validation passed (1 source, 1 target, 0 generated catalogs, 1 pending TMS target).",
     ]);
 

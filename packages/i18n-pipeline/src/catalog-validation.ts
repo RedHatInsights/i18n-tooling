@@ -105,6 +105,11 @@ export interface CatalogValidationResult {
   generatedCount: number;
   /** TMS targets whose output file has not been delivered yet. */
   pendingTargetCount: number;
+  /**
+   * One line per translation not delivered yet (an FEO locale, an empty placeholder or a missing
+   * TMS target). Expected before delivery, so they are reported apart from warnings.
+   */
+  pending: string[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -749,6 +754,7 @@ async function checkFeoTemplate(
   projectRoot: string,
   entry: FeoTemplateValidation,
   warnings: string[],
+  pending: string[],
   phraseConfig?: string,
 ): Promise<string[]> {
   const problems: string[] = [];
@@ -850,7 +856,7 @@ async function checkFeoTemplate(
       target = targetValue;
     } catch (error) {
       if (hasCauseCode(error, "ENOENT") && !templateLocales.includes(locale)) {
-        warnings.push(
+        pending.push(
           `FEO locale "${locale}" is not delivered yet: catalog "${localePath}" is missing and ` +
             `template "${entry.template}" has no spec.locales block for it; skipping.`,
         );
@@ -946,6 +952,7 @@ export async function validateCatalogProject(
 ): Promise<CatalogValidationResult> {
   const problems: string[] = [];
   const warnings: string[] = [];
+  const pending: string[] = [];
   const lintedSources = new Set<string>();
   let sourceCount = 0;
   let targetCount = 0;
@@ -980,6 +987,7 @@ export async function validateCatalogProject(
         projectRoot,
         entry,
         warnings,
+        pending,
         phraseTemplates.get(entry.template),
       )),
     );
@@ -1035,6 +1043,7 @@ export async function validateCatalogProject(
         !(await fileExists(resolve(projectRoot, targetReference.path)))
       ) {
         pendingTargetCount += 1;
+        pending.push(`TMS target "${targetReference.path}" is not delivered yet; skipping.`);
         continue;
       }
       try {
@@ -1053,7 +1062,7 @@ export async function validateCatalogProject(
           Object.keys(source.catalog.messages).length > 0
         ) {
           pendingTargetCount += 1;
-          warnings.push(
+          pending.push(
             `TMS target "${targetReference.path}" is an empty placeholder; counted as pending until translations are delivered.`,
           );
           continue;
@@ -1081,5 +1090,13 @@ export async function validateCatalogProject(
     ...(await undeclaredCatalogProblems(projectRoot, config.catalogDirectories, declaredPaths)),
   );
 
-  return { problems, warnings, sourceCount, targetCount, generatedCount, pendingTargetCount };
+  return {
+    problems,
+    warnings,
+    pending,
+    sourceCount,
+    targetCount,
+    generatedCount,
+    pendingTargetCount,
+  };
 }
