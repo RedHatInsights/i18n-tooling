@@ -1,10 +1,15 @@
 import { spawn } from "node:child_process";
 import { access, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
-import { basename, isAbsolute, resolve } from "node:path";
+import { basename, isAbsolute, posix, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import { checkCatalogs } from "./catalog-check.js";
 import { parseCatalogDocument } from "./catalog-document.js";
+import {
+  FEC_UTILITIES_PACKAGE,
+  fecSchemaAcceptsLocales,
+  readInstalledFecSchema,
+} from "./feo-fec-schema.js";
 import {
   FEO_MAX_LOCALES,
   assertFeoLocaleId,
@@ -618,10 +623,101 @@ function feoLocaleProblem(
   );
 }
 
+/**
+ * Maps each Frontend template a Phrase config writes `spec.locales` into to that config's path.
+ * Phrase configs are found next to `tmsConfig` by the `phrase-tms*.json` naming convention, since
+ * the FEO Phrase config is registered with the i18n hub rather than referenced by this config.
+ */
+async function phraseFrontendTemplates(
+  projectRoot: string,
+  tmsConfig: string | undefined,
+): Promise<Map<string, string>> {
+  const templates = new Map<string, string>();
+  if (!tmsConfig) return templates;
+  const directory = posix.dirname(tmsConfig);
+  let names: string[];
+  try {
+    names = await readdir(resolve(projectRoot, directory));
+  } catch {
+    return templates;
+  }
+  for (const name of names.filter((file) => /^phrase-tms.*\.json$/.test(file)).sort()) {
+    const path = directory === "." ? name : `${directory}/${name}`;
+    try {
+      const value = JSON.parse(await readFile(resolve(projectRoot, path), "utf8")) as unknown;
+      const template =
+        isRecord(value) && isRecord(value.frontendTemplate)
+          ? value.frontendTemplate.path
+          : undefined;
+      if (typeof template === "string" && !templates.has(template)) templates.set(template, path);
+    } catch {
+      // An unreadable Phrase config is reported by the checks that load it.
+    }
+  }
+  return templates;
+}
+
+/**
+ * Checks that the consumer's FEC schema accepts `spec.locales`. `localizedBy` names why the
+ * template gets `spec.locales`; without it, the template is not localized yet, a rejecting schema
+ * is only a warning, and a check that cannot run is not reported.
+ */
+async function checkFecLocalesSupport(
+  projectRoot: string,
+  entry: FeoTemplateValidation,
+  localizedBy: string | undefined,
+  warnings: string[],
+): Promise<string[]> {
+  const skipped = (detail: string) => {
+    if (!localizedBy) return;
+    warnings.push(
+      `FEC schema support for spec.locales in "${entry.template}" was not checked: ${detail}.`,
+    );
+  };
+  let installed;
+  try {
+    installed = await readInstalledFecSchema(projectRoot);
+  } catch (error) {
+    skipped(`${FEC_UTILITIES_PACKAGE} could not be read (${errorMessage(error)})`);
+    return [];
+  }
+  if (!installed) {
+    skipped(
+      `${FEC_UTILITIES_PACKAGE} is not installed; install the repository's dependencies ` +
+        "from its lockfile (for npm, `npm ci`) to check it",
+    );
+    return [];
+  }
+  let accepted: boolean;
+  try {
+    accepted = fecSchemaAcceptsLocales(installed.schema);
+  } catch (error) {
+    skipped(`"${installed.schemaPath}" has an unexpected layout (${errorMessage(error)})`);
+    return [];
+  }
+  if (accepted) return [];
+
+  const rejection =
+    `the Frontend CRD schema in ${FEC_UTILITIES_PACKAGE} ${installed.version} ` +
+    `("${installed.schemaPath}") does not accept spec.locales, so FEC rejects the template ` +
+    "once translations are inlined. Update that package in the lockfile to a release whose " +
+    `schema accepts spec.locales (4.14.0 or later; for npm, \`npm update ${FEC_UTILITIES_PACKAGE}\`)`;
+  if (!localizedBy) {
+    warnings.push(
+      `FEC schema: FEO template "${entry.template}" is not localized yet, but ${rejection}.`,
+    );
+    return [];
+  }
+  return [
+    `FEC schema: FEO template "${entry.template}" is localized (${localizedBy}), but ${rejection}.`,
+  ];
+}
+
 async function checkFeoTemplate(
   projectRoot: string,
   entry: FeoTemplateValidation,
   warnings: string[],
+  phraseConfig?: string,
 ): Promise<string[]> {
   const problems: string[] = [];
   let templateBytes: Buffer;
@@ -679,6 +775,7 @@ async function checkFeoTemplate(
   }
 
   const source = sourceValue as FeoCatalog;
+  const deliveredLocales: string[] = [];
   const englishDrift = !sourceBytes.equals(Buffer.from(expectedSource, "utf8"));
   if (englishDrift) {
     problems.push(
@@ -719,6 +816,7 @@ async function checkFeoTemplate(
       problems.push(feoLocaleProblem(entry, locale, localePath, errorMessage(error), englishDrift));
       continue;
     }
+    deliveredLocales.push(locale);
 
     // Only visible until the source catalog is re-extracted; afterwards nothing in the files
     // shows that the translation predates the new English.
@@ -785,6 +883,15 @@ async function checkFeoTemplate(
     );
   }
 
+  const localizedBy = templateLocales.length
+    ? `it has spec.locales for ${templateLocales.join(", ")}`
+    : deliveredLocales.length
+      ? `locale catalogs for ${deliveredLocales.join(", ")} exist`
+      : phraseConfig
+        ? `Phrase config "${phraseConfig}" writes spec.locales into it`
+        : undefined;
+  problems.push(...(await checkFecLocalesSupport(projectRoot, entry, localizedBy, warnings)));
+
   return problems;
 }
 
@@ -819,8 +926,18 @@ export async function validateCatalogProject(
     }
   }
 
+  const phraseTemplates = config.feo?.length
+    ? await phraseFrontendTemplates(projectRoot, config.tmsConfig)
+    : new Map<string, string>();
   for (const entry of config.feo ?? []) {
-    problems.push(...(await checkFeoTemplate(projectRoot, entry, warnings)));
+    problems.push(
+      ...(await checkFeoTemplate(
+        projectRoot,
+        entry,
+        warnings,
+        phraseTemplates.get(entry.template),
+      )),
+    );
   }
 
   const checks: PlannedCheck[] = [...config.checks];
