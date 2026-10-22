@@ -334,6 +334,12 @@ describe("catalog project validation", () => {
     expect(result.exitCode).toBe(0);
   });
 
+  it("names feo among the entries an empty config needs", () => {
+    expect(() => parseCatalogValidationConfig({ version: 1, checks: [] })).toThrow(
+      'needs "tmsConfig" or at least one "checks", "generated", or "feo" entry',
+    );
+  });
+
   it("rejects sourceLint paths outside the consumer root", () => {
     expect(() =>
       parseCatalogValidationConfig({
@@ -938,6 +944,32 @@ objects:
       ...feoValidationConfig({ fr: "deploy/locales/fr.json" }),
       tmsConfig: "i18n/phrase-tms.json",
     });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors.join("\n")).toContain(
+      'is localized (Phrase config "i18n/phrase-tms-feo.json" writes spec.locales into it)',
+    );
+  });
+
+  it("fails an undelivered FEO template that an FEO Phrase config localizes without tmsConfig", async () => {
+    await createUndeliveredFeoProject();
+    await installFec(false, "4.13.5");
+    await mkdir(join(projectRoot!, "i18n"));
+    await writeFile(
+      join(projectRoot!, "i18n/phrase-tms-feo.json"),
+      JSON.stringify({
+        preset: "hcc-ui",
+        state: { branch: "i18n-tms-state-feo" },
+        sourceCatalog: {
+          path: "deploy/locales/translation-template.json",
+          filename: "sample.feo.en.json",
+        },
+        targetOutputPath: "deploy/locales/{locale}.json",
+        frontendTemplate: { path: "deploy/frontend.yaml", generateSourceCatalog: true },
+      }),
+    );
+
+    const result = await runValidation(feoValidationConfig({ fr: "deploy/locales/fr.json" }));
 
     expect(result.exitCode).toBe(1);
     expect(result.errors.join("\n")).toContain(
