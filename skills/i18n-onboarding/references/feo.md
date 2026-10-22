@@ -18,12 +18,15 @@ Give each translated FEO item a stable ID before extracting. IDs for navigation 
 
 Run `i18n-pipeline feo extract --template deploy/frontend.yaml --output deploy/locales/translation-template.json` and review the extracted English and generated FormatJS descriptor `description` context. Include the source catalog in the repository change; stage or commit it only if the selected autonomy allows that. The extractor writes each message's translator context itself, from the field name and stable item key; the YAML has no context field to fill. It includes:
 
-- `bundleSegments.<bundleId>.<segmentId>.navItems.<id>[.routes.<id>...].title` and `.product`;
+- `bundleSegments.<bundleId>.<segmentId>.navItems.<id>[.routes.<id>|.navItems.<id>...].title` and `.product`;
+- `navigationSegments.<segmentId>.navItems.<id>[.routes.<id>|.navItems.<id>...].title` and `.product`, keyed by the Frontend that defines the segment;
 - `searchEntries.<id>.title`, `.description`, and `.alt_title.<slug>`;
 - `serviceTiles.<section>.<group>.<id>.title` and `.description`;
+- `widgetRegistry.<scope>.<moduleSlug>.<importNameSlug>.title` and `.headerLink.title` (widgets have no id: `module` and `importName`, default `default`, are slugged like `alt_title` aliases);
+- `baseWidgetLayouts.<name>.displayName`;
 - `module.defaultDocumentTitle`.
 
-It does not extract `navigationSegments` titles and products, or `widgetRegistry` titles (`widgetRegistry[].config.title`). Compare the template with the extracted catalog during inspection, and when such strings exist, tell the developer in the plan and the report that they stay English.
+A test in i18n-tooling classifies every string field of the FEC Frontend schema as extracted or not translatable, so a field missing from this list is not user-visible text. `spec.title` is undecided and not extracted.
 
 Each search `alt_title` alias is its own message. Its slug is the English alias lowercased, with each run of characters outside `[a-z0-9]` replaced by `-` and the ends trimmed; an empty slug fails extraction. Aliases with the same slug, such as `acs` and `ACS`, share one key and one translation; the first alias in document order is the English default. The app rebuilds the alias list in English order, using the translation of each alias's slug when present. With multiple Frontend objects, keys gain `objects.<metadata.name>.spec.` and the names must be unique. Adding a second Frontend changes catalog IDs, so migrate translations when that happens.
 
