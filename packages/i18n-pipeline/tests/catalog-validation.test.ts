@@ -1008,6 +1008,40 @@ objects:
     );
   });
 
+  it("warns about ICU-looking braces in FEO text, which is shown literally", async () => {
+    await createProject();
+    await mkdir(join(projectRoot!, "deploy/locales"), { recursive: true });
+    await writeFile(
+      join(projectRoot!, "deploy/frontend.yaml"),
+      `kind: Template
+objects:
+  - kind: Frontend
+    spec:
+      searchEntries:
+        - id: requests
+          title: Access requests
+          alt_title: ["requests from {name}"]
+`,
+      "utf8",
+    );
+    await runFeo([
+      "extract",
+      "--template",
+      "deploy/frontend.yaml",
+      "--output",
+      "deploy/locales/translation-template.json",
+    ]);
+
+    const result = await runValidation(feoValidationConfig({ fr: "deploy/locales/fr.json" }));
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output.join("\n")).toContain(
+      'FEO text "searchEntries.requests.alt_title.requests-from-name" in "deploy/frontend.yaml" ' +
+        'contains "{name}", which reads as an ICU placeholder.',
+    );
+    expect(result.output.join("\n")).not.toContain('"searchEntries.requests.title"');
+  });
+
   it("warns for an unlocalized FEO template when the FEC schema rejects spec.locales", async () => {
     await createUndeliveredFeoProject();
     await installFec(false, "4.13.5");

@@ -781,6 +781,17 @@ async function checkFeoTemplate(
     );
     return problems;
   }
+  for (const [key, { defaultMessage }] of Object.entries(currentCatalog)) {
+    // FEO strings are rendered literally; braces only look like ICU arguments to translators.
+    const placeholder = /\{[^{}]*\}/.exec(defaultMessage)?.[0];
+    if (placeholder) {
+      warnings.push(
+        `FEO text "${key}" in "${entry.template}" contains ${JSON.stringify(placeholder)}, which ` +
+          "reads as an ICU placeholder. FEO strings are shown literally, so users see it as typed, " +
+          "and Phrase locks it against translation. Remove it or reword the text.",
+      );
+    }
+  }
 
   let sourceContents: string;
   let sourceBytes: Buffer;
