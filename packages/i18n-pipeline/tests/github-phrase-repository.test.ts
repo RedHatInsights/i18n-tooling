@@ -1468,6 +1468,43 @@ describe("GitHubPhraseRepository", () => {
     expect(closedPatches).toBe(0);
   });
 
+  it("reports the head and merge commit of a merged or closed pull request", async () => {
+    const pullRequests: Record<string, unknown> = {
+      "/pulls/7": {
+        state: "closed",
+        merged_at: "2026-10-22T00:00:00Z",
+        merge_commit_sha: "m".repeat(40),
+        head: { sha: "h".repeat(40) },
+      },
+      "/pulls/8": { state: "closed", merged_at: null, head: { sha: "c".repeat(40) } },
+      "/pulls/9": { state: "closed", merged_at: "2026-10-22T00:00:00Z", head: {} },
+    };
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async (input) => {
+        const url = input instanceof Request ? input.url : String(input);
+        const key = Object.keys(pullRequests).find((path) => url.endsWith(path));
+        return response(key ? pullRequests[key] : {});
+      },
+    });
+
+    await expect(
+      repository.getPullRequestState("https://github.com/example/app/pull/7"),
+    ).resolves.toEqual({
+      state: "merged",
+      headSha: "h".repeat(40),
+      mergeCommitSha: "m".repeat(40),
+    });
+    await expect(
+      repository.getPullRequestState("https://github.com/example/app/pull/8"),
+    ).resolves.toEqual({ state: "closed", headSha: "c".repeat(40) });
+    await expect(
+      repository.getPullRequestState("https://github.com/example/app/pull/9"),
+    ).resolves.toEqual({ state: "merged" });
+  });
+
   it("paginates issue comments and returns the latest marked Bot comment", async () => {
     const marker = "<!-- i18n-pipeline:translation-findings";
     const commentRequests: string[] = [];

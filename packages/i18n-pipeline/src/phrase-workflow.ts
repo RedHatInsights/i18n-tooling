@@ -174,7 +174,10 @@ export interface PhraseLocalePullRequest {
 }
 
 export type PhrasePullRequestState =
-  { state: "open"; headSha: string } | { state: "merged" | "closed" };
+  | { state: "open"; headSha: string }
+  /** `mergeCommitSha` holds the tree that landed, including reviewer commits. */
+  | { state: "merged"; headSha?: string; mergeCommitSha?: string }
+  | { state: "closed"; headSha?: string };
 
 export interface PhraseLocalePullRequestCreated {
   pullRequestUrl: string;
@@ -2004,6 +2007,10 @@ export class PhraseWorkflow {
       })
       .slice(0, limit);
 
+    let replacementSnapshot: Promise<string | undefined> | undefined;
+    const replacementSnapshotSha = () =>
+      (replacementSnapshot ??= this.supersedingReplacementSnapshot(replacementPullRequestUrl));
+
     const replacementNotice = `Replaced by #${replacementNumber} (batch \`${replacementRecord.key.slice(0, 12)}\`, source \`${replacementRecord.sourceCommit.slice(0, 7)}\`).`;
 
     for (const stored of candidateRecords) {
@@ -2034,7 +2041,11 @@ export class PhraseWorkflow {
             phraseLocale,
             pullRequestState.headSha,
             replacementPullRequestUrl,
+            replacementSnapshotSha,
           );
+          // A replacement closed without merging delivered nothing, so this PR stays open until
+          // a later replacement carries its translations.
+          if (divergentIds === undefined) continue;
           if (divergentIds.length) {
             if (
               stableJson(oldLocale.pullRequestSupersededDivergentIds ?? []) !==
@@ -2125,9 +2136,31 @@ export class PhraseWorkflow {
   }
 
   /**
+   * The commit holding what the replacement PR delivers: its head while open, the merge commit
+   * once merged (so reviewer changes count), and `undefined` when it was closed without merging.
+   * Throws when a merged PR reports no commit, so cleanup retries instead of guessing.
+   */
+  private async supersedingReplacementSnapshot(
+    replacementPullRequestUrl: string,
+  ): Promise<string | undefined> {
+    const state = await this.dependencies.repository.getPullRequestState(replacementPullRequestUrl);
+    if (state.state === "open") return state.headSha;
+    if (state.state === "closed") return undefined;
+    const sha = state.mergeCommitSha ?? state.headSha;
+    if (!sha) {
+      throw new PhraseRepositoryError(
+        `Could not find the merged commit of ${replacementPullRequestUrl} to compare translations`,
+        404,
+      );
+    }
+    return sha;
+  }
+
+  /**
    * Compares the superseded PR's catalog with its replacement's before closing it. A missing
-   * old catalog has nothing to lose; any other unreadable input throws, so the PR stays open and
-   * cleanup retries on the next reconcile.
+   * old catalog has nothing to lose; a replacement closed without merging carries nothing and
+   * returns `undefined`; any other unreadable input throws, so the PR stays open and cleanup
+   * retries on the next reconcile.
    */
   private async divergentSupersededTranslations(
     oldRecord: PhraseBatchRecord,
@@ -2135,7 +2168,8 @@ export class PhraseWorkflow {
     phraseLocale: string,
     oldHeadSha: string,
     replacementPullRequestUrl: string,
-  ): Promise<string[]> {
+    replacementSnapshotSha: () => Promise<string | undefined>,
+  ): Promise<string[] | undefined> {
     const oldTarget = oldRecord.config.targetLocales.find(
       (target) => target.phraseLocale === phraseLocale,
     );
@@ -2148,27 +2182,20 @@ export class PhraseWorkflow {
       oldHeadSha,
     );
     if (!oldTargetBytes) return [];
+    const replacementSha = await replacementSnapshotSha();
+    if (!replacementSha) return undefined;
 
-    // A merged or closed replacement has no live head; its last tooling commit holds the export.
-    const replacementState =
-      await this.dependencies.repository.getPullRequestState(replacementPullRequestUrl);
-    const replacementHeadSha =
-      replacementState.state === "open"
-        ? replacementState.headSha
-        : replacementRecord.locales[phraseLocale]?.toolingCommitSha;
     const [oldSource, newSource, newTargetBytes] = await Promise.all([
       this.readSourceCatalog(oldRecord.config, oldRecord.sourceCommit),
       this.readSourceCatalog(replacementRecord.config, replacementRecord.sourceCommit),
-      replacementHeadSha
-        ? this.dependencies.repository.readFile(newTarget.outputPath, replacementHeadSha)
-        : Promise.resolve(null),
+      this.dependencies.repository.readFile(newTarget.outputPath, replacementSha),
     ]);
     const missing = !oldSource.bytes
       ? `source catalog at ${oldRecord.sourceCommit}`
       : !newSource.bytes
         ? `source catalog at ${replacementRecord.sourceCommit}`
         : !newTargetBytes
-          ? `${newTarget.outputPath} on ${replacementPullRequestUrl}`
+          ? `${newTarget.outputPath} at ${replacementSha.slice(0, 7)} of ${replacementPullRequestUrl}`
           : undefined;
     if (missing) {
       throw new PhraseRepositoryError(`Could not read the ${missing} to compare translations`, 404);

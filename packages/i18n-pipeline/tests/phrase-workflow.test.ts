@@ -269,6 +269,8 @@ class FakeRepository implements PhraseWorkflowRepository {
   readonly createDraftRequirements: Array<boolean | undefined> = [];
   readonly resolvedRefs: string[] = [];
   readonly pullRequestStates = new Map<string, "open" | "merged" | "closed">();
+  /** Merge commit reported for a merged PR; read files at it through `branchHeads`. */
+  readonly pullRequestMergeCommits = new Map<string, string>();
   readonly pullRequestStateRequests: string[] = [];
   pullRequestStateCalls = 0;
   readonly closePullRequestCalls: string[] = [];
@@ -348,8 +350,18 @@ class FakeRepository implements PhraseWorkflowRepository {
     this.pullRequestStateCalls += 1;
     this.pullRequestStateRequests.push(pullRequestUrl);
     const state = this.pullRequestStates.get(pullRequestUrl) ?? "open";
-    if (state !== "open") return { state };
     const branch = this.pullRequestBranches.get(pullRequestUrl);
+    if (state !== "open") {
+      const lastHead = branch ? this.branchHeads.get(branch) : undefined;
+      const mergeCommitSha = this.pullRequestMergeCommits.get(pullRequestUrl);
+      return state === "merged"
+        ? {
+            state,
+            ...(lastHead ? { headSha: lastHead } : {}),
+            ...(mergeCommitSha ? { mergeCommitSha } : {}),
+          }
+        : { state, ...(lastHead ? { headSha: lastHead } : {}) };
+    }
     const headSha =
       this.preverifiedRefUpdateHeadSha ?? (branch ? this.branchHeads.get(branch) : undefined);
     if (!headSha) throw new PhraseRepositoryError("Fake pull request has no branch head", 500);
@@ -7475,6 +7487,52 @@ describe("superseded locale pull requests with different translations", () => {
       pullRequestSupersededNoticePosted: true,
       pullRequestSupersededDivergentIds: ["greeting"],
     });
+    expect(savedOld?.record.locales.fr?.pullRequestFinalized).toBeUndefined();
+  });
+
+  it("compares a merged replacement at its merge commit, so reviewer changes count", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const old = await seedDivergentPredecessor(scenario);
+    const replacementUrl = "https://github.com/example/app/pull/42";
+
+    await scenario.workflow.reconcile();
+    // The tooling export converges with the old PR on the next run...
+    scenario.phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+    await scenario.workflow.reconcile();
+    // ...then a reviewer changes the replacement's translation and merges it before cleanup.
+    scenario.repository.branchHeads.set("merge-42", "e".repeat(40));
+    scenario.repository.branchFiles.set(
+      "merge-42",
+      new Map([["locales/fr.json", new TextEncoder().encode('{"greeting":"Coucou {name}"}')]]),
+    );
+    scenario.repository.pullRequestStates.set(replacementUrl, "merged");
+    scenario.repository.pullRequestMergeCommits.set(replacementUrl, "e".repeat(40));
+    await scenario.workflow.reconcile();
+
+    const savedOld = await scenario.state.readBatch(old.key);
+    expect(scenario.repository.closePullRequestCalls).not.toContain(old.locales.fr!.pullRequestUrl);
+    expect(savedOld?.record.locales.fr?.pullRequestSupersededDivergentIds).toEqual(["greeting"]);
+    expect(savedOld?.record.locales.fr?.pullRequestFinalized).toBeUndefined();
+  });
+
+  it("keeps the PR open when its replacement was closed without merging", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const old = await seedDivergentPredecessor(scenario);
+    const replacementUrl = "https://github.com/example/app/pull/42";
+
+    await scenario.workflow.reconcile();
+    // The replacement's export now matches the old PR, but the replacement is closed unmerged.
+    scenario.phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+    await scenario.workflow.reconcile();
+    scenario.repository.pullRequestStates.set(replacementUrl, "closed");
+    const requestsBefore = scenario.repository.pullRequestStateRequests.length;
+    await scenario.workflow.reconcile();
+
+    const savedOld = await scenario.state.readBatch(old.key);
+    expect(scenario.repository.pullRequestStateRequests.slice(requestsBefore)).toContain(
+      replacementUrl,
+    );
+    expect(scenario.repository.closePullRequestCalls).not.toContain(old.locales.fr!.pullRequestUrl);
     expect(savedOld?.record.locales.fr?.pullRequestFinalized).toBeUndefined();
   });
 
