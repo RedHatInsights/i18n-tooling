@@ -47,6 +47,16 @@ Point the validation config's `tmsConfig` at `phrase-tms.json` in the same chang
 
 The reusable reconciliation workflow writes one flat locale JSON file per target locale and opens or updates one PR per locale. It does not run the consumer's build or aggregation scripts. Never use an aggregate file as a target `outputPath`.
 
+## Runtime aggregates
+
+A committed aggregate built from the Phrase target files also breaks: each locale PR changes an input, the committed aggregate stays as it was, and the aggregate's `generated` check fails. The fix is to stop committing the aggregate:
+
+- Prefer having the app import the locale files directly, so no aggregate file exists. Otherwise generate it during the build, from a `prebuild` script or the bundler, into a path outside every `catalogDirectories` entry (for example the build output), and ignore it in Git. `catalogDirectories` does not read `.gitignore`, so a generated file left inside a catalog directory is reported as undeclared.
+- Remove its `generated` entry, and point tests that import it at the build step or the locale files.
+- Run the repository's build and unit tests to prove the app and its tests still load every locale.
+
+When the developer keeps the aggregate committed for now, list this fix in the PR checklist, and add that until it lands, someone must run the aggregate script on every locale PR.
+
 ## Switch to the hcc-ui preset
 
 Offer this upgrade when an existing `phrase-tms.json` has no `preset` and either names the sandbox project `yWWEIEQgpNVK650YBQhGx6` (`pesimon-hcc-ui-testing`, which is never a real repository's project) or writes out the values the `hcc-ui` preset supplies. Leave a config alone when the developer chose another project. The hub's own test consumers (`i18n-hub-test-consumer`) stay on the sandbox on purpose; do not offer it there. Run it only after the developer selects it. As one unit:
