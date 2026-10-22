@@ -30,7 +30,7 @@ Read the repository's agent instructions and relevant contribution or localizati
 - Find OpenAPI Problem Details specs and keyed ICU JSON catalogs.
 - Find `i18n/catalog-validation.json` and `.github/i18n/catalog-validation.json`.
 - Find current validation workflows, including any `i18n-validation.yml`, Phrase caller workflows, and `.tekton/*.yaml` PipelineRuns. For every PipelineRun, record the shared pipeline reference and revision.
-- If FEO localization is present, locate the installed `@redhat-cloud-services/frontend-components-config-utilities` Frontend CRD schema and inspect whether `spec.properties.locales` exists. Read the schema; do not infer support from its package version.
+- If FEO localization is present, check the **locked** Frontend CRD schema for `spec.properties.locales` as [references/feo.md](references/feo.md#check-fec-schema-support) describes.
 - Run the selected CLI's `validate-ci --mode warn` before making changes. It discovers either config path above. Report the findings even though `warn` mode exits successfully for findings. On a repository with an existing config, describe its current results and completed tracks instead of replacing its baseline.
 
 Use [references/validation-baseline.md](references/validation-baseline.md) to map repository catalogs and generators into the config. Read [references/konflux.md](references/konflux.md), [references/phrase.md](references/phrase.md), and [references/feo.md](references/feo.md) when those tracks are detected. Read [references/harnesses.md](references/harnesses.md) before asking for approval or looking for a Jira tool.
@@ -46,7 +46,7 @@ After inspection, settle every decision below on its default; a preference the d
 
 Decisions and their defaults:
 
-1. **Tracks to run**: the applicable validation baseline, Phrase submit/reconcile, FEO localization, and Konflux tracks. Default: every relevant available track. When FEO localization applies and the installed FEC schema does not accept `spec.locales`, list **FEC upgrade (required by FEO)** as its own track, included by default. Show Konflux as **not yet available** unless the PipelineRun's referenced shared pipeline at its recorded revision declares `i18n-validation-mode`; state that check as the condition and do not guess.
+1. **Tracks to run**: the applicable validation baseline, Phrase submit/reconcile, FEO localization, and Konflux tracks. Default: every relevant available track. When FEO localization applies and the locked FEC schema does not accept `spec.locales`, list **FEC upgrade (required by FEO)** as its own track, included by default. Show Konflux as **not yet available** unless the PipelineRun's referenced shared pipeline at its recorded revision declares `i18n-validation-mode`; state that check as the condition and do not guess.
 2. **Jira tickets**: none (default), draft only, or create through an available Jira tool. If creation was chosen but no Jira tool is available, write the drafts to `i18n-onboarding-ticket-drafts.md` in the repository and report that fallback.
 3. **Branch layout**: one branch with one commit per logical unit (default), or one branch per selected track.
 4. **Autonomy**: push and open a PR (default), commit the selected changes, or edit files only. In hub mode, push-and-PR also covers the i18n-hub registration PR. Commit, push, or open a PR only when the approved plan says so.
