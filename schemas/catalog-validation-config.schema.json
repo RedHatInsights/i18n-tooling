@@ -71,6 +71,10 @@
             },
             "description": "Argument array passed without a shell; include {output} in the output-file argument."
           },
+          "severity": {
+            "enum": ["error", "warning"],
+            "description": "How a stale file is reported. Defaults to error. Use warning for a committed runtime aggregate that Phrase locale PRs cannot regenerate."
+          },
           "updateCommand": {
             "type": "string",
             "minLength": 1

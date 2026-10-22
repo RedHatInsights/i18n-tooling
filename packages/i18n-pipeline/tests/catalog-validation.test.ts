@@ -679,6 +679,37 @@ describe("catalog project validation", () => {
     const stale = await runValidation({ version: 1, checks: [], generated });
     expect(stale.exitCode).toBe(1);
     expect(stale.errors[0]).toContain('Generated catalog "locales/data.json" is out of date');
+
+    // A committed runtime aggregate that Phrase locale PRs cannot regenerate stays a warning.
+    const warned = await runValidation({
+      version: 1,
+      checks: [],
+      generated: [{ ...generated[0]!, severity: "warning" }],
+    });
+    expect(warned.exitCode).toBe(0);
+    expect(warned.errors).toEqual([]);
+    expect(warned.output.join("\n")).toContain(
+      'Generated catalog "locales/data.json" is out of date',
+    );
+  });
+
+  it("rejects an unknown generated severity", () => {
+    expect(() =>
+      parseCatalogValidationConfig({
+        version: 1,
+        checks: [],
+        generated: [
+          {
+            path: "locales/data.json",
+            command: "node",
+            args: ["a.mjs", "{output}"],
+            severity: "info",
+          },
+        ],
+      }),
+    ).toThrowError(
+      'Catalog validation config "generated[0]".severity must be "error" or "warning"',
+    );
   });
 
   it("checks delivered TMS targets and counts undelivered ones as pending", async () => {

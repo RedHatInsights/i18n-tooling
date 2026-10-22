@@ -68,6 +68,8 @@ export interface GeneratedCatalogCheck {
   command: string;
   args: string[];
   updateCommand?: string;
+  /** How a stale file is reported; defaults to "error". */
+  severity?: "error" | "warning";
 }
 
 /** A directory whose catalog files must all be declared by the validation plan. */
@@ -157,7 +159,17 @@ function parseGeneratedCheck(value: unknown, label: string): GeneratedCatalogChe
   const entry = recordValue(value, label);
   rejectUnknownKeys(
     entry,
-    ["path", "adapter", "locale", "options", "role", "command", "args", "updateCommand"],
+    [
+      "path",
+      "adapter",
+      "locale",
+      "options",
+      "role",
+      "command",
+      "args",
+      "updateCommand",
+      "severity",
+    ],
     label,
   );
   const command = requiredString(entry.command, `${label}.command`);
@@ -172,7 +184,16 @@ function parseGeneratedCheck(value: unknown, label: string): GeneratedCatalogChe
   if (entry.updateCommand !== undefined) {
     updateCommand = requiredString(entry.updateCommand, `${label}.updateCommand`);
   }
-  const generator = { command, args, ...(updateCommand ? { updateCommand } : {}) };
+  if (entry.severity !== undefined && entry.severity !== "error" && entry.severity !== "warning") {
+    throw new TypeError(`${label}.severity must be "error" or "warning"`);
+  }
+  const severity = entry.severity as GeneratedCatalogCheck["severity"];
+  const generator = {
+    command,
+    args,
+    ...(updateCommand ? { updateCommand } : {}),
+    ...(severity ? { severity } : {}),
+  };
 
   if (entry.adapter === undefined) {
     const catalogKey = ["locale", "role", "options"].find((key) => entry[key] !== undefined);
@@ -928,7 +949,9 @@ export async function validateCatalogProject(
         const update = entry.updateCommand
           ? `Run \`${entry.updateCommand}\` and commit the result.`
           : "Regenerate the file and commit the result.";
-        problems.push(`Generated catalog "${entry.path}" is out of date. ${update}`);
+        (entry.severity === "warning" ? warnings : problems).push(
+          `Generated catalog "${entry.path}" is out of date. ${update}`,
+        );
       }
     } catch (error) {
       problems.push(
