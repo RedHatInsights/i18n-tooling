@@ -34,6 +34,8 @@ import type {
 
 const OUTPUT_PLACEHOLDER = "{output}";
 const DEFAULT_CATALOG_EXTENSION = ".json";
+/** Where onboarding writes Phrase configs; `validate-ci` discovers its config in the same places. */
+const PHRASE_CONFIG_DIRECTORIES = ["i18n", ".github/i18n"];
 
 export interface CatalogFileReference {
   path: string;
@@ -322,10 +324,8 @@ export function parseCatalogValidationConfig(value: unknown): CatalogValidationC
     root.sourceLint === undefined ? undefined : parseSourceLintConfig(root.sourceLint);
 
   if (!tmsConfig && !checks.length && !generated.length && !feo?.length) {
-    const alternatives =
-      feo === undefined ? '"checks" or "generated"' : '"checks", "generated", or "feo"';
     throw new TypeError(
-      `Catalog validation config needs "tmsConfig" or at least one ${alternatives} entry`,
+      'Catalog validation config needs "tmsConfig" or at least one "checks", "generated", or "feo" entry',
     );
   }
   return {
@@ -625,21 +625,33 @@ function feoLocaleProblem(
 
 /**
  * Maps each Frontend template a Phrase config writes `spec.locales` into to that config's path.
- * Phrase configs are found next to `tmsConfig` by the `phrase-tms*.json` naming convention, since
- * the FEO Phrase config is registered with the i18n hub rather than referenced by this config.
+ * Phrase configs are found by the `phrase-tms*.json` naming convention, since the FEO Phrase config
+ * is registered with the i18n hub rather than referenced by this config. They are looked for next to
+ * `tmsConfig`, or, in a repository with no app catalog and so no `tmsConfig`, in the conventional
+ * config directories.
  */
 async function phraseFrontendTemplates(
   projectRoot: string,
   tmsConfig: string | undefined,
 ): Promise<Map<string, string>> {
   const templates = new Map<string, string>();
-  if (!tmsConfig) return templates;
-  const directory = posix.dirname(tmsConfig);
+  const directories = tmsConfig ? [posix.dirname(tmsConfig)] : PHRASE_CONFIG_DIRECTORIES;
+  for (const directory of directories) {
+    await addPhraseFrontendTemplates(projectRoot, directory, templates);
+  }
+  return templates;
+}
+
+async function addPhraseFrontendTemplates(
+  projectRoot: string,
+  directory: string,
+  templates: Map<string, string>,
+): Promise<void> {
   let names: string[];
   try {
     names = await readdir(resolve(projectRoot, directory));
   } catch {
-    return templates;
+    return;
   }
   for (const name of names.filter((file) => /^phrase-tms.*\.json$/.test(file)).sort()) {
     const path = directory === "." ? name : `${directory}/${name}`;
@@ -654,7 +666,6 @@ async function phraseFrontendTemplates(
       // An unreadable Phrase config is reported by the checks that load it.
     }
   }
-  return templates;
 }
 
 /**
