@@ -162,9 +162,39 @@ async function createUndeliveredFeoProject(): Promise<void> {
   ]);
 }
 
+/** Installs a stand-in FEC package whose Frontend CRD schema accepts `spec.locales` or not. */
+async function installFec(acceptsLocales: boolean, version = "4.14.1"): Promise<void> {
+  const root = join(
+    projectRoot!,
+    "node_modules/@redhat-cloud-services/frontend-components-config-utilities",
+  );
+  await mkdir(join(root, "feo/spec"), { recursive: true });
+  await writeFile(join(root, "package.json"), JSON.stringify({ name: "fec", version }));
+  const frontendSpec = {
+    type: "object",
+    properties: {
+      module: { type: "object" },
+      ...(acceptsLocales ? { locales: { type: "object" } } : {}),
+    },
+    additionalProperties: false,
+  };
+  await writeFile(
+    join(root, "feo/spec/frontend-crd.schema.json"),
+    JSON.stringify({
+      $defs: {
+        frontendSpec,
+        frObject: { type: "object", properties: { spec: { $ref: "#/$defs/frontendSpec" } } },
+      },
+      type: "object",
+      properties: { objects: { type: "array", items: { $ref: "#/$defs/frObject" } } },
+    }),
+  );
+}
+
 async function createProject(): Promise<void> {
   projectRoot = await mkdtemp(join(tmpdir(), "i18n-validation-"));
   await mkdir(join(projectRoot, "locales"));
+  await installFec(true);
   await writeFile(
     join(projectRoot, "package.json"),
     JSON.stringify({
@@ -854,6 +884,90 @@ objects:
     expect(result.output).toEqual([
       "Catalog validation passed (0 sources, 0 targets, 0 generated catalogs, 1 FEO template).",
     ]);
+  });
+
+  it("fails a localized FEO template when the FEC schema rejects spec.locales", async () => {
+    await createFeoProject();
+    await installFec(false, "4.13.5");
+
+    const result = await runValidation(feoValidationConfig());
+
+    expect(result.exitCode).toBe(1);
+    const message = result.errors.join("\n");
+    expect(message).toContain(
+      'FEC schema: FEO template "deploy/frontend.yaml" is localized (it has spec.locales for',
+    );
+    expect(message).toContain("@redhat-cloud-services/frontend-components-config-utilities 4.13.5");
+    expect(message).toContain(
+      "npm update @redhat-cloud-services/frontend-components-config-utilities",
+    );
+  });
+
+  it("fails an undelivered FEO template that a Phrase config next to tmsConfig localizes", async () => {
+    await createUndeliveredFeoProject();
+    await installFec(false, "4.13.5");
+    await mkdir(join(projectRoot!, "i18n"));
+    await writeFile(
+      join(projectRoot!, "i18n/phrase-tms.json"),
+      JSON.stringify({
+        preset: "hcc-ui",
+        locales: ["fr"],
+        sourceCatalog: { path: "locales/en.json", filename: "sample.ui.en.json" },
+        targetOutputPath: "locales/{locale}.json",
+      }),
+    );
+    await writeFile(
+      join(projectRoot!, "locales/fr.json"),
+      JSON.stringify({ greeting: "Bonjour {name}" }),
+    );
+    await writeFile(
+      join(projectRoot!, "i18n/phrase-tms-feo.json"),
+      JSON.stringify({
+        preset: "hcc-ui",
+        state: { branch: "i18n-tms-state-feo" },
+        sourceCatalog: {
+          path: "deploy/locales/translation-template.json",
+          filename: "sample.feo.en.json",
+        },
+        targetOutputPath: "deploy/locales/{locale}.json",
+        frontendTemplate: { path: "deploy/frontend.yaml", generateSourceCatalog: true },
+      }),
+    );
+
+    const result = await runValidation({
+      ...feoValidationConfig({ fr: "deploy/locales/fr.json" }),
+      tmsConfig: "i18n/phrase-tms.json",
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors.join("\n")).toContain(
+      'is localized (Phrase config "i18n/phrase-tms-feo.json" writes spec.locales into it)',
+    );
+  });
+
+  it("warns for an unlocalized FEO template when the FEC schema rejects spec.locales", async () => {
+    await createUndeliveredFeoProject();
+    await installFec(false, "4.13.5");
+
+    const result = await runValidation(feoValidationConfig({ fr: "deploy/locales/fr.json" }));
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output.join("\n")).toContain(
+      'FEC schema: FEO template "deploy/frontend.yaml" is not localized yet, but the Frontend CRD',
+    );
+  });
+
+  it("reports the FEC check as skipped when FEC is not installed", async () => {
+    await createFeoProject();
+    await rm(join(projectRoot!, "node_modules"), { recursive: true });
+
+    const result = await runValidation(feoValidationConfig());
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output.join("\n")).toContain(
+      'FEC schema support for spec.locales in "deploy/frontend.yaml" was not checked: ' +
+        "@redhat-cloud-services/frontend-components-config-utilities is not installed",
+    );
   });
 
   it("skips listed FEO locales that have not been delivered", async () => {

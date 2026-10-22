@@ -193,14 +193,18 @@ describe("i18n-pipeline validate-ci", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toEqual([]);
+    // The example is localized, but without its dependencies FEC support cannot be checked.
     expect(result.stdout).toEqual([
-      "validate-ci mode=error status=pass errors=0 warnings=0 config=config",
+      'FEC schema support for spec.locales in "deploy/frontend.yaml" was not checked: ' +
+        "@redhat-cloud-services/frontend-components-config-utilities is not installed; install " +
+        "the repository's dependencies from its lockfile (for npm, `npm ci`) to check it.",
+      "validate-ci mode=error status=findings errors=0 warnings=1 config=config",
     ]);
     expect(await stat(join(root, "node_modules")).catch(() => undefined)).toBeUndefined();
     await expectResults(result, {
-      status: "pass",
+      status: "findings",
       errors: 0,
-      warnings: 0,
+      warnings: 1,
       mode: "error",
       config: "config",
     });
