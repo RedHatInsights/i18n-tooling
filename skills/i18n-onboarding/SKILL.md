@@ -18,7 +18,7 @@ Use the first available CLI in this order, and tell the developer which source y
 
 This skill supports `i18n-pipeline` version `0.1.0`. Compare the output of `version` before doing any work. If it differs, stop and tell the developer to update the skill or the CLI. Use the selected launcher for every later CLI call. When `I18N_PIPELINE_CLI` is selected, invoke it as `node "$I18N_PIPELINE_CLI" <command>`.
 
-Add the `translations:validate` package script during the baseline track. If an existing script would start running it, such as `npm-run-all translations:*`, keep that script's current behavior and say so in the commit body. Until the first npm release, leave the devDependency out and report it as pending. After publication, add `@redhat-cloud-services/i18n-pipeline` as a devDependency with the repository's package manager.
+Add the `translations:validate` package script during the baseline track. If an existing aggregate would start running it through a wildcard, such as `"translations": "npm-run-all translations:*"`, replace the wildcard with the scripts it matches today, in their current order (`npm-run-all translations:extract`), so the aggregate does exactly what it did before; name that change in the commit body and the plan. Leaving the wildcard makes every run of the aggregate also run validation, which fails wherever the CLI is not installed. Until the first npm release, leave the devDependency out and report it as pending. After publication, add `@redhat-cloud-services/i18n-pipeline` as a devDependency with the repository's package manager.
 
 ## Inspect before asking
 
