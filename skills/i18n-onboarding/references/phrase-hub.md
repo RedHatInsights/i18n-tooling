@@ -16,18 +16,17 @@ Work out one `consumers.json` entry per Phrase config: one for the app catalog a
   "repository": "RedHatInsights/<repository-name>",
   "baseRef": "<default-branch>",
   "configPath": "<path-to-phrase-tms.json>",
-  "phraseProject": "LFsYhKphLpXQ0WWa47VZ19",
   "phraseFile": "<repository-name>.ui.en.json"
 }
 ```
 
 - `name` is the repository name for the app catalog and `<repository-name>-feo` for FEO. `repository` is `RedHatInsights/<repository-name>`, in lowercase letters, digits, and hyphens.
-- `baseRef` is the branch the hub syncs and bases locale PRs on, normally the default branch.
+- `baseRef` is the branch the hub syncs and bases locale PRs on, normally the default branch. Resolve it; many repositories use `master`.
 - `configPath` is the repository-relative path of that Phrase config.
-- `phraseProject` equals that config's `project.uid`, the shared project's UID.
+- Omit `phraseProject`. An entry without it pins the shared `hcc-ui` project, which every consumer uses through the `hcc-ui` preset.
 - `phraseFile` equals `sourceCatalog.filename` from the Phrase config exactly, `<repository-name>.<catalog>.en.json` (`ui` or `feo`). The hub requires it to start with `<repository-name>.` and to be unique across entries; check the current `consumers.json` (see [phrase.md](phrase.md#choose-the-mode)). The repository's source catalog path stays unchanged.
 
-The hub reads the config from `baseRef`, so an entry is ready only once the consumer change has merged there. The hub passes `phraseProject` and `phraseFile` to the shared workflows as pins, so a run stops before any download when the config names another project or file.
+The hub reads the config from `baseRef`, so an entry is ready only once the consumer change has merged there. The hub passes the project (`phraseProject`, or the shared project when it is omitted) and `phraseFile` to the shared workflows as pins, so a run stops before any download when the config names another project or file.
 
 ## Register in the hub
 

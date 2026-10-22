@@ -14,7 +14,9 @@ Detect the current mode during inspection:
 - **Standalone callers** are consumer workflows whose `uses:` names `RedHatInsights/i18n-tooling/.github/workflows/phrase-submit.yml` or `phrase-reconcile.yml`.
 - **Hub registration** is an entry in i18n-hub's `consumers.json` whose `repository` equals this repository. The hub is not public; organization members read it with `gh api repos/RedHatInsights/i18n-hub/contents/consumers.json -H "Accept: application/vnd.github.raw+json"`. If that request fails, report the registration as unverified.
 
-When a repository has both, report it as a conflict for the developer to resolve. Otherwise, show the detected mode as done. For a standalone repository under `RedHatInsights`, offer **Migrate to i18n-hub** as an upgrade (see [phrase-hub.md](phrase-hub.md#migrate-from-standalone)). When the Phrase config has no `preset` and uses the shared project's values or the sandbox, offer **Switch to the hcc-ui preset** (see [below](#switch-to-the-hcc-ui-preset)).
+When a repository has both, report it as a conflict for the developer to resolve. Otherwise, show the detected mode as done.
+
+A Phrase config with neither standalone callers nor a hub entry has no active mode, so the Phrase track is not done: propose the selected mode's missing part, usually the hub registration. List the config's existing state branches and any open locale PRs from earlier batches, because the next run resumes from that state. When the repository's README or docs say it is retired or being archived, say so in the plan and leave the Phrase track out by default. For a standalone repository under `RedHatInsights`, offer **Migrate to i18n-hub** as an upgrade (see [phrase-hub.md](phrase-hub.md#migrate-from-standalone)). When the Phrase config has no `preset` and uses the shared project's values or the sandbox, offer **Switch to the hcc-ui preset** (see [below](#switch-to-the-hcc-ui-preset)).
 
 ## Shared project
 
@@ -59,7 +61,7 @@ When the developer keeps the aggregate committed for now, list this fix in the P
 
 ## Switch to the hcc-ui preset
 
-Offer this upgrade when an existing `phrase-tms.json` has no `preset` and either names the sandbox project `yWWEIEQgpNVK650YBQhGx6` (`pesimon-hcc-ui-testing`, which is never a real repository's project) or writes out the values the `hcc-ui` preset supplies. Leave a config alone when the developer chose another project. The hub's own test consumers (`i18n-hub-test-consumer`) stay on the sandbox on purpose; do not offer it there. Run it only after the developer selects it. As one unit:
+Offer this upgrade when an existing `phrase-tms.json` has no `preset` and either names the sandbox project `yWWEIEQgpNVK650YBQhGx6` (`pesimon-hcc-ui-testing`, which is never a real repository's project) or writes out the values the `hcc-ui` preset supplies. Leave a config alone when the developer chose another project. Run it only after the developer selects it. As one unit:
 
 - Rewrite the config in the preset form above. Keep `sourceCatalog.path`, `sourceCatalog.filename` and `frontendTemplate` unchanged; never rename a Phrase file in use. Use `targetOutputPath` when every output path follows one pattern, otherwise keep `targetLocales`. Use `locales` when the config translates only some of the preset's locales. Keep `state` only when it differs from the defaults.
 - Compare `i18n-pipeline tms config --config <path>` output for the old and the new file. Targets, output paths, filename, adapters and import settings must match. Only `project.uid` may change, when leaving the sandbox, and defaults the old file wrote out (`state`, `completionPolicy`) may disappear.
@@ -70,7 +72,7 @@ A config that already names `hcc-ui` only changes shape: it resolves to the same
 Leaving the sandbox changes the Phrase project, so the next run submits a new batch to `hcc-ui`. Add these items to the consumer PR checklist:
 
 - Close the open locale PRs from the sandbox batch, then wait for one hub run to complete that batch. The hub checks every unfinished batch against its project pin, so an unfinished sandbox batch fails every run once the pin moves.
-- Hub mode: in the same rollout, set the hub entry's `phraseProject` to `LFsYhKphLpXQ0WWa47VZ19`. Merge the consumer PR and the hub PR back to back, between two hub runs; either one alone fails the project pin.
+- Hub mode: in the same rollout, remove the hub entry's `phraseProject`, so the entry pins the shared project. Merge the consumer PR and the hub PR back to back, between two hub runs; either one alone fails the project pin.
 - Cancel the sandbox batch's jobs in Phrase. The tooling never cancels jobs.
 
 ## Pull-request validation (both modes)
