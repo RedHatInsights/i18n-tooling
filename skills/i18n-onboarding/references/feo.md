@@ -1,6 +1,6 @@
 # FEO localization
 
-Use this reference when `deploy/frontend.yaml` contains localizable Frontend fields or the developer selects FEO localization.
+Use this reference when the Frontend template contains localizable Frontend fields or the developer selects FEO localization. The examples use `deploy/frontend.yaml`, the FEC default; substitute the template path found during inspection (`frontendCRDPath` in `fec.config.js`, or the file the repository actually has). The CLI accepts any path.
 
 ## Check FEC schema support
 

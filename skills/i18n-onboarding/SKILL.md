@@ -26,7 +26,7 @@ Read the repository's agent instructions and relevant contribution or localizati
 
 - Identify the repository root, package manager, default branch, current branch, and clean or dirty status. Record existing dirty paths.
 - Find FormatJS/react-intl usage, source and target catalogs and their formats, explicit or generated message IDs, and extract, compile, and aggregate scripts. Count descriptors without a `description` and, among them, those whose context sits under a misspelled key.
-- Inspect `deploy/frontend.yaml` for FEO navigation, search entries, service tiles, `alt_title`, and `module.defaultDocumentTitle` strings.
+- Find the Frontend template: the `frontendCRDPath` in `fec.config.js` when it is set, otherwise `deploy/frontend.yaml`, the FEC default. A template elsewhere, such as `deploy/frontend.yml` or a root `frontend.yml`, that `frontendCRDPath` does not name is skipped by FEC's own build-time validation; report that as a finding. Use the template's actual path wherever this skill says `deploy/frontend.yaml`. Inspect it for FEO navigation, search entries, service tiles, `alt_title`, and `module.defaultDocumentTitle` strings.
 - Find OpenAPI Problem Details specs and keyed ICU JSON catalogs.
 - Find `i18n/catalog-validation.json` and `.github/i18n/catalog-validation.json`.
 - Find current validation workflows, including any `i18n-validation.yml`, Phrase caller workflows, and `.tekton/*.yaml` PipelineRuns. For every PipelineRun, record the shared pipeline reference and revision.
