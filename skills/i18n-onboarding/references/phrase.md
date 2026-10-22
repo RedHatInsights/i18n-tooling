@@ -51,13 +51,13 @@ The reusable reconciliation workflow writes one flat locale JSON file per target
 
 ## Runtime aggregates
 
-A committed aggregate built from the Phrase target files also breaks: each locale PR changes an input, the committed aggregate stays as it was, and the aggregate's `generated` check fails. The fix is to stop committing the aggregate:
+A committed aggregate built from the Phrase target files is not supported: each locale PR changes an input, and the committed aggregate stays as it was. Onboarding does not fix this. It checks the aggregate with a `generated` entry that sets `"severity": "warning"`, so a stale aggregate is reported without failing locale PRs, warns about it in the plan, and puts this fix in the PR checklist for the team. The fix is to stop committing the aggregate:
 
 - Prefer having the app import the locale files directly, so no aggregate file exists. Import every locale the app ships, not only English, in a way that picks up a new `<locale>.json` without code changes (for example a glob or dynamic import); importing only the English catalog silently drops every delivered translation. Otherwise generate it during the build, from a `prebuild` script or the bundler, into a path outside every `catalogDirectories` entry (for example the build output), and ignore it in Git. `catalogDirectories` does not read `.gitignore`, so a generated file left inside a catalog directory is reported as undeclared.
 - Remove its `generated` entry, and point tests that import it at the build step or the locale files.
 - Run the repository's build and unit tests. Show that the app still loads every locale it loaded before, and that a new locale file would be picked up; when the app hard-codes one locale, say so in the plan and report as a runtime follow-up rather than claiming the fix covers translations.
 
-When the developer keeps the aggregate committed for now, list this fix in the PR checklist, and add that until it lands, someone must run the aggregate script on every locale PR.
+Until the team lands the fix, every delivered locale leaves the committed aggregate stale (a warning) and missing the new translations at runtime; say so in the PR checklist.
 
 ## Switch to the hcc-ui preset
 
