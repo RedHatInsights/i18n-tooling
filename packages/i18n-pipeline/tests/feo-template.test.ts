@@ -970,3 +970,129 @@ ${localesBlock(32)}      module:
     );
   });
 });
+
+const coverageTemplate = `kind: Template
+objects:
+  - kind: Frontend
+    spec:
+      bundleSegments:
+        - bundleId: insights
+          segmentId: main
+          navItems:
+            - id: group
+              title: Group
+              groupId: settings
+              navItems:
+                - id: child
+                  title: Child
+                  product: Product
+      navigationSegments:
+        - segmentId: vulnerability-nav
+          navItems:
+            - id: vulnerability
+              title: Vulnerability
+              expandable: true
+              routes:
+                - id: cves
+                  title: CVEs
+                  product: Red Hat Insights
+            - segmentRef:
+                frontendName: other
+                segmentId: shared
+      widgetRegistry:
+        - scope: landing
+          module: ./OpenShiftWidget
+          config:
+            title: Red Hat OpenShift
+            icon: OpenShiftIcon
+            headerLink:
+              title: Open OpenShift
+              href: /openshift
+        - scope: landing
+          module: ./OpenShiftWidget
+          importName: AIWidget
+          config:
+            title: Red Hat OpenShift AI
+      baseWidgetLayouts:
+        - name: landingPage
+          displayName: Landing page
+          templateConfig: {}
+`;
+
+describe("FEO coverage of segments, nav groups, widgets and layouts", () => {
+  it("extracts navigation segments, nav group children, widget titles and layout names", () => {
+    const catalog = extractFeoCatalog(coverageTemplate);
+    expect(
+      Object.fromEntries(
+        Object.entries(catalog).map(([key, value]) => [key, value.defaultMessage]),
+      ),
+    ).toEqual({
+      "baseWidgetLayouts.landingPage.displayName": "Landing page",
+      "bundleSegments.insights.main.navItems.group.navItems.child.product": "Product",
+      "bundleSegments.insights.main.navItems.group.navItems.child.title": "Child",
+      "bundleSegments.insights.main.navItems.group.title": "Group",
+      "navigationSegments.vulnerability-nav.navItems.vulnerability.routes.cves.product":
+        "Red Hat Insights",
+      "navigationSegments.vulnerability-nav.navItems.vulnerability.routes.cves.title": "CVEs",
+      "navigationSegments.vulnerability-nav.navItems.vulnerability.title": "Vulnerability",
+      "widgetRegistry.landing.openshiftwidget.aiwidget.title": "Red Hat OpenShift AI",
+      "widgetRegistry.landing.openshiftwidget.default.headerLink.title": "Open OpenShift",
+      "widgetRegistry.landing.openshiftwidget.default.title": "Red Hat OpenShift",
+    });
+  });
+
+  it("inlines the new keys and stays idempotent", () => {
+    const source = extractFeoCatalog(coverageTemplate);
+    const target = {
+      "navigationSegments.vulnerability-nav.navItems.vulnerability.title": "Vulnérabilité",
+      "widgetRegistry.landing.openshiftwidget.default.title": "Red Hat OpenShift FR",
+      "baseWidgetLayouts.landingPage.displayName": "Page d'accueil",
+    };
+    const result = inlineFeoLocale(coverageTemplate, source, target, "fr");
+    expect(parse(result).objects[0].spec.locales.fr).toEqual(target);
+    expect(inlineFeoLocale(result, source, target, "fr")).toBe(result);
+  });
+
+  it("rejects widgets whose scope, module and importName slugs collide", () => {
+    const colliding = coverageTemplate.replace(
+      "          importName: AIWidget\n",
+      "          importName: default\n",
+    );
+    expectDuplicateContexts(
+      colliding,
+      'widgetRegistry[0] (scope="landing", module="./OpenShiftWidget", importName="default")',
+      'widgetRegistry[1] (scope="landing", module="./OpenShiftWidget", importName="default")',
+    );
+  });
+
+  it("rejects a widget module without an ASCII letter or digit", () => {
+    expect(
+      errorMessage(() =>
+        extractFeoCatalog(
+          coverageTemplate.replace(
+            "module: ./OpenShiftWidget\n          config:\n            title: Red Hat OpenShift\n",
+            "module: ./--\n          config:\n            title: Red Hat OpenShift\n",
+          ),
+        ),
+      ),
+    ).toContain("module and importName must each contain an ASCII letter or digit");
+  });
+
+  it("rejects duplicate navigation segments and layout names", () => {
+    const segments = coverageTemplate.replace(
+      "      widgetRegistry:",
+      "        - segmentId: vulnerability-nav\n          navItems: []\n      widgetRegistry:",
+    );
+    expectDuplicateContexts(
+      segments,
+      'navigationSegments[0] (segmentId="vulnerability-nav")',
+      'navigationSegments[1] (segmentId="vulnerability-nav")',
+    );
+    const layouts = `${coverageTemplate}        - name: landingPage\n          displayName: Other\n          templateConfig: {}\n`;
+    expectDuplicateContexts(
+      layouts,
+      'baseWidgetLayouts[0] (name="landingPage")',
+      'baseWidgetLayouts[1] (name="landingPage")',
+    );
+  });
+});
