@@ -7536,6 +7536,40 @@ describe("superseded locale pull requests with different translations", () => {
     expect(savedOld?.record.locales.fr?.pullRequestFinalized).toBeUndefined();
   });
 
+  it("reaches an older predecessor while five newer divergent ones stay open", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    await scenario.workflow.reconcile();
+    const predecessors = [];
+    for (let index = 0; index < 6; index += 1) {
+      const record = await seedSupersededBatchFixture(scenario, {
+        key: String(index + 4).repeat(64),
+        pullRequestUrl: "https://github.com/example/app/pull/" + String(30 + index),
+        createdAt: "2026-10-20T" + String(6 + index).padStart(2, "0") + ":00:00.000Z",
+      });
+      // The oldest matches the replacement's export; the five newer ones differ from it.
+      scenario.repository.branchFiles.set(
+        record.locales.fr!.pullRequestBranch!,
+        new Map([
+          [
+            "locales/fr.json",
+            new TextEncoder().encode(
+              index === 0 ? '{"greeting":"Bonjour {name}"}' : '{"greeting":"Salut {name}"}',
+            ),
+          ],
+        ]),
+      );
+      predecessors.push(record);
+    }
+    const oldestUrl = predecessors[0]!.locales.fr!.pullRequestUrl!;
+
+    await scenario.workflow.reconcile();
+    expect(scenario.repository.pullRequestStateRequests).not.toContain(oldestUrl);
+    await scenario.workflow.reconcile();
+
+    expect(scenario.repository.pullRequestStateRequests).toContain(oldestUrl);
+    expect(scenario.repository.closePullRequestCalls).toEqual([oldestUrl]);
+  });
+
   it("closes the PR once the replacement carries the same translations", async () => {
     const scenario = await makeSupersededPullRequestScenario();
     const old = await seedDivergentPredecessor(scenario);

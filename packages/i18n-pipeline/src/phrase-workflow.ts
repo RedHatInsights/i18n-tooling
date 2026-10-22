@@ -128,6 +128,11 @@ export interface PhraseLocaleRecord {
    * closing notice for a previously divergent PR was posted.
    */
   pullRequestSupersededDivergentIds?: string[];
+  /**
+   * When cleanup last inspected this superseded PR (ISO 8601). Least recently inspected PRs go
+   * first, so PRs left open as divergent cannot starve older ones out of the per-run cap.
+   */
+  pullRequestSupersededCheckedAt?: string;
   /** Last generated description; missing digest refreshes pre-upgrade PR safety notes once. */
   pullRequestBodyDigest?: string;
   /** Retry the PR title and description update if it failed after a commit. */
@@ -2005,6 +2010,14 @@ export class PhraseWorkflow {
           locale.pullRequestSupersededReviewerCommits !== true
         );
       })
+      // Least recently inspected first (never inspected sorts first); the stable sort keeps
+      // newest first among equals. Divergent PRs stay candidates, so a fixed newest-first window
+      // would never reach older ones.
+      .sort((left, right) =>
+        (left.record.locales[phraseLocale]?.pullRequestSupersededCheckedAt ?? "").localeCompare(
+          right.record.locales[phraseLocale]?.pullRequestSupersededCheckedAt ?? "",
+        ),
+      )
       .slice(0, limit);
 
     let replacementSnapshot: Promise<string | undefined> | undefined;
@@ -2017,6 +2030,9 @@ export class PhraseWorkflow {
       const oldLocale = stored.record.locales[phraseLocale];
       if (!oldLocale?.pullRequestUrl) continue;
       try {
+        await this.saveSupersededLocaleState(context, stored, phraseLocale, {
+          pullRequestSupersededCheckedAt: new Date(this.now()).toISOString(),
+        });
         const pullRequestState = await this.dependencies.repository.getPullRequestState(
           oldLocale.pullRequestUrl,
         );
