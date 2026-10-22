@@ -693,6 +693,75 @@ objects:
     });
   });
 
+  it("uses a --config path relative to the root instead of discovery", async () => {
+    const root = await createRoot();
+    await createPassProject(root);
+    // A broken discovered config proves the explicit one is used instead.
+    await writeProjectFile(root, "i18n/catalog-validation.json", "{");
+    await writeConfig(root, baseConfig(), "config/i18n-validation.json");
+
+    const result = await runValidateCi(root, [
+      "--mode",
+      "error",
+      "--config",
+      "config/i18n-validation.json",
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toEqual([]);
+    await expectResults(result, {
+      status: "pass",
+      errors: 0,
+      warnings: 0,
+      mode: "error",
+      config: "config",
+    });
+  });
+
+  it("reports a missing --config as a tool error", async () => {
+    const root = await createRoot();
+    await createPassProject(root);
+
+    const result = await runValidateCi(root, ["--mode", "error", "--config", "missing.json"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.join("\n")).toContain(
+      'Catalog validation config "missing.json" does not exist',
+    );
+    await expectResults(result, {
+      status: "tool-error",
+      errors: 0,
+      warnings: 0,
+      mode: "error",
+      config: "none",
+    });
+  });
+
+  it("prints findings as GitHub annotations under GitHub Actions", async () => {
+    const root = await createRoot();
+    await createPassProject(root, { files: ["src/**/*.js"] });
+    await writeProjectFile(
+      root,
+      "src/messages.js",
+      [
+        'formatMessage({ id: "bad", defaultMessage: "{count, plural, one {item}}", description: "d" });',
+        'formatMessage({ id: "no.context", defaultMessage: "Save changes." });',
+        "",
+      ].join("\n"),
+    );
+
+    const result = await runValidateCi(root, ["--mode", "error"], { GITHUB_ACTIONS: "true" });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.join("\n")).toMatch(
+      /^::error file=src\/messages\.js,line=1,col=\d+,title=formatjs\/no-invalid-icu::Failed to parse message string/m,
+    );
+    expect(result.stdout.join("\n")).toMatch(
+      /^::warning file=src\/messages\.js,line=2,col=\d+,title=formatjs\/enforce-description::/m,
+    );
+    expect(result.stdout.at(-1)).toMatch(/^validate-ci mode=error status=findings /);
+  });
+
   it("runs project validation only when configured without sourceLint", async () => {
     const root = await createRoot();
     await createPassProject(root);
