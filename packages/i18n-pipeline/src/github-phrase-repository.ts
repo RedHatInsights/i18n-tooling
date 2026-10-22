@@ -369,8 +369,18 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     if (!isRecord(value) || typeof value.state !== "string") {
       throw new GitHubRepositoryError("GitHub returned an invalid pull request response", 500);
     }
-    if (value.merged_at) return { state: "merged" };
-    if (value.state === "closed") return { state: "closed" };
+    const headSha =
+      isRecord(value.head) && nonEmptyString(value.head.sha) ? value.head.sha : undefined;
+    if (value.merged_at) {
+      return {
+        state: "merged",
+        ...(headSha ? { headSha } : {}),
+        ...(nonEmptyString(value.merge_commit_sha)
+          ? { mergeCommitSha: value.merge_commit_sha }
+          : {}),
+      };
+    }
+    if (value.state === "closed") return { state: "closed", ...(headSha ? { headSha } : {}) };
     if (value.state !== "open" || !isRecord(value.head) || !nonEmptyString(value.head.sha)) {
       throw new GitHubRepositoryError("GitHub returned an invalid open pull request head", 500);
     }

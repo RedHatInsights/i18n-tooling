@@ -6,6 +6,7 @@ import {
   PhraseRepositoryError,
   PhraseWorkflow,
   PhraseWorkflowError,
+  divergentSupersededMessageIds,
   type PhraseBatchRecord,
   type PhraseBatchStateStore,
   type PhraseLocalePullRequestCreated,
@@ -268,6 +269,8 @@ class FakeRepository implements PhraseWorkflowRepository {
   readonly createDraftRequirements: Array<boolean | undefined> = [];
   readonly resolvedRefs: string[] = [];
   readonly pullRequestStates = new Map<string, "open" | "merged" | "closed">();
+  /** Merge commit reported for a merged PR; read files at it through `branchHeads`. */
+  readonly pullRequestMergeCommits = new Map<string, string>();
   readonly pullRequestStateRequests: string[] = [];
   pullRequestStateCalls = 0;
   readonly closePullRequestCalls: string[] = [];
@@ -347,8 +350,18 @@ class FakeRepository implements PhraseWorkflowRepository {
     this.pullRequestStateCalls += 1;
     this.pullRequestStateRequests.push(pullRequestUrl);
     const state = this.pullRequestStates.get(pullRequestUrl) ?? "open";
-    if (state !== "open") return { state };
     const branch = this.pullRequestBranches.get(pullRequestUrl);
+    if (state !== "open") {
+      const lastHead = branch ? this.branchHeads.get(branch) : undefined;
+      const mergeCommitSha = this.pullRequestMergeCommits.get(pullRequestUrl);
+      return state === "merged"
+        ? {
+            state,
+            ...(lastHead ? { headSha: lastHead } : {}),
+            ...(mergeCommitSha ? { mergeCommitSha } : {}),
+          }
+        : { state, ...(lastHead ? { headSha: lastHead } : {}) };
+    }
     const headSha =
       this.preverifiedRefUpdateHeadSha ?? (branch ? this.branchHeads.get(branch) : undefined);
     if (!headSha) throw new PhraseRepositoryError("Fake pull request has no branch head", 500);
@@ -7376,5 +7389,211 @@ describe("superseded locale pull requests", () => {
       ),
     ).toHaveLength(1);
     expect(scenario.repository.closePullRequestCalls).toEqual([old.locales.fr!.pullRequestUrl]);
+  });
+});
+
+function catalogOf(locale: string, patterns: Record<string, string>) {
+  return {
+    locale,
+    messages: Object.fromEntries(
+      Object.entries(patterns).map(([id, pattern]) => [id, { pattern, metadata: {} }]),
+    ),
+  };
+}
+
+describe("divergentSupersededMessageIds", () => {
+  const source = catalogOf("en", {
+    greeting: "Hello {name}",
+    farewell: "Goodbye",
+    product: "OpenShift",
+  });
+
+  it("finds nothing when the replacement carries every translation", () => {
+    const target = catalogOf("fr", { greeting: "Bonjour {name}", farewell: "Au revoir" });
+    expect(
+      divergentSupersededMessageIds({
+        oldSource: source,
+        oldTarget: target,
+        newSource: source,
+        newTarget: target,
+      }),
+    ).toEqual([]);
+  });
+
+  it("lists unchanged English whose translation differs or is missing in the replacement", () => {
+    expect(
+      divergentSupersededMessageIds({
+        oldSource: source,
+        oldTarget: catalogOf("fr", { greeting: "Salut {name}", farewell: "Au revoir" }),
+        newSource: source,
+        newTarget: catalogOf("fr", { greeting: "Bonjour {name}" }),
+      }),
+    ).toEqual(["farewell", "greeting"]);
+  });
+
+  it("skips changed or removed English, untranslated copies, and invalid old translations", () => {
+    expect(
+      divergentSupersededMessageIds({
+        oldSource: source,
+        oldTarget: catalogOf("fr", {
+          greeting: "Salut",
+          farewell: "Au revoir",
+          product: "OpenShift",
+        }),
+        newSource: catalogOf("en", { greeting: "Hello {name}", product: "OpenShift" }),
+        newTarget: catalogOf("fr", { greeting: "Bonjour {name}", product: "Produit" }),
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("superseded locale pull requests with different translations", () => {
+  async function seedDivergentPredecessor(
+    scenario: Awaited<ReturnType<typeof makeSupersededPullRequestScenario>>,
+  ) {
+    const old = await seedSupersededBatchFixture(scenario, {
+      key: "d".repeat(64),
+      pullRequestUrl: "https://github.com/example/app/pull/51",
+      createdAt: "2026-10-20T10:00:00.000Z",
+    });
+    scenario.repository.branchFiles.set(
+      old.locales.fr!.pullRequestBranch!,
+      new Map([["locales/fr.json", new TextEncoder().encode('{"greeting":"Salut {name}"}')]]),
+    );
+    return old;
+  }
+
+  it("keeps the PR open with one notice listing the messages the replacement lacks", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const old = await seedDivergentPredecessor(scenario);
+
+    await scenario.workflow.reconcile();
+    await scenario.workflow.reconcile();
+
+    const savedOld = await scenario.state.readBatch(old.key);
+    expect(scenario.repository.closePullRequestCalls).toEqual([]);
+    expect(
+      scenario.repository.pullRequestComments
+        .filter((comment) => comment.pullRequestUrl === old.locales.fr?.pullRequestUrl)
+        .map((comment) => comment.body),
+    ).toEqual([
+      replacementNoticePrefix(scenario.batch) +
+        " Left open because #42 has different translations for 1 message whose English did not" +
+        " change: \u0060greeting\u0060. Copy the translations you want to keep into the newer" +
+        " Phrase job; this PR closes once #42 carries them. Close it yourself if the newer" +
+        " translations are intended.",
+    ]);
+    expect(savedOld?.record.locales.fr).toMatchObject({
+      pullRequestSupersededNoticePosted: true,
+      pullRequestSupersededDivergentIds: ["greeting"],
+    });
+    expect(savedOld?.record.locales.fr?.pullRequestFinalized).toBeUndefined();
+  });
+
+  it("compares a merged replacement at its merge commit, so reviewer changes count", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const old = await seedDivergentPredecessor(scenario);
+    const replacementUrl = "https://github.com/example/app/pull/42";
+
+    await scenario.workflow.reconcile();
+    // The tooling export converges with the old PR on the next run...
+    scenario.phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+    await scenario.workflow.reconcile();
+    // ...then a reviewer changes the replacement's translation and merges it before cleanup.
+    scenario.repository.branchHeads.set("merge-42", "e".repeat(40));
+    scenario.repository.branchFiles.set(
+      "merge-42",
+      new Map([["locales/fr.json", new TextEncoder().encode('{"greeting":"Coucou {name}"}')]]),
+    );
+    scenario.repository.pullRequestStates.set(replacementUrl, "merged");
+    scenario.repository.pullRequestMergeCommits.set(replacementUrl, "e".repeat(40));
+    await scenario.workflow.reconcile();
+
+    const savedOld = await scenario.state.readBatch(old.key);
+    expect(scenario.repository.closePullRequestCalls).not.toContain(old.locales.fr!.pullRequestUrl);
+    expect(savedOld?.record.locales.fr?.pullRequestSupersededDivergentIds).toEqual(["greeting"]);
+    expect(savedOld?.record.locales.fr?.pullRequestFinalized).toBeUndefined();
+  });
+
+  it("keeps the PR open when its replacement was closed without merging", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const old = await seedDivergentPredecessor(scenario);
+    const replacementUrl = "https://github.com/example/app/pull/42";
+
+    await scenario.workflow.reconcile();
+    // The replacement's export now matches the old PR, but the replacement is closed unmerged.
+    scenario.phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+    await scenario.workflow.reconcile();
+    scenario.repository.pullRequestStates.set(replacementUrl, "closed");
+    const requestsBefore = scenario.repository.pullRequestStateRequests.length;
+    await scenario.workflow.reconcile();
+
+    const savedOld = await scenario.state.readBatch(old.key);
+    expect(scenario.repository.pullRequestStateRequests.slice(requestsBefore)).toContain(
+      replacementUrl,
+    );
+    expect(scenario.repository.closePullRequestCalls).not.toContain(old.locales.fr!.pullRequestUrl);
+    expect(savedOld?.record.locales.fr?.pullRequestFinalized).toBeUndefined();
+  });
+
+  it("reaches an older predecessor while five newer divergent ones stay open", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    await scenario.workflow.reconcile();
+    const predecessors = [];
+    for (let index = 0; index < 6; index += 1) {
+      const record = await seedSupersededBatchFixture(scenario, {
+        key: String(index + 4).repeat(64),
+        pullRequestUrl: "https://github.com/example/app/pull/" + String(30 + index),
+        createdAt: "2026-10-20T" + String(6 + index).padStart(2, "0") + ":00:00.000Z",
+      });
+      // The oldest matches the replacement's export; the five newer ones differ from it.
+      scenario.repository.branchFiles.set(
+        record.locales.fr!.pullRequestBranch!,
+        new Map([
+          [
+            "locales/fr.json",
+            new TextEncoder().encode(
+              index === 0 ? '{"greeting":"Bonjour {name}"}' : '{"greeting":"Salut {name}"}',
+            ),
+          ],
+        ]),
+      );
+      predecessors.push(record);
+    }
+    const oldestUrl = predecessors[0]!.locales.fr!.pullRequestUrl!;
+
+    await scenario.workflow.reconcile();
+    expect(scenario.repository.pullRequestStateRequests).not.toContain(oldestUrl);
+    await scenario.workflow.reconcile();
+
+    expect(scenario.repository.pullRequestStateRequests).toContain(oldestUrl);
+    expect(scenario.repository.closePullRequestCalls).toEqual([oldestUrl]);
+  });
+
+  it("closes the PR once the replacement carries the same translations", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const old = await seedDivergentPredecessor(scenario);
+
+    await scenario.workflow.reconcile();
+    // The translator copies the old translation into the newer job; the next run re-exports it.
+    scenario.phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+    await scenario.workflow.reconcile();
+    await scenario.workflow.reconcile();
+
+    const savedOld = await scenario.state.readBatch(old.key);
+    expect(scenario.repository.closePullRequestCalls).toEqual([old.locales.fr!.pullRequestUrl]);
+    expect(
+      scenario.repository.pullRequestComments
+        .filter((comment) => comment.pullRequestUrl === old.locales.fr?.pullRequestUrl)
+        .map((comment) => comment.body)
+        .at(-1),
+    ).toBe(
+      replacementNoticePrefix(scenario.batch) +
+        " This PR is closed because #42 now carries every translation from it.",
+    );
+    expect(savedOld?.record.locales.fr).toMatchObject({
+      pullRequestFinalized: true,
+      pullRequestSupersededDivergentIds: [],
+    });
   });
 });
