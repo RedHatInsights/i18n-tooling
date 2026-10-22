@@ -41,6 +41,8 @@ const TRANSLATABILITY_RULES: Linter.RulesRecord = {
   "formatjs/prefer-pound-in-plural": "warn",
   "formatjs/no-complex-selectors": ["warn", { limit: 20 }],
   "formatjs/no-multiple-plurals": "warn",
+  "formatjs/enforce-description": ["warn", "literal"],
+  "i18n/no-duplicate-message-id": "warn",
 };
 
 export type ValidateCiMode = "warn" | "error";
@@ -368,14 +370,14 @@ async function lintSource(
     ...ICU_RULES,
     ...(configured ? TRANSLATABILITY_RULES : {}),
   };
-  if (catalog) {
+  if (configured || catalog) {
     const require = createRequire(import.meta.url);
     const pluginModule = require("@redhat-cloud-services/eslint-plugin-i18n") as {
       default?: unknown;
     };
     plugins.i18n = (pluginModule.default ?? pluginModule) as ESLintApi.Plugin;
-    rules["i18n/no-missing-default-catalog-entry"] = ["error", { catalog }];
   }
+  if (catalog) rules["i18n/no-missing-default-catalog-entry"] = ["error", { catalog }];
 
   const config: Linter.Config = {
     files,

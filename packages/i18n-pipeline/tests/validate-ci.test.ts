@@ -342,6 +342,39 @@ objects:
     await expectResults(result, { status: "pass", errors: 0, warnings: 0, config: "config" });
   });
 
+  it("warns about missing descriptions and conflicting duplicate IDs in configured lint", async () => {
+    const root = await createRoot();
+    await createPassProject(root, { files: ["src/**/*.{js,jsx,ts,tsx}"] });
+    await writeProjectFile(
+      root,
+      "src/Messages.js",
+      [
+        "defineMessages({",
+        '  noContext: { id: "no.context", defaultMessage: "Save changes." },',
+        '  first: { id: "dup", defaultMessage: "Recommended content.", description: "Card title" },',
+        '  second: { id: "dup", defaultMessage: "Recommended content.", description: "Panel title" },',
+        "});",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await runValidateCi(root, ["--mode", "error"]);
+    const output = [...result.stdout, ...result.stderr].join("\n");
+
+    expect(result.exitCode).toBe(0);
+    expect(output).toMatch(/src\/Messages\.js:2:\d+ warning formatjs\/enforce-description /);
+    expect(output).toMatch(
+      /src\/Messages\.js:4:\d+ warning i18n\/no-duplicate-message-id Message id "dup" is also declared on line 3/,
+    );
+    await expectResults(result, {
+      status: "findings",
+      errors: 0,
+      warnings: 2,
+      mode: "error",
+      config: "config",
+    });
+  });
+
   it("checks source message IDs against sourceLint.catalog", async () => {
     const root = await createRoot();
     await createPassProject(root, {
@@ -351,7 +384,7 @@ objects:
     await writeProjectFile(
       root,
       "src/App.tsx",
-      'formatMessage({ id: "missing", defaultMessage: "A readable sentence." });\n',
+      'formatMessage({ id: "missing", defaultMessage: "A readable sentence.", description: "Test message" });\n',
     );
 
     const result = await runValidateCi(root, ["--mode", "error"]);
@@ -376,7 +409,7 @@ objects:
     await writeProjectFile(
       root,
       "src/messages.js",
-      'formatMessage({ id: "bad", defaultMessage: "{count, plural, one {item}}" });\n',
+      'formatMessage({ id: "bad", defaultMessage: "{count, plural, one {item}}", description: "Test message" });\n',
     );
 
     const result = await runValidateCi(root, ["--mode", "error"]);
@@ -534,7 +567,7 @@ objects:
     await writeProjectFile(
       root,
       "src/ignored.js",
-      'formatMessage({ id: "bad", defaultMessage: "{count, plural, one {item}}" });\n',
+      'formatMessage({ id: "bad", defaultMessage: "{count, plural, one {item}}", description: "Test message" });\n',
     );
     const warningPath = join(root, "warning.cjs");
     await writeProjectFile(
@@ -1038,7 +1071,7 @@ objects:
     await writeProjectFile(
       root,
       "src/messages.js",
-      'formatMessage({ id: "bad", defaultMessage: "{count, plural, one {item}}" });\n',
+      'formatMessage({ id: "bad", defaultMessage: "{count, plural, one {item}}", description: "Test message" });\n',
     );
     const readOnlyHome = join(root, "read-only-home");
     await mkdir(readOnlyHome);
