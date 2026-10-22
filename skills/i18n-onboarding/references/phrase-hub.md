@@ -20,7 +20,7 @@ Work out one `consumers.json` entry per Phrase config: one for the app catalog a
 }
 ```
 
-- `name` is the repository name for the app catalog and `<repository-name>-feo` for FEO. `repository` is `RedHatInsights/<repository-name>`, in lowercase letters, digits, and hyphens.
+- `name` is the repository name for the app catalog and `<repository-name>-feo` for FEO, also when FEO is the repository's only catalog. `repository` is `RedHatInsights/<repository-name>`, in lowercase letters, digits, and hyphens.
 - `baseRef` is the branch the hub syncs and bases locale PRs on, normally the default branch. Resolve it; many repositories use `master`.
 - `configPath` is the repository-relative path of that Phrase config.
 - Omit `phraseProject`. An entry without it pins the shared `hcc-ui` project, which every consumer uses through the `hcc-ui` preset.
