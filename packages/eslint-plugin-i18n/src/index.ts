@@ -1,6 +1,7 @@
 import type { Linter } from "eslint";
 import formatjs from "eslint-plugin-formatjs";
 import packageMetadata from "../package.json" with { type: "json" };
+import noDuplicateMessageId from "./rules/no-duplicate-message-id.js";
 import noMissingDefaultCatalogEntry from "./rules/no-missing-default-catalog-entry.js";
 
 type Plugin = {
@@ -9,6 +10,7 @@ type Plugin = {
     version: string;
   };
   rules: {
+    "no-duplicate-message-id": typeof noDuplicateMessageId;
     "no-missing-default-catalog-entry": typeof noMissingDefaultCatalogEntry;
   };
   configs?: {
@@ -26,6 +28,7 @@ const plugin: Plugin = {
     version: packageMetadata.version,
   },
   rules: {
+    "no-duplicate-message-id": noDuplicateMessageId,
     "no-missing-default-catalog-entry": noMissingDefaultCatalogEntry,
   },
 };
@@ -46,6 +49,8 @@ plugin.configs = {
         "formatjs/prefer-pound-in-plural": "warn",
         "formatjs/no-complex-selectors": ["warn", { limit: 20 }],
         "formatjs/no-multiple-plurals": "warn",
+        "formatjs/enforce-description": ["warn", "literal"],
+        "i18n/no-duplicate-message-id": "warn",
       },
     },
   ],
@@ -59,5 +64,5 @@ plugin.configs = {
   },
 };
 
-export { noMissingDefaultCatalogEntry };
+export { noDuplicateMessageId, noMissingDefaultCatalogEntry };
 export default plugin;

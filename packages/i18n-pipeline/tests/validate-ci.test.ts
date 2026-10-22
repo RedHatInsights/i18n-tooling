@@ -23,6 +23,7 @@ const resultNames = [
   "I18N_STATUS",
   "I18N_ERRORS",
   "I18N_WARNINGS",
+  "I18N_PENDING",
   "I18N_MODE",
   "I18N_CONFIG",
   "I18N_TOOL_VERSION",
@@ -132,6 +133,7 @@ async function expectResults(
     status: string;
     errors: number;
     warnings: number;
+    pending?: number;
     mode?: string;
     config: string;
   },
@@ -141,6 +143,7 @@ async function expectResults(
     I18N_STATUS: expected.status,
     I18N_ERRORS: String(expected.errors),
     I18N_WARNINGS: String(expected.warnings),
+    I18N_PENDING: String(expected.pending ?? 0),
     I18N_MODE: expected.mode ?? "warn",
     I18N_CONFIG: expected.config,
     I18N_TOOL_VERSION: "0.1.0",
@@ -198,7 +201,7 @@ describe("i18n-pipeline validate-ci", () => {
       'FEC schema support for spec.locales in "deploy/frontend.yaml" was not checked: ' +
         "@redhat-cloud-services/frontend-components-config-utilities is not installed; install " +
         "the repository's dependencies from its lockfile (for npm, `npm ci`) to check it.",
-      "validate-ci mode=error status=findings errors=0 warnings=1 config=config",
+      "validate-ci mode=error status=findings errors=0 warnings=1 pending=0 config=config",
     ]);
     expect(await stat(join(root, "node_modules")).catch(() => undefined)).toBeUndefined();
     await expectResults(result, {
@@ -275,14 +278,20 @@ objects:
 
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toEqual([]);
-    expect(result.stdout.filter((line) => line.includes("is not delivered yet"))).toHaveLength(4);
+    // Undelivered locales are expected before delivery: counted as pending, not as findings.
+    expect(
+      result.stdout.filter(
+        (line) => line.startsWith("pending: ") && line.includes("is not delivered yet"),
+      ),
+    ).toHaveLength(4);
     expect(result.stdout.at(-1)).toBe(
-      "validate-ci mode=error status=findings errors=0 warnings=4 config=config",
+      "validate-ci mode=error status=pass errors=0 warnings=0 pending=4 config=config",
     );
     await expectResults(result, {
-      status: "findings",
+      status: "pass",
       errors: 0,
-      warnings: 4,
+      warnings: 0,
+      pending: 4,
       mode: "error",
       config: "config",
     });
@@ -337,9 +346,42 @@ objects:
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toEqual([]);
     expect(result.stdout).toEqual([
-      "validate-ci mode=warn status=pass errors=0 warnings=0 config=config",
+      "validate-ci mode=warn status=pass errors=0 warnings=0 pending=0 config=config",
     ]);
     await expectResults(result, { status: "pass", errors: 0, warnings: 0, config: "config" });
+  });
+
+  it("warns about missing descriptions and conflicting duplicate IDs in configured lint", async () => {
+    const root = await createRoot();
+    await createPassProject(root, { files: ["src/**/*.{js,jsx,ts,tsx}"] });
+    await writeProjectFile(
+      root,
+      "src/Messages.js",
+      [
+        "defineMessages({",
+        '  noContext: { id: "no.context", defaultMessage: "Save changes." },',
+        '  first: { id: "dup", defaultMessage: "Recommended content.", description: "Card title" },',
+        '  second: { id: "dup", defaultMessage: "Recommended content.", description: "Panel title" },',
+        "});",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await runValidateCi(root, ["--mode", "error"]);
+    const output = [...result.stdout, ...result.stderr].join("\n");
+
+    expect(result.exitCode).toBe(0);
+    expect(output).toMatch(/src\/Messages\.js:2:\d+ warning formatjs\/enforce-description /);
+    expect(output).toMatch(
+      /src\/Messages\.js:4:\d+ warning i18n\/no-duplicate-message-id Message id "dup" is also declared on line 3/,
+    );
+    await expectResults(result, {
+      status: "findings",
+      errors: 0,
+      warnings: 2,
+      mode: "error",
+      config: "config",
+    });
   });
 
   it("checks source message IDs against sourceLint.catalog", async () => {
@@ -351,7 +393,7 @@ objects:
     await writeProjectFile(
       root,
       "src/App.tsx",
-      'formatMessage({ id: "missing", defaultMessage: "A readable sentence." });\n',
+      'formatMessage({ id: "missing", defaultMessage: "A readable sentence.", description: "Test message" });\n',
     );
 
     const result = await runValidateCi(root, ["--mode", "error"]);
@@ -376,7 +418,7 @@ objects:
     await writeProjectFile(
       root,
       "src/messages.js",
-      'formatMessage({ id: "bad", defaultMessage: "{count, plural, one {item}}" });\n',
+      'formatMessage({ id: "bad", defaultMessage: "{count, plural, one {item}}", description: "Test message" });\n',
     );
 
     const result = await runValidateCi(root, ["--mode", "error"]);
@@ -534,7 +576,7 @@ objects:
     await writeProjectFile(
       root,
       "src/ignored.js",
-      'formatMessage({ id: "bad", defaultMessage: "{count, plural, one {item}}" });\n',
+      'formatMessage({ id: "bad", defaultMessage: "{count, plural, one {item}}", description: "Test message" });\n',
     );
     const warningPath = join(root, "warning.cjs");
     await writeProjectFile(
@@ -580,7 +622,7 @@ objects:
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toEqual([
-      "No i18n validation configured. validate-ci mode=warn status=not-configured errors=0 warnings=0 config=none",
+      "No i18n validation configured. validate-ci mode=warn status=not-configured errors=0 warnings=0 pending=0 config=none",
     ]);
     expect(result.stderr).toEqual([]);
     await expectResults(result, {
@@ -614,6 +656,7 @@ objects:
       I18N_WARNINGS: "0",
       I18N_MODE: "warn",
       I18N_CONFIG: "none",
+      I18N_PENDING: "0",
       I18N_TOOL_VERSION: "0.1.0",
     });
   });
@@ -822,7 +865,7 @@ objects:
         'const { spawn } = require("node:child_process");',
         'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });',
         "fs.writeFileSync(process.env.PIDS_PATH, JSON.stringify([process.pid, child.pid]));",
-        'const names = ["I18N_STATUS", "I18N_ERRORS", "I18N_WARNINGS", "I18N_MODE", "I18N_CONFIG", "I18N_TOOL_VERSION"];',
+        'const names = ["I18N_STATUS", "I18N_ERRORS", "I18N_WARNINGS", "I18N_PENDING", "I18N_MODE", "I18N_CONFIG", "I18N_TOOL_VERSION"];',
         'const fallback = Object.fromEntries(names.map((name) => [name, fs.readFileSync(process.env.RESULTS_DIR + "/" + name, "utf8")]));',
         "fs.writeFileSync(process.env.FALLBACK_PATH, JSON.stringify(fallback));",
         "setInterval(() => {}, 1000);",
@@ -881,11 +924,14 @@ objects:
         I18N_WARNINGS: "0",
         I18N_MODE: mode,
         I18N_CONFIG: "none",
+        I18N_PENDING: "0",
         I18N_TOOL_VERSION: "0.1.0",
       });
       expect(exitCode).toBe(mode === "warn" ? 0 : 1);
       expect(stderr.some((line) => line.includes("deadline exceeded after 2 seconds"))).toBe(true);
-      expect(stdout.at(-1)).toContain("status=tool-error errors=0 warnings=0 config=config");
+      expect(stdout.at(-1)).toContain(
+        "status=tool-error errors=0 warnings=0 pending=0 config=config",
+      );
       const entries = await readResults(resultsDir);
       expect(entries).toEqual({
         I18N_STATUS: "tool-error",
@@ -893,6 +939,7 @@ objects:
         I18N_WARNINGS: "0",
         I18N_MODE: mode,
         I18N_CONFIG: "config",
+        I18N_PENDING: "0",
         I18N_TOOL_VERSION: "0.1.0",
       });
     },
@@ -1008,7 +1055,9 @@ objects:
       expect(
         result.stderr.some((line) => line.includes("Validation work exited with signal SIGKILL")),
       ).toBe(true);
-      expect(result.stdout.at(-1)).toContain("status=tool-error errors=0 warnings=0 config=config");
+      expect(result.stdout.at(-1)).toContain(
+        "status=tool-error errors=0 warnings=0 pending=0 config=config",
+      );
       await expectResults(result, {
         status: "tool-error",
         errors: 0,
@@ -1038,7 +1087,7 @@ objects:
     await writeProjectFile(
       root,
       "src/messages.js",
-      'formatMessage({ id: "bad", defaultMessage: "{count, plural, one {item}}" });\n',
+      'formatMessage({ id: "bad", defaultMessage: "{count, plural, one {item}}", description: "Test message" });\n',
     );
     const readOnlyHome = join(root, "read-only-home");
     await mkdir(readOnlyHome);
@@ -1112,7 +1161,7 @@ objects:
     );
     expect(emptyResultsExitCode).toBe(2);
     expect(stderr[0]).toContain("--results-dir must not be empty");
-    expect(stdout[0]).toContain("status=tool-error errors=0 warnings=0 config=none");
+    expect(stdout[0]).toContain("status=tool-error errors=0 warnings=0 pending=0 config=none");
   });
 
   it.each(["warn", "error"] as const)(
@@ -1137,7 +1186,7 @@ objects:
 
       expect(exitCode).toBe(mode === "warn" ? 0 : 1);
       expect(stderr[0]).toContain("EEXIST");
-      expect(stdout[0]).toContain("status=tool-error errors=0 warnings=0 config=none");
+      expect(stdout[0]).toContain("status=tool-error errors=0 warnings=0 pending=0 config=none");
     },
   );
 

@@ -812,6 +812,10 @@ async function validateProject(
   const registry = await createCatalogAdapterRegistry(cwd);
   const result = await validateCatalogProject(cwd, config, registry);
   reportWarnings(result.warnings, { env, stdout });
+  // Undelivered translations are expected before delivery: listed, never annotated as warnings.
+  if (result.pending.length) {
+    stdout(`Pending translations:\n${result.pending.map((item) => `- ${item}`).join("\n")}`);
+  }
   if (result.problems.length) {
     stderr(
       `Catalog validation failed:\n${result.problems.map((problem) => `- ${problem}`).join("\n")}`,

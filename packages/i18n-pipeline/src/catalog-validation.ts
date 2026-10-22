@@ -68,6 +68,8 @@ export interface GeneratedCatalogCheck {
   command: string;
   args: string[];
   updateCommand?: string;
+  /** How a stale file is reported; defaults to "error". */
+  severity?: "error" | "warning";
 }
 
 /** A directory whose catalog files must all be declared by the validation plan. */
@@ -103,6 +105,11 @@ export interface CatalogValidationResult {
   generatedCount: number;
   /** TMS targets whose output file has not been delivered yet. */
   pendingTargetCount: number;
+  /**
+   * One line per translation not delivered yet (an FEO locale, an empty placeholder or a missing
+   * TMS target). Expected before delivery, so they are reported apart from warnings.
+   */
+  pending: string[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -157,7 +164,17 @@ function parseGeneratedCheck(value: unknown, label: string): GeneratedCatalogChe
   const entry = recordValue(value, label);
   rejectUnknownKeys(
     entry,
-    ["path", "adapter", "locale", "options", "role", "command", "args", "updateCommand"],
+    [
+      "path",
+      "adapter",
+      "locale",
+      "options",
+      "role",
+      "command",
+      "args",
+      "updateCommand",
+      "severity",
+    ],
     label,
   );
   const command = requiredString(entry.command, `${label}.command`);
@@ -172,7 +189,16 @@ function parseGeneratedCheck(value: unknown, label: string): GeneratedCatalogChe
   if (entry.updateCommand !== undefined) {
     updateCommand = requiredString(entry.updateCommand, `${label}.updateCommand`);
   }
-  const generator = { command, args, ...(updateCommand ? { updateCommand } : {}) };
+  if (entry.severity !== undefined && entry.severity !== "error" && entry.severity !== "warning") {
+    throw new TypeError(`${label}.severity must be "error" or "warning"`);
+  }
+  const severity = entry.severity as GeneratedCatalogCheck["severity"];
+  const generator = {
+    command,
+    args,
+    ...(updateCommand ? { updateCommand } : {}),
+    ...(severity ? { severity } : {}),
+  };
 
   if (entry.adapter === undefined) {
     const catalogKey = ["locale", "role", "options"].find((key) => entry[key] !== undefined);
@@ -728,6 +754,7 @@ async function checkFeoTemplate(
   projectRoot: string,
   entry: FeoTemplateValidation,
   warnings: string[],
+  pending: string[],
   phraseConfig?: string,
 ): Promise<string[]> {
   const problems: string[] = [];
@@ -759,6 +786,17 @@ async function checkFeoTemplate(
         `\`${feoExtractCommand(entry)}\` to regenerate the source catalog.`,
     );
     return problems;
+  }
+  for (const [key, { defaultMessage }] of Object.entries(currentCatalog)) {
+    // FEO strings are rendered literally; braces only look like ICU arguments to translators.
+    const placeholder = /\{[^{}]*\}/.exec(defaultMessage)?.[0];
+    if (placeholder) {
+      warnings.push(
+        `FEO text "${key}" in "${entry.template}" contains ${JSON.stringify(placeholder)}, which ` +
+          "reads as an ICU placeholder. FEO strings are shown literally, so users see it as typed, " +
+          "and Phrase locks it against translation. Remove it or reword the text.",
+      );
+    }
   }
 
   let sourceContents: string;
@@ -818,7 +856,7 @@ async function checkFeoTemplate(
       target = targetValue;
     } catch (error) {
       if (hasCauseCode(error, "ENOENT") && !templateLocales.includes(locale)) {
-        warnings.push(
+        pending.push(
           `FEO locale "${locale}" is not delivered yet: catalog "${localePath}" is missing and ` +
             `template "${entry.template}" has no spec.locales block for it; skipping.`,
         );
@@ -914,6 +952,7 @@ export async function validateCatalogProject(
 ): Promise<CatalogValidationResult> {
   const problems: string[] = [];
   const warnings: string[] = [];
+  const pending: string[] = [];
   const lintedSources = new Set<string>();
   let sourceCount = 0;
   let targetCount = 0;
@@ -928,7 +967,9 @@ export async function validateCatalogProject(
         const update = entry.updateCommand
           ? `Run \`${entry.updateCommand}\` and commit the result.`
           : "Regenerate the file and commit the result.";
-        problems.push(`Generated catalog "${entry.path}" is out of date. ${update}`);
+        (entry.severity === "warning" ? warnings : problems).push(
+          `Generated catalog "${entry.path}" is out of date. ${update}`,
+        );
       }
     } catch (error) {
       problems.push(
@@ -946,6 +987,7 @@ export async function validateCatalogProject(
         projectRoot,
         entry,
         warnings,
+        pending,
         phraseTemplates.get(entry.template),
       )),
     );
@@ -1001,6 +1043,7 @@ export async function validateCatalogProject(
         !(await fileExists(resolve(projectRoot, targetReference.path)))
       ) {
         pendingTargetCount += 1;
+        pending.push(`TMS target "${targetReference.path}" is not delivered yet; skipping.`);
         continue;
       }
       try {
@@ -1019,7 +1062,7 @@ export async function validateCatalogProject(
           Object.keys(source.catalog.messages).length > 0
         ) {
           pendingTargetCount += 1;
-          warnings.push(
+          pending.push(
             `TMS target "${targetReference.path}" is an empty placeholder; counted as pending until translations are delivered.`,
           );
           continue;
@@ -1047,5 +1090,13 @@ export async function validateCatalogProject(
     ...(await undeclaredCatalogProblems(projectRoot, config.catalogDirectories, declaredPaths)),
   );
 
-  return { problems, warnings, sourceCount, targetCount, generatedCount, pendingTargetCount };
+  return {
+    problems,
+    warnings,
+    pending,
+    sourceCount,
+    targetCount,
+    generatedCount,
+    pendingTargetCount,
+  };
 }

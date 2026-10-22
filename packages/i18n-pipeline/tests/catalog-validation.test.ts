@@ -679,6 +679,37 @@ describe("catalog project validation", () => {
     const stale = await runValidation({ version: 1, checks: [], generated });
     expect(stale.exitCode).toBe(1);
     expect(stale.errors[0]).toContain('Generated catalog "locales/data.json" is out of date');
+
+    // A committed runtime aggregate that Phrase locale PRs cannot regenerate stays a warning.
+    const warned = await runValidation({
+      version: 1,
+      checks: [],
+      generated: [{ ...generated[0]!, severity: "warning" }],
+    });
+    expect(warned.exitCode).toBe(0);
+    expect(warned.errors).toEqual([]);
+    expect(warned.output.join("\n")).toContain(
+      'Generated catalog "locales/data.json" is out of date',
+    );
+  });
+
+  it("rejects an unknown generated severity", () => {
+    expect(() =>
+      parseCatalogValidationConfig({
+        version: 1,
+        checks: [],
+        generated: [
+          {
+            path: "locales/data.json",
+            command: "node",
+            args: ["a.mjs", "{output}"],
+            severity: "info",
+          },
+        ],
+      }),
+    ).toThrowError(
+      'Catalog validation config "generated[0]".severity must be "error" or "warning"',
+    );
   });
 
   it("checks delivered TMS targets and counts undelivered ones as pending", async () => {
@@ -688,6 +719,7 @@ describe("catalog project validation", () => {
     const passed = await runValidation({ version: 1, tmsConfig: "phrase-tms.json", checks: [] });
     expect(passed.exitCode).toBe(0);
     expect(passed.output).toEqual([
+      'Pending translations:\n- TMS target "locales/zh-CN.json" is not delivered yet; skipping.',
       "Catalog validation passed (1 source, 1 target, 0 generated catalogs, 1 pending TMS target).",
     ]);
 
@@ -975,6 +1007,40 @@ objects:
     expect(result.errors.join("\n")).toContain(
       'is localized (Phrase config "i18n/phrase-tms-feo.json" writes spec.locales into it)',
     );
+  });
+
+  it("warns about ICU-looking braces in FEO text, which is shown literally", async () => {
+    await createProject();
+    await mkdir(join(projectRoot!, "deploy/locales"), { recursive: true });
+    await writeFile(
+      join(projectRoot!, "deploy/frontend.yaml"),
+      `kind: Template
+objects:
+  - kind: Frontend
+    spec:
+      searchEntries:
+        - id: requests
+          title: Access requests
+          alt_title: ["requests from {name}"]
+`,
+      "utf8",
+    );
+    await runFeo([
+      "extract",
+      "--template",
+      "deploy/frontend.yaml",
+      "--output",
+      "deploy/locales/translation-template.json",
+    ]);
+
+    const result = await runValidation(feoValidationConfig({ fr: "deploy/locales/fr.json" }));
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output.join("\n")).toContain(
+      'FEO text "searchEntries.requests.alt_title.requests-from-name" in "deploy/frontend.yaml" ' +
+        'contains "{name}", which reads as an ICU placeholder.',
+    );
+    expect(result.output.join("\n")).not.toContain('"searchEntries.requests.title"');
   });
 
   it("warns for an unlocalized FEO template when the FEC schema rejects spec.locales", async () => {

@@ -41,6 +41,8 @@ const TRANSLATABILITY_RULES: Linter.RulesRecord = {
   "formatjs/prefer-pound-in-plural": "warn",
   "formatjs/no-complex-selectors": ["warn", { limit: 20 }],
   "formatjs/no-multiple-plurals": "warn",
+  "formatjs/enforce-description": ["warn", "literal"],
+  "i18n/no-duplicate-message-id": "warn",
 };
 
 export type ValidateCiMode = "warn" | "error";
@@ -52,6 +54,8 @@ export interface ValidateCiReport {
   config: ValidateCiConfigKind;
   errors: string[];
   warnings: string[];
+  /** Translations not delivered yet; expected, so they do not make the status `findings`. */
+  pending?: string[];
   toolError?: string;
 }
 
@@ -180,6 +184,7 @@ type ResultValues = {
   status: ValidateCiStatus;
   errors: number;
   warnings: number;
+  pending: number;
   mode: ValidateCiMode;
   config: ValidateCiConfigKind;
   version: string;
@@ -188,6 +193,7 @@ type ResultValues = {
 const RESULT_KEYS: Array<[string, keyof ResultValues]> = [
   ["I18N_ERRORS", "errors"],
   ["I18N_WARNINGS", "warnings"],
+  ["I18N_PENDING", "pending"],
   ["I18N_MODE", "mode"],
   ["I18N_CONFIG", "config"],
   ["I18N_TOOL_VERSION", "version"],
@@ -227,14 +233,22 @@ function reportForFindings(
   config: ValidateCiConfigKind,
   errors: string[],
   warnings: string[],
+  pending: string[] = [],
 ): ValidateCiReport {
-  return { status: statusForFindings(errors, warnings), config, errors, warnings };
+  return {
+    status: statusForFindings(errors, warnings),
+    config,
+    errors,
+    warnings,
+    ...(pending.length ? { pending } : {}),
+  };
 }
 
 function summaryLine(mode: ValidateCiMode, report: ValidateCiReport): string {
   return (
     `validate-ci mode=${mode} status=${report.status} errors=${report.errors.length} ` +
-    `warnings=${report.warnings.length} config=${report.config}`
+    `warnings=${report.warnings.length} pending=${report.pending?.length ?? 0} ` +
+    `config=${report.config}`
   );
 }
 
@@ -252,6 +266,7 @@ function reportToResults(
     status: report.status,
     errors: report.errors.length,
     warnings: report.warnings.length,
+    pending: report.pending?.length ?? 0,
     mode,
     config: report.config,
     version,
@@ -270,6 +285,7 @@ function emitReport(
   if (report.toolError) stderr(toolErrorText(report.toolError));
   for (const error of report.errors) stderr(error);
   for (const warning of report.warnings) stdout(warning);
+  for (const item of report.pending ?? []) stdout(`pending: ${item}`);
   const summary = summaryLine(mode, report);
   stdout(
     report.status === "not-configured" ? `No i18n validation configured. ${summary}` : summary,
@@ -368,14 +384,14 @@ async function lintSource(
     ...ICU_RULES,
     ...(configured ? TRANSLATABILITY_RULES : {}),
   };
-  if (catalog) {
+  if (configured || catalog) {
     const require = createRequire(import.meta.url);
     const pluginModule = require("@redhat-cloud-services/eslint-plugin-i18n") as {
       default?: unknown;
     };
     plugins.i18n = (pluginModule.default ?? pluginModule) as ESLintApi.Plugin;
-    rules["i18n/no-missing-default-catalog-entry"] = ["error", { catalog }];
   }
+  if (catalog) rules["i18n/no-missing-default-catalog-entry"] = ["error", { catalog }];
 
   const config: Linter.Config = {
     files,
@@ -488,7 +504,7 @@ export async function executeValidateCi(
       const result = await validateCatalogProject(root, config, registry);
       errors.push(...result.problems);
       warnings.push(...result.warnings);
-      return reportForFindings(configKind, errors, warnings);
+      return reportForFindings(configKind, errors, warnings, result.pending);
     }
 
     const manifest = await readConsumerPackage(root);
@@ -746,6 +762,7 @@ export async function runValidateCiCommand(
         status: "tool-error",
         errors: 0,
         warnings: 0,
+        pending: 0,
         mode,
         config: "none",
         version,

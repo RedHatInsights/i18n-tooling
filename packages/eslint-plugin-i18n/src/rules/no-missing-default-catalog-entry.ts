@@ -3,6 +3,13 @@ import path from "node:path";
 import type * as ESTree from "estree";
 import type { TSESTree } from "@typescript-eslint/utils";
 import type { Rule } from "eslint";
+import {
+  isFormatJsMessageCall,
+  isRecord,
+  objectProperties,
+  objectProperty,
+  staticString,
+} from "../descriptors.js";
 
 type Options = [{ catalog?: string }];
 
@@ -12,51 +19,6 @@ type CatalogState = {
 };
 
 const catalogCache = new Map<string, { mtimeMs: number; size: number; state: CatalogState }>();
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function staticString(node: unknown): string | undefined {
-  if (!isRecord(node)) return undefined;
-  if (node.type === "Literal" && typeof node.value === "string") {
-    return node.value;
-  }
-
-  if (
-    node.type === "TemplateLiteral" &&
-    Array.isArray(node.expressions) &&
-    node.expressions.length === 0 &&
-    Array.isArray(node.quasis) &&
-    node.quasis.length === 1
-  ) {
-    const quasi = node.quasis[0];
-    if (!isRecord(quasi) || !isRecord(quasi.value)) return undefined;
-    return typeof quasi.value.cooked === "string"
-      ? quasi.value.cooked
-      : typeof quasi.value.raw === "string"
-        ? quasi.value.raw
-        : undefined;
-  }
-
-  return undefined;
-}
-
-function propertyName(property: ESTree.Property): string | undefined {
-  if (property.computed) return undefined;
-  return property.key.type === "Identifier" ? property.key.name : staticString(property.key);
-}
-
-function objectProperties(object: ESTree.Node | undefined, name: string): ESTree.Property[] {
-  if (object?.type !== "ObjectExpression") return [];
-  return object.properties.filter(
-    (item): item is ESTree.Property => item.type === "Property" && propertyName(item) === name,
-  );
-}
-
-function objectProperty(object: ESTree.Node | undefined, name: string): ESTree.Node | undefined {
-  return objectProperties(object, name)[0]?.value;
-}
 
 function resolveCatalogPath(context: Rule.RuleContext, configuredPath: string | undefined): string {
   const cwd = context.cwd ?? context.getCwd();
@@ -96,21 +58,6 @@ function isMessageReference(node: ESTree.Node): boolean {
   return node.computed
     ? staticString(node.property) !== undefined
     : node.property.type === "Identifier";
-}
-
-function isFormatJsMessageCall(callee: ESTree.Node): boolean {
-  if (callee.type === "Identifier") {
-    return ["defineMessage", "defineMessages", "formatMessage"].includes(callee.name);
-  }
-
-  if (callee.type !== "MemberExpression") return false;
-  const propertyName =
-    callee.property.type === "Identifier"
-      ? callee.property.name
-      : callee.computed
-        ? staticString(callee.property)
-        : undefined;
-  return propertyName === "formatMessage";
 }
 
 function asEslintNode(node: TSESTree.Node): ESTree.Node {
