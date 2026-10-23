@@ -6,6 +6,10 @@ Use the same workflow in Claude Code, Codex CLI, opencode, and Pi. Send the plan
 - **Codex CLI:** use `request_user_input` when it is listed for the turn. Codex offers it in Plan mode, and in Default mode only when the session was started with `codex --enable default_mode_request_user_input`. When it is not listed, use the text form below, and tell the developer once that this flag gives a choice UI. The reply arrives as a new user message.
 - **opencode and Pi:** use the session's question tool when one is listed. Otherwise use the text form below.
 
+## Independent review
+
+The final review runs in a fresh context. Use the harness's own subagent when the session lists one (Claude Code: the `Agent` tool). Otherwise start a non-interactive session of the same CLI and model, with the review prompt as its only input, and read its report from a file it writes in your scratch directory: `pi -p --model <model> "<prompt>"`, `codex exec "<prompt>"`, or `opencode run "<prompt>"`. The prompt carries the same hard limits as the onboarding run: read-only on GitHub, no pushes, no Phrase operations, and file changes only in a scratch clone.
+
 ## Text form
 
 When no question tool is available, end the plan message with one reply line, for example: `Reply "go" to proceed, "adjust" to change anything, or "stop". You can also name changes directly, e.g. "go, fr only".` When the tracking ticket is open, add it to that line: `Also name the tracking ticket: a key such as RHCLOUD-12345, "create", "draft", or "none" (e.g. "go, create").`
