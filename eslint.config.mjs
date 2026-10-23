@@ -9,7 +9,7 @@ export default [
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ["scripts/**/*.mjs"],
+    files: ["scripts/**/*.mjs", "skills/i18n-onboarding/scripts/**/*.mjs"],
     languageOptions: {
       globals: {
         console: "readonly",

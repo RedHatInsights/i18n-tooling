@@ -6,6 +6,15 @@ Use this checklist to review an i18n onboarding change: as the onboarding agent'
 
 Inputs: the consumer repository, the onboarding branch, and the consumer's default branch, resolved from the remote (`gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`). Below, `<default>` is `origin/<default branch>` after a fetch, and `<range>` is `<default>..HEAD`. With edit-files-only autonomy, check the working tree against `<default>` instead, and mark the commit-message items `n/a`.
 
+Start with the checks script next to this skill, which decides the mechanical items in well under a minute:
+
+```bash
+node <skill>/scripts/review-checks.mjs --repo <checkout> --base <default> --pr <number> \
+  --cli <path-to-i18n-pipeline-cli.js> --node <version-run> --npm <version-run>
+```
+
+It prints one row each for S3, S4, S5, S6, D1, D2, D3, P1, P2, W1, W2 and W6. Take its `pass` and `fail` rows with their evidence as they stand; judge its `check` rows from the evidence it lists; rerun a `skipped` row by hand when its reason no longer holds. Add `--reproduce --scratch <dir>` to run D3's frozen install, which is the slow part, only when a lockfile changed. Spend the review on the remaining items.
+
 Run every item. Record each as `pass`, `fail`, or `n/a`, with **evidence**: the command output, version, path, or commit that decides it. A result without evidence is a `fail`. An item is `n/a` only when its track or unit is not in the change; say which.
 
 Run the checks that change files (`D3`, `G1`, `M3`) in a scratch clone of the branch, never in the working tree under review. With a draft PR open, `S5` and `D7` read its CI results; wait for its checks to finish (`gh pr checks <number> --watch`) before recording them. Without a PR, the items about it (`S5`, `R1`–`R3`) check the description you are about to post.
