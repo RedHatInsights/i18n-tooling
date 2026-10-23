@@ -30,7 +30,7 @@ A test in i18n-tooling classifies every string field of the FEC Frontend schema 
 
 Each search `alt_title` alias is its own message. Its slug is the English alias lowercased, with each run of characters outside `[a-z0-9]` replaced by `-` and the ends trimmed; an empty slug fails extraction. Aliases with the same slug, such as `acs` and `ACS`, share one key and one translation; the first alias in document order is the English default. The app rebuilds the alias list in English order, using the translation of each alias's slug when present. With multiple Frontend objects, keys gain `objects.<metadata.name>.spec.` and the names must be unique. Adding a second Frontend changes catalog IDs, so migrate translations when that happens.
 
-Add a `feo` entry such as:
+The `feo` entry itself requires the committed source catalog to be byte-identical to `feo extract` output, so it needs no `generated` entry. Add a `feo` entry such as:
 
 ```json
 {
