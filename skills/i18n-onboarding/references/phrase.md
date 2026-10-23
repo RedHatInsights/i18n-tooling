@@ -45,6 +45,16 @@ After the preset and required source catalog path and filename, add only fields 
 
 A preset config needs an `i18n-pipeline` build and a pinned validation workflow that know presets. If `i18n-pipeline tms config --help` fails, rebuild the CLI from current `i18n-tooling` main, and pin the locale validation caller to an `i18n-tooling` commit that has `tms config`. `catalog-validation.json` can use `tmsConfig` to derive target checks; do not list them again.
 
+Check each new config's state branch (default `i18n-tms-state`) with `git ls-remote --heads origin <branch>`. When it exists, list its records with the phase, project and source filename of each:
+
+```bash
+git fetch origin <branch> && git ls-tree -r --name-only FETCH_HEAD .github/i18n-state/batches | while read -r file; do
+  git show "FETCH_HEAD:$file" | node -e 'const r = JSON.parse(require("fs").readFileSync(0, "utf8")); console.log(r.phase, r.config.projectUid, r.config.sourceCatalog.filename, r.baseRef)'
+done
+```
+
+Reconciliation processes every active record on the branch (any phase except `completed`, `failed` and `superseded`), so an active record from another project or source filename, such as a pilot's, fails the new config's runs. In that case set a fresh `state.branch` in the new config, name it and the old branch's records in the plan, and leave the old branch untouched.
+
 Point the validation config's `tmsConfig` at `phrase-tms.json` in the same change. A target file that has not arrived yet, or that is an empty `{}` placeholder the app imports before delivery, is pending, not a validation error. Keep such placeholders.
 
 The reusable reconciliation workflow writes one flat locale JSON file per target locale and opens or updates one PR per locale. It does not run the consumer's build or aggregation scripts. Never use an aggregate file as a target `outputPath`.

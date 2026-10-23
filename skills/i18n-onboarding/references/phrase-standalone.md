@@ -28,7 +28,8 @@ Use `gh api` GET requests only, and never request, print, or copy a secret value
 
 - `repos/{owner}/{repo}/environments` lists the environments.
 - `repos/{owner}/{repo}/environments/{environment_name}/secrets` lists the environment's secret names.
-- `repos/{owner}/{repo}/actions/secrets` lists repository secrets, which should hold none of these names.
+- `repos/{owner}/{repo}/actions/secrets` lists repository secrets, which should hold none of these names. Report a name found at both levels as a duplicate for the admins to resolve; do not claim which copy a run reads.
+- `repos/{owner}/{repo}/environments/{environment_name}/deployment-branch-policies` lists the refs the environment accepts. When the default branch is not among them, every caller that runs on it is rejected; put fixing that in the admin checklist.
 - In `GITHUB_TOKEN` mode, `repos/{owner}/{repo}/actions/permissions/workflow` reports whether Actions can create pull requests.
 
 Expect `PHRASE_PLATFORM_API_TOKEN`, plus both or neither of `APP_CLIENT_ID` and `APP_PRIVATE_KEY` to match the chosen auth mode. Flag Service Account secrets, and a lone App secret. Also check that every existing caller maps each expected name in `secrets:`; an unmapped name arrives empty. If the repository cannot be resolved, or `gh` is absent, unauthenticated, or lacks permission, report the check as unverified and put it in the admin checklist. Do not create or update secrets or settings.
