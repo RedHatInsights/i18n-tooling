@@ -209,6 +209,29 @@ test("D1 compares version files only, not CI expressions, matrix lists or engine
   assert.match(d1.evidence, /expression or engines value\(s\) not compared/);
 });
 
+test("D3 is skipped when the npm on PATH differs from --npm", (t) => {
+  const lock = (version) => ({ lockfileVersion: 3, packages: { "node_modules/pkg": { version } } });
+  const { repo, temporary } = setup(t, {
+    "package-lock.json": JSON.stringify(lock("1.0.0")) + "\n",
+  });
+  update(
+    repo,
+    { "package-lock.json": JSON.stringify(lock("1.1.0")) + "\n" },
+    "upgrade pkg",
+    "Update pkg.",
+  );
+  const result = runReview(repo, [
+    "--npm",
+    "0.0.1",
+    "--reproduce",
+    "--scratch",
+    join(temporary, "scratch"),
+  ]);
+  const d3 = row(rowsFrom(result), "D3");
+  assert.equal(d3.result, "skipped");
+  assert.match(d3.evidence, /--npm is 0\.0\.1; rerun under the pinned npm/);
+});
+
 test("D2 accepts a scoped package named without its scope", (t) => {
   const lock = (version) => ({
     lockfileVersion: 3,

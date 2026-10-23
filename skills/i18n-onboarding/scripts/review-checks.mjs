@@ -662,6 +662,18 @@ function addD3(changedLocks) {
     add("D3", "skipped", "use --reproduce --scratch <dir> to run the frozen install in a clone");
     return;
   }
+  // Another npm major rewrites lockfile metadata, so a run under it proves nothing.
+  if (changedLocks.includes("package-lock.json") && options.npm) {
+    const running = run("npm", ["--version"]).stdout.trim();
+    if (running !== options.npm.trim()) {
+      add(
+        "D3",
+        "skipped",
+        `npm on PATH is ${running || "unavailable"}, --npm is ${options.npm}; rerun under the pinned npm`,
+      );
+      return;
+    }
+  }
   if (options.offline) {
     add("D3", "skipped", "--offline: frozen install may access the package registry");
     return;

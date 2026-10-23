@@ -13,7 +13,7 @@ node <skill>/scripts/review-checks.mjs --repo <checkout> --base <default> --pr <
   --cli <path-to-i18n-pipeline-cli.js> --node <version-run> --npm <version-run>
 ```
 
-It prints one row each for S3, S4, S5, S6, D1, D2, D3, P1, P2, W1, W2 and W6. Take its `pass` and `fail` rows with their evidence as they stand; judge its `check` rows from the evidence it lists; rerun a `skipped` row by hand when its reason no longer holds. Add `--reproduce --scratch <dir>` to run D3's frozen install, which is the slow part, only when a lockfile changed. Spend the review on the remaining items.
+It prints one row each for S3, S4, S5, S6, D1, D2, D3, P1, P2, W1, W2 and W6. Take its `pass` and `fail` rows with their evidence as they stand; judge its `check` rows from the evidence it lists; rerun a `skipped` row by hand when its reason no longer holds. Add `--reproduce --scratch <dir>` to run D3's frozen install, which is the slow part, only when a lockfile changed, and run the script under the pinned Node and npm (for example with `nvm exec`); D3 is skipped when the npm on `PATH` differs from `--npm`. Spend the review on the remaining items.
 
 Run every item. Record each as `pass`, `fail`, or `n/a`, with **evidence**: the command output, version, path, or commit that decides it. A result without evidence is a `fail`. An item is `n/a` only when its track or unit is not in the change; say which.
 
