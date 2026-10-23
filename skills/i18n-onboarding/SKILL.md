@@ -1,11 +1,13 @@
 ---
 name: i18n-onboarding
-description: Use when a developer asks to onboard a repository to i18n tooling, add i18n validation, set up translations/Phrase (i18n-hub or standalone), or localize FEO navigation/search/tiles. Inspect the repository, select applicable validation, Phrase, and FEO tracks, and drive i18n-pipeline to wire and verify them.
+description: Use when a developer asks to onboard a repository to i18n tooling, add i18n validation, set up translations/Phrase (i18n-hub or standalone), or localize FEO navigation/search/tiles. Inspect the repository, select applicable validation, Phrase, and FEO tracks, and drive i18n-pipeline to wire and verify them. Also use to review an onboarding PR.
 ---
 
 # Onboard a repository to i18n tooling
 
 Use this skill when a developer asks to add catalog validation, translation delivery, or FEO localization to a repository. Inspect first, then propose one plan and ask the developer to approve it. Open the wizard only when they want to adjust the plan. After approval, finish the planned work without further questions unless a real ambiguity blocks safe progress.
+
+When asked to review an onboarding change rather than make one, run [references/review-checklist.md](references/review-checklist.md) against it, report each item's result with its evidence, and change no files.
 
 ## Resolve and check the CLI first
 
@@ -99,4 +101,8 @@ Read [references/feo.md](references/feo.md). Add stable YAML item IDs where item
 
 ## Finish and report
 
-Run `validate-ci --mode error` after every selected track. The run is done only when it passes on the final tree; otherwise report the errors as the first item and leave the work unpushed. Restore all deliberate test breaks and confirm the final working tree contains only intended changes. If a PR was selected, include the manual admin checklist and every unresolved wording finding in its description, with file and line from that final-tree run, above the repository's PR template. Keep the template's headings and checklists; fill each placeholder you can (ticket link, summary) and delete each one you cannot, such as a sample ticket key. Report the selected tracks, validation findings, CLI source and version, branch and commits, Phrase mode with the i18n-hub entry and registration PR or the standalone auth mode, the tracking ticket key or draft path, pending devDependency, and manual follow-ups. While the devDependency is pending, say that `translations:validate` fails with "command not found" wherever `i18n-pipeline` is not on `PATH`, and that the PR caller provides it in CI.
+Run `validate-ci --mode error` after every selected track. The run is done only when it passes on the final tree; otherwise report the errors as the first item and leave the work unpushed. Restore all deliberate test breaks and confirm the final working tree contains only intended changes.
+
+Then review the change against [references/review-checklist.md](references/review-checklist.md). When the harness can start a subagent, give a fresh one the checklist, the repository path, the branch, the default branch, and the Node and package manager versions you ran, and have it run every item, so the review does not share your assumptions; otherwise run it yourself. A `fail` blocks push and PR like a validation failure: fix it in the commit of the unit it belongs to and rerun the checklist, or, when the fix is unclear, report it as the first item and leave the work unpushed.
+
+If a PR was selected, include the manual admin checklist and every unresolved wording finding in its description, with file and line from that final-tree run, above the repository's PR template. Add the review checklist's results, each item with its result and evidence, the Node and package manager versions you ran, and a link to `review-checklist.md` at the i18n-tooling commit the callers pin (the default branch while the pin is a marker), so a reviewer or their agent can rerun it. Keep the template's headings and checklists; fill each placeholder you can (ticket link, summary) and delete each one you cannot, such as a sample ticket key. Report the selected tracks, validation findings, review checklist results, CLI source and version, Node and package manager versions, branch and commits, Phrase mode with the i18n-hub entry and registration PR or the standalone auth mode, the tracking ticket key or draft path, pending devDependency, and manual follow-ups. While the devDependency is pending, say that `translations:validate` fails with "command not found" wherever `i18n-pipeline` is not on `PATH`, and that the PR caller provides it in CI.
