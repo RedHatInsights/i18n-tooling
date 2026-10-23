@@ -8,7 +8,7 @@ Inputs: the consumer repository, the onboarding branch, and the consumer's defau
 
 Run every item. Record each as `pass`, `fail`, or `n/a`, with **evidence**: the command output, version, path, or commit that decides it. A result without evidence is a `fail`. An item is `n/a` only when its track or unit is not in the change; say which.
 
-Run the checks that change files (`D3`, `G1`, `M3`) in a scratch clone of the branch, never in the working tree under review. Before the PR exists, the items about it (`S5`, `R1`–`R3`) check the description you are about to post.
+Run the checks that change files (`D3`, `G1`, `M3`) in a scratch clone of the branch, never in the working tree under review. With a draft PR open, `S5` and `D7` read its CI results; wait for its checks to finish (`gh pr checks <number> --watch`) before recording them. Without a PR, the items about it (`S5`, `R1`–`R3`) check the description you are about to post.
 
 ## Scope
 
@@ -16,7 +16,7 @@ Run the checks that change files (`D3`, `G1`, `M3`) in a scratch clone of the br
 - **S2. Units in order, one per commit.** `git log --reverse --format='%h %s' <range>` follows: catalog catch-up, validation, mechanical fixes, AI-drafted descriptions, dependency upgrades, Phrase, FEO. Each commit has a body that says why (`git log --format='%h%n%b' <range>`).
 - **S3. No test breaks left.** A fresh clone of the branch is clean after checkout, and `validate-ci --mode error` passes on `HEAD`. An independent reviewer without the CLI uses the PR's locale validation check instead.
 - **S4. Commit convention.** Every subject passes the repository's commit lint: `npx commitlint --from <default> --to HEAD` when it has a commitlint config; otherwise compare with its contribution or agent docs and recent subjects on `<default>`.
-- **S5. CI is green.** `gh pr checks <number>` shows every check that ran as passing, or the description explains the failure. Before the PR exists, run the repository's local lint and test scripts instead.
+- **S5. CI is green.** `gh pr checks <number>` shows every check that ran as passing, or the description explains the failure. Without a PR, run the repository's lint script and the D7 build and unit test scripts instead.
 - **S6. In-flight work named.** The description names every open PR and remote branch that carries i18n validation, Phrase or FEO work, with the developer's decision on each: `gh pr list --state open --search i18n` on the repository, and on its parent when it is a fork (`gh repo view --json parent`), plus `git branch -r`.
 
 ## Toolchain and dependencies
@@ -41,7 +41,7 @@ Run the checks that change files (`D3`, `G1`, `M3`) in a scratch clone of the br
 - **D4. Lifecycle scripts unchanged.** When the repository's dependencies were installed with scripts disabled, the dependency commit body says the update ran with `--ignore-scripts` too, and no `postinstall` output appears in the lockfile change.
 - **D5. Registry age limits honored.** When `.npmrc` sets `min-release-age`, the package manager used is npm 11 or later, and each new version was published before the cutoff: `npm view <package> time.<version>`. A blocked upgrade is reported with the time it becomes eligible, not bypassed.
 - **D6. Smallest dependency change.** A transitive upgrade whose parent's range already allowed it leaves `package.json` unchanged. A duplicate kept by a parent's exact peer pin is named in the commit body with the parent upgrade as a follow-up.
-- **D7. Build and tests pass** after the dependency unit: the repository's own build and unit test scripts, run with the D1 versions, on the dependency commit, or on `HEAD` when no later commit changes a build or test input. Record which, and each script's own exit status, not that of a pipe.
+- **D7. Build and tests pass** after the dependency unit; `n/a` without one. When the PR's CI ran the repository's build and tests on the branch, its results are the evidence (S5). Otherwise run only the repository's build script and unit test script, with the D1 versions, on the dependency commit, or on `HEAD` when no later commit changes a build or test input; never aggregate scripts such as `verify`, nor browser, end-to-end or Storybook suites. Record which commit, and each script's own exit status, not that of a pipe.
 
 ## Package scripts
 
