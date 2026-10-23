@@ -3,6 +3,7 @@ name: Validate locale catalogs
 on:
   pull_request:
     paths:
+      - .github/workflows/locale-validation.yml
       - .github/i18n/**
       - locales/translation-template.json
       - src/locales/**
@@ -19,9 +20,5 @@ jobs:
     with:
       package-manager: npm
       validation-config: .github/i18n/catalog-validation.json
-      catalog-adapter: formatjs-json
-      catalog-path: locales/translation-template.json
-      catalog-role: source
-      catalog-locale: en
     permissions:
       contents: read

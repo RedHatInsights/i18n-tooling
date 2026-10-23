@@ -462,7 +462,11 @@ describe("repository i18n contracts", () => {
     expect(workflow).toContain("      catalog-only:");
     expect(workflow).toContain("catalog-only mode requires validation-config");
     expect(workflow).toContain("if: inputs.catalog-only != true");
-    expect(workflow).toContain('i18n-pipeline validate-project --config "$VALIDATION_CONFIG"');
+    expect(workflow).toContain(
+      'i18n-pipeline validate-ci --mode error --config "$VALIDATION_CONFIG"',
+    );
+    // With a validation config, source lint comes from its sourceLint, not from the inputs.
+    expect(workflow).toContain("if: inputs.catalog-only != true && inputs.validation-config == ''");
     expect(workflow).toContain('"$PACKAGE_MANAGER" run "$VALIDATION_COMMAND"');
     expect(workflow).toContain("PACKAGE_MANAGER: ${{ inputs.package-manager }}");
     expect(workflow).toContain("VALIDATION_CONFIG: ${{ inputs.validation-config }}");

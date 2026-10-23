@@ -60,7 +60,7 @@ Map both `APP_*` names for App mode. Never use `secrets: inherit`.
 
 - Pin every `uses:` to a reviewed `i18n-tooling` commit SHA. `validation-config` needs a tooling commit that contains `validate-project`; bump the SHA whenever the plan uses a newer feature.
 - Set top-level `permissions: {}` and grant permissions per job.
-- **Trap: source lint scope.** The default `source-glob` scans all sources. Existing code with imported, dynamic, or inline descriptors fails immediately. Scope `source-glob` to the files that declare messages (rbac-ui: `src/Messages.js`), and track migrating the rest as separate work.
+- **Trap: source lint scope.** The default source glob scans all sources. Existing code with imported, dynamic, or inline descriptors fails immediately. Scope `sourceLint.files` in the validation config (or `source-glob` for a caller without a config) to the files that declare messages (rbac-ui: `src/Messages.js`), and track migrating the rest as separate work.
 
 **Done when:** message-source files are included in the caller's PR path filters, and a source-only drift PR runs validation and fails.
 

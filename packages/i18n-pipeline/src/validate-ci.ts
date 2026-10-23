@@ -16,12 +16,15 @@ export const VALIDATE_CI_HELP = `Usage: i18n-pipeline validate-ci [options]
 
 Options:
   --root <dir>             Consumer repository root (default: current directory)
+  --config <path>          Validation config, relative to the root (default: discovery)
   --mode <warn|error>      Whether errors affect the exit code (default: warn)
   --results-dir <dir>      Write Tekton result files into this directory
   --timeout-seconds <n>    Deadline for the complete run (positive integer, default: 600)
   -h, --help               Show this help
 
-Discovery checks i18n/catalog-validation.json, then .github/i18n/catalog-validation.json.
+Without --config, discovery checks i18n/catalog-validation.json, then
+.github/i18n/catalog-validation.json. Under GitHub Actions, errors and warnings are printed as
+annotations.
 Without a config, FormatJS dependencies enable zero-config ICU lint; other consumers are
 reported as not configured. Configured source lint is opt-in through sourceLint in the config.
 
@@ -61,6 +64,7 @@ export interface ValidateCiReport {
 
 interface ValidateCiArguments {
   root?: string;
+  config?: string;
   mode: ValidateCiMode;
   resultsDir?: string;
   timeoutSeconds?: string;
@@ -146,6 +150,7 @@ function parseValidateCiArguments(args: string[], mode: ValidateCiMode): Validat
     args,
     options: {
       root: { type: "string" },
+      config: { type: "string" },
       mode: { type: "string" },
       "results-dir": { type: "string" },
       "timeout-seconds": { type: "string" },
@@ -155,6 +160,7 @@ function parseValidateCiArguments(args: string[], mode: ValidateCiMode): Validat
   });
   return {
     ...(values.root === undefined ? {} : { root: values.root }),
+    ...(values.config === undefined ? {} : { config: values.config }),
     mode,
     ...(values["results-dir"] === undefined ? {} : { resultsDir: values["results-dir"] }),
     ...(values["timeout-seconds"] === undefined
@@ -277,14 +283,40 @@ function toolErrorText(error: unknown): string {
   return `i18n-pipeline validate-ci: ${errorMessage(error)}`;
 }
 
+function escapeAnnotation(text: string): string {
+  return text.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+}
+
+function escapeAnnotationProperty(text: string): string {
+  return escapeAnnotation(text).replaceAll(":", "%3A").replaceAll(",", "%2C");
+}
+
+/** A GitHub Actions annotation; lint findings carry their file, line and column. */
+function annotation(level: "error" | "warning", finding: string): string {
+  const lint = /^(.+?):(\d+):(\d+) (?:error|warning) (\S+) (.*)$/s.exec(finding);
+  if (lint) {
+    const [, file, line, column, rule, message] = lint;
+    return (
+      `::${level} file=${escapeAnnotationProperty(file!)},line=${line},col=${column},` +
+      `title=${escapeAnnotationProperty(rule!)}::${escapeAnnotation(message!)}`
+    );
+  }
+  return `::${level} title=i18n-pipeline::${escapeAnnotation(finding)}`;
+}
+
 function emitReport(
   mode: ValidateCiMode,
   report: ValidateCiReport,
-  { stdout, stderr }: Pick<ValidateCiCommandOptions, "stdout" | "stderr">,
+  { stdout, stderr, env }: Pick<ValidateCiCommandOptions, "stdout" | "stderr" | "env">,
 ): void {
-  if (report.toolError) stderr(toolErrorText(report.toolError));
-  for (const error of report.errors) stderr(error);
-  for (const warning of report.warnings) stdout(warning);
+  // GitHub Actions renders these lines as annotations on the pull request.
+  const github = env.GITHUB_ACTIONS === "true";
+  if (report.toolError) {
+    const text = toolErrorText(report.toolError);
+    stderr(github ? annotation("error", text) : text);
+  }
+  for (const error of report.errors) stderr(github ? annotation("error", error) : error);
+  for (const warning of report.warnings) stdout(github ? annotation("warning", warning) : warning);
   for (const item of report.pending ?? []) stdout(`pending: ${item}`);
   const summary = summaryLine(mode, report);
   stdout(
@@ -463,16 +495,19 @@ async function lintSource(
 export async function executeValidateCi(
   root: string,
   onConfig?: (config: ValidateCiConfigKind) => void,
+  configPath?: string,
 ): Promise<ValidateCiReport> {
   let configKind: ValidateCiConfigKind = "none";
   try {
     if (!(await stat(root)).isDirectory()) {
       throw new TypeError(`Consumer root "${root}" is not a directory`);
     }
-    const configPaths = [
-      resolve(root, "i18n/catalog-validation.json"),
-      resolve(root, ".github/i18n/catalog-validation.json"),
-    ];
+    const configPaths = configPath
+      ? [resolve(root, configPath)]
+      : [
+          resolve(root, "i18n/catalog-validation.json"),
+          resolve(root, ".github/i18n/catalog-validation.json"),
+        ];
     let configText: string | undefined;
     for (const path of configPaths) {
       configText = await readOptionalFile(path, "Catalog validation config");
@@ -483,6 +518,9 @@ export async function executeValidateCi(
       }
     }
 
+    if (configText === undefined && configPath) {
+      throw new TypeError(`Catalog validation config "${configPath}" does not exist`);
+    }
     if (configText !== undefined) {
       const config = parseCatalogValidationConfig(
         parseJson(configText, "Catalog validation config"),
@@ -600,6 +638,7 @@ function forwardLines(buffer: string, chunk: string, output: (message: string) =
 
 async function runWorker(
   root: string,
+  configPath: string | undefined,
   env: NodeJS.ProcessEnv,
   deadline: bigint,
   onConfig: (config: ValidateCiConfigKind) => void,
@@ -613,12 +652,12 @@ import { executeValidateCi } from ${JSON.stringify(moduleUrl)};
 process.once("disconnect", () => {
   try { process.kill(-process.pid, "SIGKILL"); } catch {}
 });
-process.once("message", async ({ root }) => {
+process.once("message", async ({ root, configPath }) => {
   let report;
   try {
     report = await executeValidateCi(root, (config) => {
       if (process.send) process.send({ type: "config", config });
-    });
+    }, configPath);
   } catch (error) {
     report = { status: "tool-error", config: "none", errors: [], warnings: [], toolError: String(error) };
   }
@@ -681,7 +720,9 @@ process.once("message", async ({ root }) => {
   const timeout = deadlinePromise(deadline);
   const sendTask = new Promise<void>((resolvePromise, rejectPromise) => {
     child.once("spawn", () => {
-      child.send({ root }, (error) => (error ? rejectPromise(error) : resolvePromise()));
+      child.send({ root, configPath }, (error) =>
+        error ? rejectPromise(error) : resolvePromise(),
+      );
     });
     child.once("error", rejectPromise);
   });
@@ -820,6 +861,7 @@ export async function runValidateCiCommand(
   try {
     const outcome = await runWorker(
       root,
+      parsed.config,
       options.env,
       deadline,
       (config) => {

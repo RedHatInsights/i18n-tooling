@@ -19,42 +19,42 @@ on:
         type: string
         default: i18n:validate
       validation-config:
-        description: Optional JSON config for i18n-pipeline validate-project; replaces validation-command
+        description: Optional catalog validation config, run with i18n-pipeline validate-ci --mode error (source lint from its sourceLint); replaces validation-command and the catalog-* and source-glob inputs
         required: false
         type: string
         default: ""
       catalog-only:
-        description: Skip consumer dependencies and JavaScript source lint; requires validation-config
+        description: Skip installing consumer dependencies; requires validation-config, whose sourceLint still applies
         required: false
         type: boolean
         default: false
       catalog-adapter:
-        description: Registered catalog adapter ID
+        description: Registered catalog adapter ID; used only without validation-config
         required: false
         type: string
         default: formatjs-json
       catalog-path:
-        description: Path to the catalog JSON file
+        description: Path to the catalog JSON file; used only without validation-config
         required: false
         type: string
         default: locales/translation-template.json
       source-glob:
-        description: Glob of JavaScript/TypeScript sources to check against the catalog
+        description: Glob of JavaScript/TypeScript sources to check against the catalog; used only without validation-config
         required: false
         type: string
         default: "src/**/*.{js,jsx,ts,tsx}"
       catalog-role:
-        description: Catalog role, source or target
+        description: Catalog role, source or target; used only without validation-config
         required: false
         type: string
         default: source
       catalog-locale:
-        description: Locale represented by the catalog
+        description: Locale represented by the catalog; used only without validation-config
         required: false
         type: string
         default: en
       catalog-config:
-        description: Optional JSON config path passed to the selected adapter
+        description: Optional JSON config path passed to the selected adapter; used only without validation-config
         required: false
         type: string
         default: ""
@@ -139,13 +139,15 @@ jobs:
         run: npm run build
         working-directory: i18n-tooling-source/packages/i18n-pipeline
 
+      # validate-ci loads the plugin for configured source lint, so it is always built.
       - name: Build source-catalog ESLint plugin
-        if: inputs.catalog-only != true
         run: npm run build --workspace @redhat-cloud-services/eslint-plugin-i18n
         working-directory: i18n-tooling-source
 
+      # Without a validation config, the inputs describe the source lint; with one, validate-ci
+      # runs the config's sourceLint instead.
       - name: Lint consumer source message IDs
-        if: inputs.catalog-only != true
+        if: inputs.catalog-only != true && inputs.validation-config == ''
         env:
           I18N_CATALOG_PATH: ${{ inputs.catalog-path }}
           I18N_SOURCE_GLOB: ${{ inputs.source-glob }}
@@ -186,7 +188,7 @@ jobs:
           I18N_CATALOG_CONFIG: ${{ inputs.catalog-config }}
         run: |
           if [ -n "$VALIDATION_CONFIG" ]; then
-            i18n-pipeline validate-project --config "$VALIDATION_CONFIG"
+            i18n-pipeline validate-ci --mode error --config "$VALIDATION_CONFIG"
           else
             "$PACKAGE_MANAGER" run "$VALIDATION_COMMAND"
           fi
