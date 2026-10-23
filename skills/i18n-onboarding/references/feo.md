@@ -64,7 +64,7 @@ If English changes, re-run `feo extract`, resubmit the source through the normal
 
 When the Phrase track is also selected, the FEO catalog gets its own Phrase config, `i18n/phrase-tms-feo.json`, next to the app's. It follows [phrase.md](phrase.md#config-both-modes), with these differences:
 
-- `state.branch` is `i18n-tms-state-feo`. Every config in a repository needs its own state branch.
+- Set `"state": { "branch": "i18n-tms-state-feo" }` explicitly. Every config in a repository needs its own state branch, and the CLI default for every config is `i18n-tms-state`, which the app's config uses.
 - `sourceCatalog.path` is `deploy/locales/translation-template.json`, and `sourceCatalog.filename` is `<repository-name>.feo.en.json`.
 - `"frontendTemplate": { "path": "deploy/frontend.yaml", "generateSourceCatalog": true }` makes submission extract the source from the YAML and makes reconciliation add `spec.locales.<locale>` to the same PR as the locale file.
 - Use `locales` for a subset of the preset's repository locales and set `targetOutputPath` to `deploy/locales/{locale}.json`. Write a full `targetLocales` array only when FEO needs a different Phrase-to-repository mapping.
