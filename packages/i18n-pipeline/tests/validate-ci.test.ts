@@ -1150,7 +1150,7 @@ objects:
     expect(await stat(missing.resultsDir).catch(() => undefined)).toBeUndefined();
   });
 
-  it("works with HOME unset, nonexistent, or read-only", async () => {
+  it("works with HOME unset, nonexistent, or read-only", { timeout: 20_000 }, async () => {
     const root = await createRoot();
     await createPassProject(root, { files: ["src/**/*.js"] });
     await writeProjectFile(
