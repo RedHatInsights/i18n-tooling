@@ -599,6 +599,116 @@ describe("catalog project validation", () => {
     );
   });
 
+  it("fails strict generated catalogs whose generator warns on stderr despite exiting 0", async () => {
+    await createProject();
+    await writeFile(
+      join(projectRoot!, "warn-generator.mjs"),
+      `import { writeFileSync } from "node:fs";
+` +
+        `const [, , output] = process.argv;
+` +
+        `process.stderr.write("[@formatjs/cli] [WARN] [FormatJS CLI] Duplicate message id: a, but the defaultMessage is different.\\n");
+` +
+        `writeFileSync(output, "greeting = Bonjour {name}\\n");
+`,
+    );
+    const config = JSON.parse(await readFile(join(projectRoot!, "validation.json"), "utf8"));
+    config.generated[0]!.command = process.execPath;
+    config.generated[0]!.args = ["warn-generator.mjs", "{output}"];
+    config.generated[0]!.strictStderrWarnings = true;
+    await writeFile(join(projectRoot!, "validation.json"), JSON.stringify(config));
+    const errors: string[] = [];
+
+    const exitCode = await runCli(["validate-project", "--config", "validation.json"], {
+      cwd: projectRoot,
+      env: {},
+      stdout: () => undefined,
+      stderr: (message) => errors.push(message),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(errors[0]).toContain("strictStderrWarnings");
+    expect(errors[0]).toContain("Duplicate message id");
+  });
+
+  it("ignores generator stderr warnings without strictStderrWarnings", async () => {
+    await createProject();
+    await writeFile(
+      join(projectRoot!, "warn-generator.mjs"),
+      `import { writeFileSync } from "node:fs";
+` +
+        `const [, , output] = process.argv;
+` +
+        `process.stderr.write("[@formatjs/cli] [WARN] some warning\\n");
+` +
+        `writeFileSync(output, "greeting = Bonjour {name}\\n");
+`,
+    );
+    const config = JSON.parse(await readFile(join(projectRoot!, "validation.json"), "utf8"));
+    config.generated[0]!.command = process.execPath;
+    config.generated[0]!.args = ["warn-generator.mjs", "{output}"];
+    await writeFile(join(projectRoot!, "validation.json"), JSON.stringify(config));
+
+    const exitCode = await runCli(["validate-project", "--config", "validation.json"], {
+      cwd: projectRoot,
+      env: {},
+      stdout: () => undefined,
+      stderr: () => undefined,
+    });
+
+    expect(exitCode).toBe(0);
+  });
+
+  it("fails strict generated catalogs on ANSI-colored warnings", async () => {
+    await createProject();
+    await writeFile(
+      join(projectRoot!, "warn-generator.mjs"),
+      `import { writeFileSync } from "node:fs";\n` +
+        `const [, , output] = process.argv;\n` +
+        `process.stderr.write("[@formatjs/cli] [\\u001B[33mWARN\\u001B[39m] Duplicate message id: a\\n");\n` +
+        `writeFileSync(output, "greeting = Bonjour {name}\\n");\n`,
+    );
+    const config = JSON.parse(await readFile(join(projectRoot!, "validation.json"), "utf8"));
+    config.generated[0]!.command = process.execPath;
+    config.generated[0]!.args = ["warn-generator.mjs", "{output}"];
+    config.generated[0]!.strictStderrWarnings = true;
+    await writeFile(join(projectRoot!, "validation.json"), JSON.stringify(config));
+    const errors: string[] = [];
+
+    const exitCode = await runCli(["validate-project", "--config", "validation.json"], {
+      cwd: projectRoot,
+      env: {},
+      stdout: () => undefined,
+      stderr: (message) => errors.push(message),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(errors[0]).toContain("Duplicate message id");
+    expect(errors[0]).not.toContain("\\u001B");
+  });
+
+  it("rejects a non-boolean strictStderrWarnings value", () => {
+    expect(() =>
+      parseCatalogValidationConfig({
+        version: 1,
+        checks: [],
+        generated: [
+          {
+            path: "locales/en.json",
+            adapter: "formatjs-json",
+            role: "source",
+            locale: "en",
+            command: "npx",
+            args: ["formatjs", "extract", "{output}"],
+            strictStderrWarnings: "true",
+          },
+        ],
+      }),
+    ).toThrowError(
+      'Catalog validation config "generated[0]".strictStderrWarnings must be a boolean',
+    );
+  });
+
   it("reports generated catalogs that differ from the generator output", async () => {
     await createProject();
     await writeFile(join(projectRoot!, "locales/fr.messages"), "greeting = Salut {name}\n");

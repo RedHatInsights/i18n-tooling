@@ -78,6 +78,10 @@
           "updateCommand": {
             "type": "string",
             "minLength": 1
+          },
+          "strictStderrWarnings": {
+            "type": "boolean",
+            "description": "Fail when the generator prints [WARN] lines to stderr despite exiting 0. Extractors report duplicate message ids and non-literal defaultMessage values as warnings; both silently corrupt the catalog."
           }
         },
         "additionalProperties": false,
