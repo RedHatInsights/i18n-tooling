@@ -50,7 +50,7 @@ In every other case, print the entry in the final report and put "Register in i1
 Add these items to the consumer PR checklist:
 
 - Install the i18n GitHub App, [`hcc-i18n-tms-sync`](https://github.com/apps/hcc-i18n-tms-sync/installations/new), on this repository with `contents: write` and `pull-requests: write`. A `RedHatInsights` organization owner adds the repository to the existing installation; link the hub registration PR that requests it, if one was opened.
-- If a ruleset restricts branch creation, exclude each config's `state.branch` and `i18n/phrase-*`.
+- Resolve blocked or unverified consumer branch access found by the [branch-permission preflight](https://github.com/RedHatInsights/i18n-tooling/blob/main/docs/consumer-onboarding.md#check-phrase-branch-permissions-both-modes), including restrictions on direct state writes, not just branch creation. Name each affected state branch and ruleset; request only the narrow admin change needed, preserving default-branch protections.
 - Get the hub registration PR reviewed by the hub's Code Owners, and merge it after the consumer PR.
 
 ## Migrate from standalone

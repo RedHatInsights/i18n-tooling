@@ -23,7 +23,7 @@ The `i18n-onboarding` agent skill does the onboarding for you, in Claude Code, C
 3. **Run it.** In the repository to onboard, ask the agent to "onboard this repository to i18n tooling". It inspects the repository, shows a plan (tracks, Phrase mode, locales, branch, whether it pushes and opens a PR) and asks you to approve it. Choose adjust to change anything through a short wizard. It then adds catalog validation and the approved tracks.
 4. **Finish the Phrase setup.** In the default hub mode, the skill opens or drafts a registration PR in `RedHatInsights/i18n-hub`. Two admin steps remain:
    - A `RedHatInsights` organization owner installs the [`hcc-i18n-tms-sync`](https://github.com/apps/hcc-i18n-tms-sync) App on the repository.
-   - If the repository restricts branch creation with rulesets, an admin excludes `i18n-tms-state` and `i18n/phrase-*`.
+   - Check [Phrase branch permissions](docs/consumer-onboarding.md#check-phrase-branch-permissions-both-modes): automation must create each configured state branch and write its records directly. An admin resolves matching creation, PR, or required-check restrictions with narrow exclusions, keeping the default branch protected.
 
    After the registration merges, the hub runs on its schedule. A merged source change goes to Phrase. Each locale comes back as a draft PR once translated, assigned to the people who changed the source strings.
 
