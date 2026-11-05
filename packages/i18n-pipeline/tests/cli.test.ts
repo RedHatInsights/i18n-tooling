@@ -1809,6 +1809,9 @@ objects:
       const url = input instanceof Request ? input.url : String(input);
       const parsed = new URL(url);
       const method = (init?.method ?? "GET").toUpperCase();
+      if (parsed.pathname.endsWith("/git/ref/heads/i18n-tms-state")) {
+        return new Response(JSON.stringify({ object: { sha: stateRevision } }));
+      }
       if (parsed.pathname.endsWith("/contents/.github/i18n-state/batches")) {
         return new Response(JSON.stringify([{ type: "file", name: `${batchKey}.json` }]));
       }
@@ -2052,6 +2055,9 @@ objects:
       const parsed = new URL(url);
       const method = (init?.method ?? "GET").toUpperCase();
 
+      if (parsed.pathname.endsWith("/git/ref/heads/i18n-tms-state")) {
+        return new Response(JSON.stringify({ object: { sha: `head-${revisionNumber}` } }));
+      }
       if (parsed.pathname.endsWith("/contents/.github/i18n-state/batches")) {
         return new Response(
           JSON.stringify(

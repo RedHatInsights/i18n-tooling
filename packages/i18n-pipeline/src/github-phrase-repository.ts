@@ -289,7 +289,8 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
   /**
    * Compare-and-swap on the state file's blob SHA. Concurrent submit and reconcile runs commit
    * different files to the same branch, and GitHub then answers 409 because the branch head
-   * moved; retry only while the file itself still has the expected revision.
+   * moved. Retry only after observing a changed head and an unchanged file revision;
+   * policy/validation rejections retain GitHub's diagnostic instead of claiming a race.
    */
   private async writeState(
     record: PhraseBatchRecord,
@@ -302,6 +303,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       const current = await this.getFile(path, this.options.stateBranch);
       if ((current?.sha ?? undefined) !== expectedRevision)
         throw new PhraseBatchStateConflictError();
+      const head = await this.getReference(this.options.stateBranch);
       try {
         const result = await this.putFile(
           path,
@@ -312,10 +314,24 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
         );
         return result.sha;
       } catch (error) {
-        const conflict =
-          error instanceof GitHubRepositoryError && (error.status === 409 || error.status === 422);
-        if (!conflict) throw error;
-        if (attempt >= STATE_WRITE_ATTEMPTS) throw new PhraseBatchStateConflictError();
+        if (!(error instanceof GitHubRepositoryError) || ![409, 422].includes(error.status)) {
+          throw error;
+        }
+        // A failed diagnostic read must not replace the original write rejection.
+        const latest = await this.getFile(path, this.options.stateBranch).catch(() => {
+          throw error;
+        });
+        if ((latest?.sha ?? undefined) !== expectedRevision) {
+          throw new PhraseBatchStateConflictError(
+            `Phrase batch state changed concurrently: ${error.message}`,
+          );
+        }
+        if (error.status !== 409 || attempt >= STATE_WRITE_ATTEMPTS) throw error;
+        const latestHead = await this.getReference(this.options.stateBranch).catch(() => {
+          throw error;
+        });
+        // A stable head means this is a policy/validation rejection, not a branch race.
+        if (latestHead === head) throw error;
       }
     }
   }
@@ -548,13 +564,15 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       return { pullRequestUrl: value.html_url, adopted: false };
     } catch (error) {
       if (!(error instanceof GitHubRepositoryError) || error.status !== 422) throw error;
-      const raced = await this.findPullRequests(input.branch, input.baseRef);
+      const raced = await this.findPullRequests(input.branch, input.baseRef).catch(() => {
+        throw error;
+      });
       const open = raced.find(
         (pullRequest) => pullRequest.state === "open" && pullRequest.html_url,
       );
       if (!open?.html_url) {
         throw new GitHubRepositoryError(
-          "GitHub rejected draft PR creation (HTTP 422). Delivery requires draft pull request support; check the repository plan and branch diff. No ready-PR fallback is allowed.",
+          `GitHub rejected draft PR creation (HTTP 422). No ready-PR fallback is allowed. ${error.message}`,
           422,
         );
       }
@@ -695,7 +713,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       result.data.convertPullRequestToDraft.pullRequest.isDraft !== true
     ) {
       throw new GitHubRepositoryError(
-        "GitHub did not confirm draft conversion; invalid content was not written",
+        `GitHub did not confirm draft conversion; invalid content was not written${this.errorDetail(result)}`,
         500,
       );
     }
@@ -1037,20 +1055,8 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
           body: JSON.stringify({ sha: commitValue.sha, force: false }),
         };
     if (!createRef) await recheckOwnedCommitEligibility?.(parent);
-    try {
-      await this.request(refPath, refInit);
-    } catch (error) {
-      if (
-        error instanceof GitHubRepositoryError &&
-        (error.status === 409 || error.status === 422)
-      ) {
-        throw new GitHubRepositoryError(
-          `Phrase locale branch ${branch} changed while applying the update; refusing to overwrite reviewer changes`,
-          error.status,
-        );
-      }
-      throw error;
-    }
+    // Non-force ref updates still protect reviewer changes; rejection need not mean a race.
+    await this.request(refPath, refInit);
     return { sha: commitValue.sha };
   }
 
@@ -1084,7 +1090,10 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       });
     } catch (error) {
       if (!(error instanceof GitHubRepositoryError && error.status === 422)) throw error;
-      if (!(await this.getReference(branch))) throw error;
+      const raced = await this.getReference(branch).catch(() => {
+        throw error;
+      });
+      if (!raced) throw error;
     }
   }
 
@@ -1118,6 +1127,26 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     return value.filter(isRecord) as GitHubPullRequestResponse[];
   }
 
+  /** Only structured API diagnostics, never raw bodies, request headers or payloads. */
+  private errorDetail(value: unknown): string {
+    if (!isRecord(value)) return "";
+    const messages = [value.message];
+    if (Array.isArray(value.errors)) {
+      for (const error of value.errors) {
+        messages.push(isRecord(error) ? (error.message ?? error.code) : error);
+      }
+    }
+    const detail = messages
+      .filter(nonEmptyString)
+      .join("; ")
+      .replaceAll(this.options.token, "[REDACTED]")
+      .replaceAll(encodeURIComponent(this.options.token), "[REDACTED]")
+      .replace(/\bBearer\s+\S+/gi, "Bearer [REDACTED]")
+      .replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, " ")
+      .slice(0, 1000);
+    return detail ? `: ${detail}` : "";
+  }
+
   private async request(path: string, init: RequestInit, allowNotFound = false): Promise<Response> {
     let response: Response;
     try {
@@ -1138,8 +1167,10 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       throw new GitHubRepositoryError("Could not reach GitHub API", 0);
     }
     if (!response.ok && !(allowNotFound && response.status === 404)) {
+      const value: unknown = await response.json().catch(() => undefined);
+      const operation = `${init.method ?? "GET"} ${path.split("?")[0]}`;
       throw new GitHubRepositoryError(
-        `GitHub API returned HTTP ${response.status}${TOKEN_HINTS.get(response.status) ?? ""}`,
+        `GitHub API returned HTTP ${response.status}${TOKEN_HINTS.get(response.status) ?? ""}${this.errorDetail(value)} (${operation})`,
         response.status,
       );
     }

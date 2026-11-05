@@ -298,7 +298,7 @@ describe("GitHubPhraseRepository", () => {
     const harness = openPullRequestHarness("b".repeat(40), { discovery: "unsupported" });
     await expect(
       harness.repository.createOrUpdatePullRequestWithCommit({ ...pullRequest, draft: true }),
-    ).rejects.toThrow("requires draft pull request support");
+    ).rejects.toThrow("GitHub API returned HTTP 422: Validation Failed");
     expect(harness.currentContent).toBe("old");
     expect(
       harness.calls.filter(({ url, method }) => url.endsWith("/pulls") && method === "POST"),
@@ -469,7 +469,7 @@ describe("GitHubPhraseRepository", () => {
     expect(calls).toEqual(["https://api.github.com/repos/example/app/git/ref/heads/phrase-pilot"]);
   });
 
-  it("reports a rejected non-force locale ref update as a retryable conflict", async () => {
+  it("preserves a rejected non-force locale ref update without claiming a race", async () => {
     let refUpdate: Record<string, unknown> | undefined;
     const fetch: typeof globalThis.fetch = async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
@@ -524,7 +524,7 @@ describe("GitHubPhraseRepository", () => {
       name: "GitHubRepositoryError",
       status: 422,
       permanent: false,
-      message: expect.stringContaining("refusing to overwrite reviewer changes"),
+      message: expect.stringContaining("Reference update failed"),
     });
     expect(refUpdate).toEqual({ sha: "commit-new", force: false });
   });
@@ -652,6 +652,7 @@ describe("GitHubPhraseRepository", () => {
     const fetch: typeof globalThis.fetch = async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
       calls.push({ url, init });
+      if (url.includes("/git/ref/")) return response({ object: { sha: "branch-head" } });
       if (url.includes("/contents/.github/i18n-state/batches/")) {
         if (init?.method === "PUT") return response({ content: { sha: "blob-new" } });
         return response({
@@ -765,10 +766,235 @@ describe("GitHubPhraseRepository", () => {
     expect(batch?.revision).toBe("state-blob");
   });
 
+  it.each([409, 422])(
+    "preserves a rejected state write (HTTP %i) without a branch race",
+    async (status) => {
+      let puts = 0;
+      const repository = new GitHubPhraseRepository({
+        repository: "example/app",
+        token: "github-run-token",
+        stateBranch: "i18n-state",
+        fetch: async (input, init) => {
+          const url = String(input);
+          if (url.includes("/git/ref/")) return response({ object: { sha: "head" } });
+          if (init?.method === "PUT") {
+            puts += 1;
+            return response(
+              {
+                message:
+                  "Repository rule violations found: Changes must be made through a pull request.",
+              },
+              status,
+            );
+          }
+          return response({ type: "file", sha: "blob-old", encoding: "base64", content: "e30=" });
+        },
+      });
+
+      await expect(repository.updateBatch(batchRecord(), "blob-old")).rejects.toMatchObject({
+        name: "GitHubRepositoryError",
+        status,
+        message: expect.stringContaining("Changes must be made through a pull request"),
+      });
+      expect(puts).toBe(1);
+    },
+  );
+
+  it.each([404, 503])(
+    "preserves branch creation rejection when its recheck returns HTTP %i",
+    async (recheckStatus) => {
+      let rejected = false;
+      const repository = new GitHubPhraseRepository({
+        repository: "example/app",
+        token: "github-run-token",
+        stateBranch: "i18n-state",
+        fetch: async (input, init) => {
+          if (init?.method === "POST") {
+            rejected = true;
+            return response({ message: "Cannot create ref due to branch protections" }, 422);
+          }
+          if (rejected) return response({}, recheckStatus);
+          return String(input).endsWith("/phrase-pilot")
+            ? response({ object: { sha: "base-head" } })
+            : response({}, 404);
+        },
+      });
+
+      await expect(repository.createBatch(batchRecord())).rejects.toMatchObject({
+        name: "GitHubRepositoryError",
+        status: 422,
+        message: expect.stringContaining("Cannot create ref due to branch protections"),
+      });
+    },
+  );
+
+  it.each([409, 422])("recognizes a state-file race after HTTP %i", async (status) => {
+    let puts = 0;
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async (input, init) => {
+        if (String(input).includes("/git/ref/")) return response({ object: { sha: "head" } });
+        if (init?.method === "PUT") {
+          puts += 1;
+          return response({ message: "sha does not match" }, status);
+        }
+        return response({
+          type: "file",
+          sha: puts ? "other-blob" : "blob-old",
+          encoding: "base64",
+          content: "e30=",
+        });
+      },
+    });
+
+    await expect(repository.updateBatch(batchRecord(), "blob-old")).rejects.toBeInstanceOf(
+      PhraseBatchStateConflictError,
+    );
+    expect(puts).toBe(1);
+  });
+
+  it("keeps the state-write rejection when its diagnostic read fails", async () => {
+    let rejected = false;
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async (input, init) => {
+        if (String(input).includes("/git/ref/")) return response({ object: { sha: "head" } });
+        if (init?.method === "PUT") {
+          rejected = true;
+          return response({ message: "Repository rule violations found" }, 409);
+        }
+        return rejected
+          ? response({ message: "Secondary failure" }, 503)
+          : response({ type: "file", sha: "blob-old", encoding: "base64", content: "e30=" });
+      },
+    });
+
+    await expect(repository.updateBatch(batchRecord(), "blob-old")).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining("Repository rule violations found"),
+    });
+  });
+
+  it.each([
+    "not JSON",
+    JSON.stringify({ message: "x".repeat(2000), content: "do-not-log-raw-fields" }),
+  ])("bounds error details and tolerates malformed error bodies", async (body) => {
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async () => new Response(body, { status: 500 }),
+    });
+    const error = await repository.listBatchKeys().catch((error: unknown) => error);
+    expect(error).toMatchObject({
+      status: 500,
+      message: expect.stringContaining("GitHub API returned HTTP 500"),
+    });
+    expect((error as Error).message.length).toBeLessThan(1200);
+    expect((error as Error).message).not.toContain("do-not-log-raw-fields");
+    expect((error as Error).message).not.toContain("not JSON");
+  });
+
+  it("keeps the last GitHub rejection when moving state heads exhaust retries", async () => {
+    let puts = 0;
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async (input, init) => {
+        if (String(input).includes("/git/ref/"))
+          return response({ object: { sha: `head-${puts}` } });
+        if (init?.method === "PUT") {
+          puts += 1;
+          return response({ message: "is at abc but expected def" }, 409);
+        }
+        return response({ type: "file", sha: "blob-old", encoding: "base64", content: "e30=" });
+      },
+    });
+
+    await expect(repository.updateBatch(batchRecord(), "blob-old")).rejects.toMatchObject({
+      name: "GitHubRepositoryError",
+      status: 409,
+      message: expect.stringContaining("is at abc but expected def"),
+    });
+    expect(puts).toBe(3);
+  });
+
+  it.each([
+    {
+      message: "Validation Failed",
+      errors: [{ message: "Signed commits are required", code: "protected_branch" }],
+    },
+    { message: "GitHub rejected github-run-token and Bearer another-secret\n::error::injected" },
+  ])("reports only sanitized structured GitHub error details: %j", async (body) => {
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async () => response(body, 422),
+    });
+
+    const error = await repository.listBatchKeys().catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(GitHubRepositoryError);
+    const message = (error as Error).message;
+    if (body.message === "Validation Failed") {
+      expect(message).toContain("Signed commits are required");
+    } else {
+      expect(message).toContain("[REDACTED]");
+      expect(message).not.toContain("github-run-token");
+      expect(message).not.toContain("another-secret");
+      expect(message).not.toContain("\n");
+    }
+  });
+
+  it("keeps draft PR creation rejection when its adoption lookup fails", async () => {
+    let listings = 0;
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "github-run-token",
+      stateBranch: "i18n-state",
+      fetch: async (input, init) => {
+        const url = String(input);
+        if (url.includes("/pulls?")) {
+          listings += 1;
+          return listings === 1 ? response([]) : response({ message: "Secondary failure" }, 503);
+        }
+        if (init?.method === "POST")
+          return response({ message: "Pull request creation rejected" }, 422);
+        return response({ object: { sha: "branch-head" } });
+      },
+    });
+    await expect(
+      repository.createOrUpdatePullRequestWithCommit({
+        ...pullRequest,
+        draft: true,
+        expectedToolingCommitSha: "branch-head",
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("Pull request creation rejected"),
+    });
+    expect(listings).toBe(2);
+  });
+
+  it("retains GraphQL rejection details when draft conversion fails", async () => {
+    const harness = openPullRequestHarness("branch-head", {
+      draftResult: { errors: [{ message: "Resource not accessible by integration" }] },
+    });
+    await expect(
+      harness.repository.updateOpenPullRequest(harness.makeUpdate(undefined, { draft: true })),
+    ).rejects.toThrow("Resource not accessible by integration");
+  });
+
   it("retries a state write rejected only because the branch head moved", async () => {
     const record = batchRecord();
     let puts = 0;
-    const fetch: typeof globalThis.fetch = async (_input, init) => {
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      if (String(input).includes("/git/ref/")) return response({ object: { sha: `head-${puts}` } });
       if (init?.method === "PUT") {
         puts += 1;
         return puts === 1
@@ -801,7 +1027,9 @@ describe("GitHubPhraseRepository", () => {
       name: "GitHubRepositoryError",
       status: 401,
       permanent: false,
-      message: "GitHub API returned HTTP 401: the token is missing, expired or revoked",
+      message: expect.stringContaining(
+        "GitHub API returned HTTP 401: the token is missing, expired or revoked",
+      ),
     });
 
     const writes: string[] = [];
@@ -835,8 +1063,9 @@ describe("GitHubPhraseRepository", () => {
       name: "GitHubRepositoryError",
       status: 403,
       permanent: false,
-      message:
+      message: expect.stringContaining(
         "GitHub API returned HTTP 403: the token may not make this request; state and locale branches need contents: write, pull requests need pull-requests: write",
+      ),
     });
     expect(writes.at(-1)).toMatch(/\/pulls$/);
   });
