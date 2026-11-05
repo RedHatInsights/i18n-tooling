@@ -2917,7 +2917,7 @@ describe("PhraseWorkflow submission", () => {
     expect(branch).toBeDefined();
     expect(repository.commitCount(branch!)).toBe(1);
     expect(repository.pullRequests[0]?.title).toBe(
-      "i18n(fr): Phrase translation update for locales/translation-template.json",
+      "fix(fr): update Phrase translations for locales/translation-template.json",
     );
     repository.pullRequests[0] = {
       ...repository.pullRequests[0]!,
@@ -2939,7 +2939,7 @@ describe("PhraseWorkflow submission", () => {
     expect(repository.pullRequests).toHaveLength(1);
     expect(repository.pullRequests[0]?.branch).toBe(branch);
     expect(repository.pullRequests[0]?.title).toBe(
-      "i18n(fr): Phrase translation update for locales/translation-template.json",
+      "fix(fr): update Phrase translations for locales/translation-template.json",
     );
     expect(repository.commitCount(branch!)).toBe(2);
     expect(
@@ -4439,7 +4439,7 @@ describe("PhraseWorkflow submission", () => {
     phrase.jobStatus = "COMPLETED";
     await workflow.reconcile();
     expect(repository.pullRequests[0]?.title).toBe(
-      "i18n(zh-CN): Phrase translation update for deploy/old-frontend.yaml",
+      "fix(zh-CN): update Phrase translations for deploy/old-frontend.yaml",
     );
 
     await workflow.submit({ ...input, sourceCommit: "def456", config: movedConfig });
@@ -4448,7 +4448,7 @@ describe("PhraseWorkflow submission", () => {
 
     expect(repository.pullRequests).toHaveLength(1);
     expect(repository.pullRequests[0]?.title).toBe(
-      "i18n(zh-CN): Phrase translation update for deploy/new-frontend.yaml",
+      "fix(zh-CN): update Phrase translations for deploy/new-frontend.yaml",
     );
   });
 
@@ -4507,7 +4507,7 @@ describe("PhraseWorkflow submission", () => {
     expect(repository.pullRequests).toHaveLength(1);
     expect(repository.pullRequests[0]?.path).toBe("deploy/locales/zh-CN.json");
     expect(repository.pullRequests[0]?.title).toBe(
-      "i18n(zh-CN): Phrase translation update for deploy/frontend.yaml",
+      "fix(zh-CN): update Phrase translations for deploy/frontend.yaml",
     );
     expect(
       new TextDecoder().decode(repository.pullRequests[0]?.additionalFiles?.[0]?.content),
