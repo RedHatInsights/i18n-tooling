@@ -310,11 +310,7 @@ const rule: Rule.RuleModule = {
      * descriptor is still statically inspected.
      */
     function unwrapTypeScriptAssertion(node: ESTree.Node | undefined | null): ESTree.Node {
-      while (
-        node !== undefined &&
-        node !== null &&
-        isTypeScriptAssertion(node)
-      ) {
+      while (node !== undefined && node !== null && isTypeScriptAssertion(node)) {
         node = (node as unknown as { expression: ESTree.Node }).expression;
       }
       return node as ESTree.Node;

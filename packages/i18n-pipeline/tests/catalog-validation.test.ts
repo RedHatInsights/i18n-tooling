@@ -344,7 +344,10 @@ describe("catalog project validation", () => {
     const accepts = parseCatalogValidationConfig({
       version: 1,
       checks: [
-        { source: { path: "locales/en.json", adapter: "formatjs-json", locale: "en" }, targets: [] },
+        {
+          source: { path: "locales/en.json", adapter: "formatjs-json", locale: "en" },
+          targets: [],
+        },
       ],
       generated: [],
       sourceLint: {
@@ -361,7 +364,10 @@ describe("catalog project validation", () => {
       parseCatalogValidationConfig({
         version: 1,
         checks: [
-          { source: { path: "locales/en.json", adapter: "formatjs-json", locale: "en" }, targets: [] },
+          {
+            source: { path: "locales/en.json", adapter: "formatjs-json", locale: "en" },
+            targets: [],
+          },
         ],
         generated: [],
         sourceLint: { files: ["src/**/*.tsx"], ignores: ["!src/**/*.stories.*"] },

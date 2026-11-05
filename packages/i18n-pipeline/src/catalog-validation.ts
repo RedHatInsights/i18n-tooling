@@ -286,7 +286,9 @@ function parseSourceLintConfig(value: unknown): SourceLintConfig {
     ignores = sourceLint.ignores.map((value, index) => {
       const pattern = requiredString(value, `${label}.ignores[${index}]`);
       if (pattern.startsWith("!")) {
-        throw new TypeError(`${label}.ignores[${index}] must be a positive pattern; negations are not supported`);
+        throw new TypeError(
+          `${label}.ignores[${index}] must be a positive pattern; negations are not supported`,
+        );
       }
       return pattern;
     });

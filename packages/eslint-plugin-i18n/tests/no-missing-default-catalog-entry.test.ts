@@ -131,8 +131,6 @@ const valid = [
   },
 ];
 
-
-
 const invalid = [
   {
     code: "const titleMessages = { title: { id: 'example.missing', defaultMessage: 'Name' } } as const; intl.formatMessage(titleMessages.title);",
