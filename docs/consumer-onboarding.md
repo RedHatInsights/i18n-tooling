@@ -64,6 +64,32 @@ Map both `APP_*` names for App mode. Never use `secrets: inherit`.
 
 **Done when:** message-source files are included in the caller's PR path filters, and a source-only drift PR runs validation and fails.
 
+### Check Phrase branch permissions (both modes)
+
+Before the first submit or reconcile, inspect each config's resolved `state.branch` (default `i18n-tms-state`; FEO commonly uses `i18n-tms-state-feo`). This applies to hub and standalone automation, even when the branch does not exist yet. Submit creates the branch if missing, then writes batch records directly; later submit and reconcile runs update those records without a pull request.
+
+Run these read-only checks for each state branch, using the consumer repository, not the hub:
+
+```bash
+repo=RedHatInsights/your-repository # Replace with the consumer repository.
+state_branch=i18n-tms-state # Replace with the config's resolved state.branch.
+encoded_branch=$(jq -rn --arg branch "$state_branch" '$branch | @uri')
+gh api "repos/$repo/git/ref/heads/$encoded_branch"
+gh api "repos/$repo/rules/branches/$encoded_branch" \
+  --jq '.[] | {type, parameters, ruleset_id, ruleset_source}'
+gh api "repos/$repo/rulesets?includes_parents=true" --paginate
+```
+
+- A missing ref is expected before the first sync; still inspect its effective rules. Existing branches need the same check: successful creation does not prove that batch-file writes are allowed.
+- Inspect the matching repository and organization rulesets, their target patterns and bypass actors. Flag restrictions on creation or updates, required pull requests, and required status checks that prevent the automation's direct state writes. Verify access for the workflow's actual GitHub App or `GITHUB_TOKEN`, not the personal token used for inspection; an App bypass limited to pull requests does not permit direct writes.
+- Also inspect classic branch protection, including wildcard patterns in repository settings. For an existing branch, `gh api "repos/$repo/branches/$encoded_branch/protection"` reads its protection. A 403/404, missing bypass details, or inaccessible organization policy is unverified, not proof of unrestricted access; ask an administrator to confirm it.
+- Keep signing requirements unless separately proven incompatible. Do not disable default-branch protections or grant a repository-wide App bypass. If a matching ruleset blocks state writes, ask an administrator to exclude exactly `refs/heads/<state.branch>` from that ruleset, preserving its other settings. Check each configured state branch separately. Locale branches (`i18n/phrase-*`) also need creation and updates allowed, but their PRs must still satisfy the base branch's review and required checks.
+- Record the branch, matching policy and ruleset URL, actual automation actor, and any unverified access or required admin action in the onboarding PR checklist and final report. Inspection is read-only: obtain explicit approval before changing repository settings, then re-check effective rules after the approved fix.
+
+**Trap: state writes look like pipeline failures.** A creation restriction can produce `HTTP 422: Reference update failed` on `POST /git/refs`. An existing state branch subject to PR/check requirements can produce `HTTP 409: Repository rule violations found` on a batch-file `PUT /contents/...`. Inspect the reported GitHub rejection and effective rules; neither error alone proves a concurrency conflict, and retrying does not bypass policy.
+
+**Done when:** every configured state branch has a recorded creation/direct-write assessment for the actual automation actor, with unresolved policy or access blockers listed as admin follow-ups. The Phrase round trip is not operational until those blockers are resolved; do not probe permissions by creating a branch or running live Phrase operations during onboarding inspection.
+
 ## 6. Pilot Phrase from a feature branch
 
 - Run the pilot from its branch; nothing has to merge to the default branch first. GitHub starts `workflow_dispatch` and `schedule` only from workflows on the default branch, but a `push` runs the caller from the pushed branch. On the pilot branch, point the submit caller's `push.branches` at the pilot branch, give the reconcile caller the same `push` trigger in place of `schedule`, and mark both changes with `FIXME`.
@@ -97,7 +123,7 @@ After the pilot round trip, restore the triggers from the [example callers](../e
 
 ## Hub-owned Phrase automation
 
-Keep catalog validation and the Phrase config in the consumer repository. Install the hub's GitHub App, [`hcc-i18n-tms-sync`](https://github.com/apps/hcc-i18n-tms-sync/installations/new), on each target consumer during onboarding, then submit a reviewed registration to `i18n-hub`'s `consumers.json` with `phraseFile` (add `phraseProject` only for a project other than the shared `hcc-ui` one); follow the README of the `RedHatInsights/i18n-hub` repository (not public). Phrase credentials and the reconcile schedule live in the hub. Choose hub-owned or consumer-owned Phrase automation for a repository; never run both.
+Keep catalog validation and the Phrase config in the consumer repository. Install the hub's GitHub App, [`hcc-i18n-tms-sync`](https://github.com/apps/hcc-i18n-tms-sync/installations/new), on each target consumer during onboarding, then submit a reviewed registration to `i18n-hub`'s `consumers.json` with `phraseFile` (add `phraseProject` only for a project other than the shared `hcc-ui` one); follow the README of the `RedHatInsights/i18n-hub` repository (not public). Phrase credentials and the reconcile schedule live in the hub. Complete the [branch-permission preflight](#check-phrase-branch-permissions-both-modes) on the consumer before its first hub sync; registering in the hub does not bypass consumer branch rules. Choose hub-owned or consumer-owned Phrase automation for a repository; never run both.
 
 ## Rolling back
 
