@@ -1,5 +1,29 @@
 # Architecture
 
+`hcc-i18n` is the architecture and workflow initiative; this repository is its reusable implementation layer. It is named `i18n-tooling` because it may serve more than one frontend product: HCC is the first consumer, and the tooling should not make every future consumer pretend to be HCC.
+
+## Design rules
+
+- ICU MessageFormat is normative for every catalog adapter. Built-in adapters parse patterns with FormatJS's `@formatjs/icu-messageformat-parser`.
+- Initial built-ins target FormatJS descriptor/compiled JSON, and keyed ICU JSON for service errors.
+- Catalog-format adapters stay separate from TMS-provider adapters.
+- Teams add formats through installed Node packages with stable adapter IDs. A custom adapter may own text parsing/serialization and receives adapter-specific JSON options; GitHub `uses` references are never dynamic.
+- Canonical locale catalogs are repository-owned. The TMS is a translation workspace, never a runtime dependency.
+- Provider-specific Phrase, APC and webhook behavior belongs behind a future TMS-provider interface.
+- English `detail` is the fallback for backend errors; the English source catalog is the fallback for UI messages.
+- i18next, Lingui and Django PO conversion are future adapters.
+
+## Terminology
+
+- **Message ID** — stable identifier application code uses for the same translatable message across locales.
+- **Locale catalog** — repository-owned set of messages for one locale, keyed by message ID. Its file format is adapter-defined; it is not an ICU resource bundle.
+- **Source catalog** — canonical catalog of English source messages; also the fallback for missing or unavailable translations.
+- **Target catalog** — locale catalog holding translations of the source messages.
+- **ICU MessageFormat pattern** — syntax for message arguments, number/date formatting and plural/select logic. It describes how a message is formatted, not how locale data is stored.
+- **ICU resource bundle** — ICU's native locale data container and lookup/fallback model; distinct from our locale catalogs.
+- **ICU message catalog** — ICU's separate POSIX-style `ucat` API. Do not use this label for our locale catalogs.
+- **TMS (translation management system)** — workspace for translation work; not a runtime dependency or source of truth.
+
 ## Repository seams
 
 Consumer repositories learn a small interface:
