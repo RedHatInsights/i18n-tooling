@@ -439,7 +439,7 @@ describe("GitHubPhraseRepository", () => {
       ],
     });
     expect(commitBody).toMatchObject({
-      message: expect.any(String),
+      message: "fix: update Phrase translations for i18n/phrase-batch-fr",
       tree: "tree-new",
       parents: [baseCommitSha],
     });

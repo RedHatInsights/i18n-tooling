@@ -1015,7 +1015,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     const commitResponse = await this.request(`${this.repositoryPath}/git/commits`, {
       method: "POST",
       body: JSON.stringify({
-        message: `i18n: update Phrase translations for ${branch}`,
+        message: `fix: update Phrase translations for ${branch}`,
         tree: treeValue.sha,
         parents: [parent],
       }),

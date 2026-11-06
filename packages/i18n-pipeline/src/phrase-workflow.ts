@@ -3473,7 +3473,7 @@ export class PhraseWorkflow {
         };
         const sourcePath = sourceInputPath(record.config);
         // Resubmission can adopt a moved generated-source template path within this batch.
-        const title = `i18n(${target.repositoryLocale}): Phrase translation update for ${sourcePath}`;
+        const title = `fix(${target.repositoryLocale}): update Phrase translations for ${sourcePath}`;
         // Persist ownership before the ref update so an interrupted final save can still recover.
         const loadedLocale = structuredClone(
           record.locales[target.phraseLocale] ?? { phase: "exporting" as const },
