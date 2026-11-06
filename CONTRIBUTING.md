@@ -18,7 +18,14 @@ npm run test:coverage
 
 Plain `corepack enable` does not enable npm; enable its npm shim explicitly as above.
 
-When changing dependencies, run `npm install` to update `package-lock.json`. Run `npm run smoke:cli` and `npm run check:schemas` when changing CLI behavior or schemas. CI tests Node from `.nvmrc` and Node 24, checks packed installs with npm, Bun and pnpm, and runs coverage, Markdown, link, spelling, dependency, and GitHub Actions security checks.
+When changing dependencies, run `npm install` to update `package-lock.json`. Run `npm run smoke:cli` and `npm run check:schemas` when changing CLI behavior or schemas. CI tests Node from `.nvmrc` and Node 24 in separate typecheck, test and build jobs, checks source-built CLI behavior, schemas and reusable workflow behavior, checks packed installs with npm, Bun and pnpm, and runs coverage, Markdown, link, spelling, dependency, and GitHub Actions security checks.
+
+Build and run the CLI from source:
+
+```bash
+npm run build --workspace @redhat-cloud-services/i18n-pipeline
+node packages/i18n-pipeline/dist/cli.js version
+```
 
 Use `npm run format` to apply formatting.
 
