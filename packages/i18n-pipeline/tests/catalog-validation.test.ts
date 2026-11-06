@@ -340,6 +340,41 @@ describe("catalog project validation", () => {
     );
   });
 
+  it("parses sourceLint.ignores and rejects negated patterns", () => {
+    const accepts = parseCatalogValidationConfig({
+      version: 1,
+      checks: [
+        {
+          source: { path: "locales/en.json", adapter: "formatjs-json", locale: "en" },
+          targets: [],
+        },
+      ],
+      generated: [],
+      sourceLint: {
+        files: ["src/**/*.{ts,tsx}"],
+        ignores: ["src/**/*.stories.*", "src/__mocks__/**"],
+      },
+    });
+    expect(accepts.sourceLint).toEqual({
+      files: ["src/**/*.{ts,tsx}"],
+      ignores: ["src/**/*.stories.*", "src/__mocks__/**"],
+    });
+
+    expect(() =>
+      parseCatalogValidationConfig({
+        version: 1,
+        checks: [
+          {
+            source: { path: "locales/en.json", adapter: "formatjs-json", locale: "en" },
+            targets: [],
+          },
+        ],
+        generated: [],
+        sourceLint: { files: ["src/**/*.tsx"], ignores: ["!src/**/*.stories.*"] },
+      }),
+    ).toThrow(/must be a positive pattern/);
+  });
+
   it("rejects sourceLint paths outside the consumer root", () => {
     expect(() =>
       parseCatalogValidationConfig({

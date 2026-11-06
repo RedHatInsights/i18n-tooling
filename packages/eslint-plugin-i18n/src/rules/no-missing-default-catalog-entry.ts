@@ -118,6 +118,7 @@ const rule: Rule.RuleModule = {
     }
 
     function checkDescriptor(node: ESTree.Node, descriptor: ESTree.Node | undefined): void {
+      descriptor = descriptor === undefined ? undefined : unwrapTypeScriptAssertion(descriptor);
       if (descriptor?.type !== "ObjectExpression") {
         reportUninspectableDescriptor(descriptor ?? node);
         return;
@@ -163,6 +164,7 @@ const rule: Rule.RuleModule = {
     }
 
     function visitDescriptorTree(node: ESTree.Node, isRoot = false): void {
+      node = unwrapTypeScriptAssertion(node);
       if (node.type !== "ObjectExpression") {
         reportUninspectableDescriptor(node);
         return;
@@ -179,6 +181,27 @@ const rule: Rule.RuleModule = {
           objectProperty(node, "defaultMessage") ||
           !hasNestedDescriptors
         ) {
+          // A record that maps keys to message references (for example a
+          // Record<string, MessageDescriptor> lookup table) is not itself a
+          // descriptor: check each referenced descriptor instead of
+          // demanding an id on the record.
+          if (
+            !objectProperty(node, "id") &&
+            !objectProperty(node, "defaultMessage") &&
+            node.properties.length > 0 &&
+            node.properties.every(
+              (property) => property.type === "Property" && isMessageReference(property.value),
+            )
+          ) {
+            for (const property of node.properties) {
+              if (property.type === "Property") {
+                if (!checkMessageReference(property.value)) {
+                  reportUninspectableDescriptor(property.value);
+                }
+              }
+            }
+            return;
+          }
           checkDescriptor(node, node);
           return;
         }
@@ -193,7 +216,7 @@ const rule: Rule.RuleModule = {
       }
     }
 
-    function isCheckedMessageReference(node: ESTree.Node): boolean {
+    function checkMessageReference(node: ESTree.Node): boolean {
       if (!isMessageReference(node)) return false;
 
       let root = node;
@@ -211,10 +234,29 @@ const rule: Rule.RuleModule = {
 
         const definition = variable.defs.find((item) => item.type === "Variable");
         if (definition?.type === "Variable" && definition.parent.kind === "const") {
-          const initializer = definition.node.init;
+          const initializer = unwrapTypeScriptAssertion(definition.node.init);
           if (initializer?.type === "ObjectExpression") {
             visitDescriptorTree(initializer);
             return true;
+          }
+          if (initializer?.type === "MemberExpression") {
+            // A const alias of a (possibly computed) record lookup, such as
+            // `const message = LABELS[key];` — including an inline record
+            // literal indexed at runtime.
+            if (initializer.computed && staticString(initializer.property) === undefined) {
+              const object = unwrapTypeScriptAssertion(initializer.object);
+              if (object.type === "ObjectExpression") {
+                visitDescriptorTree(object);
+                return true;
+              }
+            }
+            return isCheckedMessageReference(initializer);
+          }
+          if (
+            initializer?.type === "ConditionalExpression" ||
+            initializer?.type === "LogicalExpression"
+          ) {
+            return isCheckedMessageReference(initializer);
           }
           if (initializer?.type === "CallExpression" && initializer.callee.type === "Identifier") {
             const descriptor = initializer.arguments[0];
@@ -238,6 +280,88 @@ const rule: Rule.RuleModule = {
 
         const importDefinition = variable.defs.find((item) => item.type === "ImportBinding");
         return Boolean(importDefinition);
+      }
+      return false;
+    }
+
+    function isCheckedMessageReference(node: ESTree.Node): boolean {
+      node = unwrapTypeScriptAssertion(node);
+      if (node.type === "ConditionalExpression") {
+        return (
+          isCheckedMessageReference(node.consequent) && isCheckedMessageReference(node.alternate)
+        );
+      }
+      if (node.type === "LogicalExpression") {
+        return isCheckedMessageReference(node.left) && isCheckedMessageReference(node.right);
+      }
+      if (
+        node.type === "MemberExpression" &&
+        node.computed &&
+        staticString(node.property) === undefined
+      ) {
+        return checkDynamicRecordLookup(node);
+      }
+      return checkMessageReference(node);
+    }
+
+    /**
+     * Strips TypeScript assertion wrappers (`as const`, `satisfies`, `!` and
+     * angle-bracket assertions) so the wrapped initializer, argument or
+     * descriptor is still statically inspected.
+     */
+    function unwrapTypeScriptAssertion(node: ESTree.Node | undefined | null): ESTree.Node {
+      while (node !== undefined && node !== null && isTypeScriptAssertion(node)) {
+        node = (node as unknown as { expression: ESTree.Node }).expression;
+      }
+      return node as ESTree.Node;
+    }
+
+    function isTypeScriptAssertion(node: ESTree.Node): boolean {
+      const type = (node as unknown as { type?: string }).type;
+      return (
+        type === "TSAsExpression" ||
+        type === "TSSatisfiesExpression" ||
+        type === "TSNonNullExpression" ||
+        type === "TSTypeAssertion"
+      );
+    }
+
+    function checkDynamicRecordLookup(node: ESTree.MemberExpression): boolean {
+      let root: ESTree.Node = node.object;
+      while (root.type === "MemberExpression") root = root.object;
+      if (root.type !== "Identifier") return false;
+
+      let scope: ReturnType<typeof context.sourceCode.getScope> | null =
+        context.sourceCode.getScope(node);
+      while (scope) {
+        const variable = scope.set.get(root.name);
+        if (!variable) {
+          scope = scope.upper;
+          continue;
+        }
+
+        const definition = variable.defs.find((item) => item.type === "Variable");
+        if (definition?.type === "Variable" && definition.parent.kind === "const") {
+          const initializer = unwrapTypeScriptAssertion(definition.node.init);
+          if (initializer?.type === "ObjectExpression") {
+            visitDescriptorTree(initializer);
+            return true;
+          }
+          if (
+            initializer?.type === "CallExpression" &&
+            initializer.callee.type === "Identifier" &&
+            initializer.callee.name === "defineMessages"
+          ) {
+            const descriptor = initializer.arguments[0];
+            if (!descriptor || descriptor.type === "SpreadElement") {
+              reportUninspectableDescriptor(descriptor ?? initializer);
+            } else {
+              visitDescriptorTree(descriptor, true);
+            }
+            return true;
+          }
+        }
+        return false;
       }
       return false;
     }

@@ -412,6 +412,64 @@ objects:
     });
   });
 
+  it("excludes sourceLint.ignores patterns from source lint", async () => {
+    const root = await createRoot();
+    await createPassProject(root, {
+      files: ["src/**/*.{js,jsx,ts,tsx}"],
+      ignores: ["src/**/*.test.*", "src/__mocks__/**"],
+    });
+    await writeProjectFile(
+      root,
+      "src/App.test.ts",
+      'formatMessage({ id: "missing", defaultMessage: "A readable sentence.", description: "Test message" });\n',
+    );
+    await writeProjectFile(
+      root,
+      "src/__mocks__/react-intl.js",
+      'formatMessage({ id: "also-missing", defaultMessage: "Another readable sentence." });\n',
+    );
+
+    const result = await runValidateCi(root, ["--mode", "error"]);
+
+    await expectResults(result, {
+      status: "pass",
+      errors: 0,
+      warnings: 0,
+      mode: "error",
+      config: "config",
+    });
+  });
+
+  it("resolves ternary message references through sourceLint.catalog", async () => {
+    const root = await createRoot();
+    await createPassProject(root, {
+      files: ["src/**/*.{js,jsx,ts,tsx}"],
+      catalog: "locales/en.json",
+    });
+    await writeProjectFile(
+      root,
+      "src/App.tsx",
+      [
+        "const messages = {",
+        "  a: { id: 'greeting', defaultMessage: 'Hello {name}.', description: 'Test message' },",
+        "};",
+        "const flag = true;",
+        "formatMessage(flag ? messages.a : messages.a);",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await runValidateCi(root, ["--mode", "error"]);
+
+    await expectResults(result, {
+      status: "pass",
+      errors: 0,
+      warnings: 0,
+      mode: "error",
+      config: "config",
+    });
+  });
+
   it("reports one error for an unparsable configured ICU message", async () => {
     const root = await createRoot();
     await createPassProject(root, { files: ["src/**/*.js"] });
