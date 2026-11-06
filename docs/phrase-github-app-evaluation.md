@@ -58,7 +58,7 @@ For the first POC, omit the webhook receiver and use two GitHub workflows:
 
 Submission requires a user's Platform API token; Phrase Service Accounts cannot create jobs. Use the built-in `GITHUB_TOKEN` for the PR. Add workflow concurrency so two reconciliations cannot create duplicate PRs.
 
-> **Correction (2026-10-15):** Phrase bot users [cannot create jobs or projects](https://support.phrase.com/hc/en-us/articles/29488404284316-Service-Accounts), so a Service Account cannot run submit. Submit uses a user's Platform API token; see [Phrase credentials](../README.md#phrase-tms-round-trip).
+> **Correction (2026-10-15):** Phrase bot users [cannot create jobs or projects](https://support.phrase.com/hc/en-us/articles/29488404284316-Service-Accounts), so a Service Account cannot run submit. Submit uses a user's Platform API token; see [Phrase credentials](phrase-tms.md#phrase-credentials).
 
 For a single-batch POC, keep state in a small bot-managed state file or dedicated state branch. Do not use Actions cache as the source of truth. A long-running submit-and-poll job is simpler only when the fake/sandbox translation completes within one job; it is unsuitable for human translation that may take days.
 

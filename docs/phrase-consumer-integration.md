@@ -2,7 +2,7 @@
 
 This example shows the consumer-owned boundary around the reusable Phrase workflows. It uses synthetic `fr` data and placeholders only; it does not call Phrase or GitHub. Replace the sample locale and paths to match each application. For hub-owned automation, follow the [hub route in consumer onboarding](consumer-onboarding.md#hub-owned-phrase-automation).
 
-For maintainer guidance on run schedules, Phrase job links, locale PRs, and outcomes, see [Where is my translation?](../README.md#where-is-my-translation).
+For maintainer guidance on run schedules, Phrase job links, locale PRs, and outcomes, see [Where is my translation?](phrase-operations.md#where-is-my-translation).
 
 ## Catalog handoff
 
@@ -52,8 +52,8 @@ The shared Phrase workflow does not run consumer aggregation scripts. Keep the a
 
    Map any App secret names the same way. Service Account reconciliation support remains unverified; never use those secrets for submit. Never use `secrets: inherit`.
 
-4. For App mode, add `APP_CLIENT_ID` and `APP_PRIVATE_KEY` as secrets in the same protected environment and map both names in the caller; GitHub secret names cannot start with `GITHUB_`. Consumer-owned callers use a consumer-owned App; hub callers use the hub App installed on each target consumer. See the [README's full guidance on authentication modes and permissions](../README.md#phrase-tms-round-trip).
-5. For central-hub repository targeting, pass `repository: owner/name`. The `base-ref` input is used only when `repository` targets another repository; same-repository runs check out the triggering commit. Cross-repository submit requires `base-ref`, while reconcile uses it when supplied and otherwise checks out the target repository's default branch. See the [Phrase workflow guidance](../README.md#phrase-tms-round-trip).
+4. For App mode, add `APP_CLIENT_ID` and `APP_PRIVATE_KEY` as secrets in the same protected environment and map both names in the caller; GitHub secret names cannot start with `GITHUB_`. Consumer-owned callers use a consumer-owned App; hub callers use the hub App installed on each target consumer. See the [GitHub authentication guidance](phrase-tms.md#github-authentication).
+5. For central-hub repository targeting, pass `repository: owner/name`. The `base-ref` input is used only when `repository` targets another repository; same-repository runs check out the triggering commit. Cross-repository submit requires `base-ref`, while reconcile uses it when supplied and otherwise checks out the target repository's default branch. See the [target repository guidance](phrase-tms.md#target-repository).
 
 Hub reconcile callers may pass `fallback-assignees` as a space- or comma-separated list of GitHub logins. New locale PRs first try users linked to commits that changed the batch source input since the previous matching batch; this hub-owned fallback list is used only when GitHub assigns none of those authors. Keep the list in the workflow call input rather than `phrase-tms.json`.
 
