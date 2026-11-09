@@ -45,7 +45,7 @@ After the preset and required source catalog path and filename, add only fields 
 
 A preset config needs an `i18n-pipeline` build and a pinned validation workflow that know presets. If `i18n-pipeline tms config --help` fails, rebuild the CLI from current `i18n-tooling` main, and pin the locale validation caller to an `i18n-tooling` commit that has `tms config`. `catalog-validation.json` can use `tmsConfig` to derive target checks; do not list them again.
 
-For every config, run the read-only [branch-permission preflight](https://github.com/RedHatInsights/i18n-tooling/blob/main/docs/consumer-onboarding.md#check-phrase-branch-permissions-both-modes), including existing state branches. Put creation/direct-write blockers and unverified policies in the plan and admin checklist before the first sync; this applies in both modes and is separate from checking for conflicting batch records below.
+For every config, run the read-only [branch-permission preflight](https://github.com/RedHatInsights/i18n-tooling/blob/main/docs/consumer-onboarding.md#check-phrase-branch-permissions-both-modes), including existing state branches and the locale branch namespace (`i18n/phrase-*`). Assess locale branch creation and direct updates separately from state writes; a state-branch exclusion does not cover locale branches. Put creation/direct-write blockers and unverified policies in the plan and admin checklist before the first sync; this applies in both modes and is separate from checking for conflicting batch records below.
 
 Check each new config's state branch (default `i18n-tms-state`) with `git ls-remote --heads origin <branch>`. When it exists, list its records with the phase, project and source filename of each:
 
