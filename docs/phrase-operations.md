@@ -47,7 +47,17 @@ Batches live on the state branch under `.github/i18n-state/batches/`; the GitHub
 
 ### Superseded batches
 
-When newer source is submitted, the older batch is superseded. Its locale PR closes automatically once the replacement carries the same translations for unchanged English: at the replacement's head while it is open, as merged once it merges. A replacement closed without merging carries nothing. An old PR with reviewer commits stays open with a notice. Old Phrase jobs are never cancelled automatically, since that would discard translator work; cancel stale jobs in Phrase yourself. Resubmitting superseded source that has become current again revives the existing batch instead of creating a job.
+When newer source is submitted, the older batch is superseded. Its locale PR closes automatically once the replacement carries the same translations for unchanged English: at the replacement's head while it is open, as merged once it merges. A replacement closed without merging carries nothing. An old PR with reviewer commits stays open with a notice. Resubmitting superseded source that has become current again revives the existing batch instead of creating a job.
+
+### Cancelling stale Phrase jobs
+
+The tooling never cancels Phrase jobs, since that would discard translator work. Cancel stale jobs in Phrase yourself, in this order:
+
+1. Ask translators to confirm the segments they have finished. Confirmed segments are written to translation memory and pre-fill the replacement batch's jobs; unconfirmed edits are lost with the job.
+2. Wait until a reconcile run shows the old batch as `superseded`, in its run summary or its batch record. Reconcile supersedes a batch once the source on the PR base ref no longer matches what the batch submitted.
+3. Cancel the old batch's jobs. A `superseded` batch is never reconciled again, so its state does not change.
+
+Cancelling a job of a batch that is still active fails its locale. Reconcile records the locale as `failed` and reports it in that run, which exits non-zero; later runs do not report it again. A locale with an open locale PR is reported as failed on every run while the PR stays open, and its PR is no longer refreshed. Once the batch is superseded, nothing more is reported. If the source has not changed, the locale stays failed until `tms submit --retry-failed` creates a new job for it.
 
 ### Retrying a failed batch
 
