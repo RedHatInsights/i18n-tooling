@@ -78,6 +78,7 @@ Run the checks that change files (`D3`, `G1`, `M3`) in a scratch clone of the br
 - **M1. Mechanical fixes change no wording.** In the mechanical-fix commit, each change is ICU syntax or a misspelled `description` key renamed with its text unchanged: `git show <commit> --word-diff`.
 - **M2. AI-drafted descriptions are labelled.** They sit in their own commit, whose message says they are AI-drafted and need human review before they reach Phrase.
 - **M3. Changed English is named.** A catalog catch-up commit names every message whose shipped English changes. Without a catch-up, show it was not needed: run the extractor on `<default>`'s sources in the scratch clone and `cmp` the output with `<default>`'s catalog.
+- **M4. Sentence-fragment plurals reported.** Every `text-outside-branches` warning from the final-tree `validate-ci` run is listed in the PR description as a wording finding, with the note that fixing it before the first Phrase submission avoids invalidating translations. None is fixed in the onboarding change: no `defaultMessage` in `git diff <default>...HEAD` moves words into plural or select branches.
 
 ## PR description
 
