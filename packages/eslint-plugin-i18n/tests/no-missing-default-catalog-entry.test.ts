@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { RuleTester } from "eslint";
+import tseslint from "typescript-eslint";
 import { describe, it } from "vitest";
 import rule from "../src/rules/no-missing-default-catalog-entry.js";
 
@@ -76,9 +77,91 @@ const valid = [
     code: '<Intl.FormattedMessage id="example.title" />;',
     options: [{ catalog }],
   },
+  {
+    code: "const messages = defineMessages({ a: { id: 'example.title' }, b: { id: 'example.count' } }); intl.formatMessage(flag ? messages.a : messages.b);",
+    options: [{ catalog }],
+  },
+  {
+    code: "const messages = defineMessages({ a: { id: 'example.title' }, b: { id: 'example.count' } }); <FormattedMessage {...(flag ? messages.a : messages.b)} />;",
+    options: [{ catalog }],
+  },
+  {
+    code: "const messages = defineMessages({ a: { id: 'example.title' }, b: { id: 'example.count' } }); intl.formatMessage(flag ? (other ? messages.a : messages.b) : messages.a);",
+    options: [{ catalog }],
+  },
+  {
+    code: "import { messages } from './messages'; intl.formatMessage(flag ? messages.a : messages.b);",
+    options: [{ catalog }],
+  },
+  {
+    code: "const messages = defineMessages({ title: { id: 'example.title' } }); const HELPERS = { error: messages.title, warn: messages.title }; intl.formatMessage(HELPERS['error']);",
+    options: [{ catalog }],
+  },
+  {
+    code: "const messages = defineMessages({ title: { id: 'example.title' }, count: { id: 'example.count' } }); const HELPERS = { error: messages.title, warn: messages.count }; intl.formatMessage(HELPERS[getResult()]);",
+    options: [{ catalog }],
+  },
+  {
+    code: "const messages = defineMessages({ title: { id: 'example.title' } }); const HELPERS = { error: messages.title }; intl.formatMessage(HELPERS.error);",
+    options: [{ catalog }],
+  },
+  {
+    code: "const titleMessages = { title: { id: 'example.title', defaultMessage: 'Name' } } as const; intl.formatMessage(titleMessages.title);",
+    options: [{ catalog }],
+  },
+  {
+    code: "const LABELS = { a: { id: 'example.title' }, b: { id: 'example.count' } } satisfies Record<string, object>; intl.formatMessage(flag ? LABELS.a : LABELS.b);",
+    options: [{ catalog }],
+  },
+  {
+    code: "const messages = defineMessages({ title: { id: 'example.title' } }); const LABELS = { a: messages.title, b: messages.title }; const label = flag ? LABELS[getStatus()] : messages.title; intl.formatMessage(label);",
+    options: [{ catalog }],
+  },
+  {
+    code: "const messages = defineMessages({ title: { id: 'example.title' } }); const message = { 'export-custom': messages.title, tags: messages.title }[stage]; intl.formatMessage(message);",
+    options: [{ catalog }],
+  },
+  {
+    code: "const messages = defineMessages({ title: { id: 'example.title' } }); const displayNames = { high: messages.title }; const label = displayNames[severity] ?? messages.title; intl.formatMessage(label);",
+    options: [{ catalog }],
+  },
+  {
+    code: "const messages = defineMessages({ title: { id: 'example.title' }, count: { id: 'example.count' } }); const message = { custom: messages.title, tags: messages.count }[stage]; intl.formatMessage(message);",
+    options: [{ catalog }],
+  },
 ];
 
 const invalid = [
+  {
+    code: "const titleMessages = { title: { id: 'example.missing', defaultMessage: 'Name' } } as const; intl.formatMessage(titleMessages.title);",
+    options: [{ catalog }],
+    errors: [{ messageId: "missingEntry" }],
+  },
+  {
+    code: "const messages = defineMessages({ title: { id: 'example.title' } }); const message = { custom: getDescriptor(), tags: messages.title }[stage]; intl.formatMessage(message);",
+    options: [{ catalog }],
+    errors: [{ messageId: "missingId" }],
+  },
+  {
+    code: "const messages = defineMessages({ a: { id: 'example.title' }, b: { id: 'example.missing' } }); intl.formatMessage(flag ? messages.a : messages.b);",
+    options: [{ catalog }],
+    errors: [{ messageId: "missingEntry" }],
+  },
+  {
+    code: "const messages = defineMessages({ a: { id: 'example.title' }, b: { id: 'example.count' } }); intl.formatMessage(flag ? messages.a : getDescriptor());",
+    options: [{ catalog }],
+    errors: [{ messageId: "uninspectableDescriptor" }],
+  },
+  {
+    code: "const messages = defineMessages({ title: { id: 'example.missing' } }); const HELPERS = { error: messages.title }; intl.formatMessage(HELPERS[getResult()]);",
+    options: [{ catalog }],
+    errors: [{ messageId: "missingEntry" }],
+  },
+  {
+    code: "const HELPERS = { error: getDescriptor() }; intl.formatMessage(HELPERS[getResult()]);",
+    options: [{ catalog }],
+    errors: [{ messageId: "missingId" }],
+  },
   {
     code: "formatMessage({ id: 'example.missing' });",
     options: [{ catalog }],
@@ -230,6 +313,7 @@ describe("no-missing-default-catalog-entry", () => {
   it("checks supported FormatJS call forms", () => {
     const tester = new RuleTester({
       languageOptions: {
+        parser: tseslint.parser,
         ecmaVersion: 2022,
         sourceType: "module",
         parserOptions: { ecmaFeatures: { jsx: true } },
