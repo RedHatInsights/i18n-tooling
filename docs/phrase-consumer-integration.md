@@ -17,7 +17,7 @@ The checked-in example files:
 
 - [Phrase config](../examples/phrase-consumer/.github/i18n/phrase-tms.json)
 - [Catalog validation config](../examples/phrase-consumer/.github/i18n/catalog-validation.json)
-- [Submit caller: on merge, or by hand](../examples/phrase-consumer/.github/workflows/phrase-submit.yml)
+- [Submit caller: on merge, scheduled, or by hand](../examples/phrase-consumer/.github/workflows/phrase-submit.yml)
 - [Reconcile caller: scheduled, or by hand](../examples/phrase-consumer/.github/workflows/phrase-reconcile.yml)
 - [Locale PR validation caller](../examples/phrase-consumer/.github/workflows/locale-validation.yml)
 - [Locale aggregation script](../examples/phrase-consumer/scripts/assemble-locales.mjs)

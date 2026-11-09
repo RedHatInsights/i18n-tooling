@@ -17,7 +17,7 @@ Submit runs when a merge changes the configured source paths, or when the submit
 | `failed` | A pipeline step failed. Read the job log and fix the Phrase job or config, then [retry](#retrying-a-failed-batch). `No Phrase job was created for this batch; voided after 15 minutes` means dispatch submit again. |
 | `invalid-translation` | The locale PR was delivered with translation errors. Fix the translation in Phrase and keep the final jobs `COMPLETED`; the next run updates the same PR. |
 | `pr-created` | Review the draft locale PR and its 🌐 Translation check comment. |
-| `superseded` | Newer source was submitted; follow the newer batch. See [superseded PRs](#superseded-batches). |
+| `superseded` | Delivery stopped because the batch's Frontend template or committed FEO catalog no longer matches its source, or an earlier tooling release replaced it with newer source. Follow the newer batch. See [superseded PRs](#superseded-batches). |
 
 ## Locale pull requests
 
@@ -37,11 +37,21 @@ Batches live on the state branch under `.github/i18n-state/batches/`; the GitHub
 
 ### Serialized submissions
 
-Only one Phrase batch may be in flight per repository, source catalog path and registered base branch. Before creating a different batch, submit refreshes the existing jobs in Phrase. Every configured locale's final workflow step must be `COMPLETED`; a tooling `completed` phase or an earlier workflow step is not sufficient. Open locale PRs do not hold this gate.
+Only one Phrase batch may be in flight per repository, source catalog path and registered base branch. Each scope has a **submission reservation** naming its latest batch. Before creating a different batch, submit refreshes that batch's jobs in Phrase. Every configured locale's final workflow step must be `COMPLETED`; a tooling `completed` phase or an earlier workflow step is not sufficient. Open locale PRs do not hold the reservation.
 
-While work is incomplete, submit reports **deferred**, links the existing jobs and creates no replacement jobs. Continue running reconcile. Changes accumulate on the base branch; the next sync after completion picks its latest snapshot, not intermediate commits. The reusable submit workflow checks out the latest configured base and pins its HEAD for the CLI. Standalone CLI/API callers must likewise supply the latest base snapshot and matching source bytes.
+While work is incomplete, submit reports **deferred**, names the source commit it did not submit, links the blocking final-step jobs and creates no replacement jobs. Continue running reconcile. Changes accumulate on the base branch; the next sync after completion picks its latest snapshot, not intermediate commits. The reusable submit workflow checks out the latest configured base and pins its HEAD for the CLI. Standalone CLI/API callers must likewise supply the latest base snapshot and matching source bytes.
 
-The gate is enforced in tooling, not hub queue state. Atomic reservations live under `<state.directory>/submissions/<scope-digest>.json`; concurrent submissions with different identities cannot both claim the same scope. Reservations never expire. A lookup failure or an ambiguous job creation fails closed. If a crash left a reservation without a batch record, rerun the reserved source/settings to finish recording it before submitting newer source. Do not delete the reservation to bypass uncertain work.
+| Deferral | Cause | Exit | Next step |
+| --- | --- | --- | --- |
+| in progress | A final-step job is not `COMPLETED` yet, or job creation is still being confirmed. | 0 | None; a later sync submits the latest source. |
+| lookup failed | Phrase status could not be read. | 1 | None if transient; a later sync checks again. A lookup failure never releases the reservation. |
+| recovery required | A final-step job failed or was cancelled, a stored job no longer verifies (for example, it was moved to the recycle bin), or a job-create outcome is unknown with saved jobs. | 1 | See [recovering a blocked scope](#recovering-a-blocked-scope). |
+
+The reservation is enforced in tooling, not hub queue state. It lives under `<state.directory>/submissions/<scope-digest>.json` and is written with a compare-and-swap after the new batch record exists and before any Phrase job is created, so it always names a readable batch. Of two concurrent submissions with different identities, the loser voids its own job-less record and reports deferred. Reservations never expire. A batch that failed before Phrase created any job does not block. Before a scope's first reservation, the newest legacy batch that is not `completed`, `superseded` or job-less stands in for it.
+
+#### Recovering a blocked scope
+
+Run `tms submit --retry-failed` (workflow input `retry-failed: true`) against the latest base. When every blocking locale is either `COMPLETED` or failed and none is still in progress, this explicitly releases the failed batch and submits the latest source as a new batch. Fix or cancel the failing jobs in Phrase first, and confirm translator work has been saved. For an unknown outcome with saved jobs, inspect Phrase and bind or void the batch as described under [missing or ambiguous Phrase jobs](#missing-or-ambiguous-phrase-jobs). Do not delete the reservation to bypass uncertain work.
 
 Completed translations remain deliverable after base English advances. New locale branches use the submitted commit when the current source differs; they still target the registered base branch. FEO YAML is generated against that immutable snapshot. Normal merge conflicts, draft validation and reviewer-edit protections remain consumer-owned safeguards.
 
@@ -57,15 +67,15 @@ Completed translations remain deliverable after base English advances. New local
 
 ### Superseded batches
 
-Base-branch advancement alone no longer supersedes a batch. Legacy superseded batches retain their existing cleanup policy: a locale PR closes automatically once the replacement carries the same translations for unchanged English: at the replacement's head while it is open, as merged once it merges. A replacement closed without merging carries nothing. An old PR with reviewer commits stays open with a notice. Resubmitting superseded source that has become current again revives the existing batch instead of creating a job.
+A batch for an earlier source stays `ready` while its locale PRs are open; base-branch advancement does not supersede it. When a newer batch opens its locale PR, the earlier batch's open PR for that locale closes automatically once the replacement carries the same translations for unchanged English: at the replacement's head while it is open, as merged once it merges. The same applies to `superseded` batches. A replacement closed without merging carries nothing. An old PR with reviewer commits stays open with a notice. Resubmitting superseded source that has become current again revives the existing batch instead of creating a job.
 
 ### Cancelling stale Phrase jobs
 
-The tooling never cancels Phrase jobs or bypasses them because newer source exists. Finish the active work instead. If a job is deliberately cancelled or abandoned, it continues blocking newer submissions; use explicit recovery of the recorded source with `tms submit --retry-failed` after addressing the failure. Confirm translator work has been saved before taking that action. Open PRs remain protected and are not automatically discarded.
+The tooling never cancels Phrase jobs or bypasses them because newer source exists. Finish the active work instead. A deliberately cancelled or abandoned final job keeps blocking newer submissions until you [recover the scope](#recovering-a-blocked-scope) explicitly. Open PRs remain protected and are not automatically discarded.
 
 ### Retrying a failed batch
 
-A `failed` batch blocks resubmission of the same source. After fixing the Phrase job or import failure, run `tms submit --retry-failed` (workflow input `retry-failed: true`) to create a new attempt.
+A `failed` batch blocks resubmission of the same source. After fixing the Phrase job or import failure, run `tms submit --retry-failed` (workflow input `retry-failed: true`) to create a new attempt. When the base has newer source, the same flag submits that source instead; see [recovering a blocked scope](#recovering-a-blocked-scope).
 
 - For a `ready` or `completed` batch with failed locales, the retry includes only those locales and carries successful locale PRs forward. A fully successful batch stays idempotent.
 - A locale with an open draft PR counts as delivered, even with validation findings. Fix its existing Phrase job; reconcile re-exports and re-validates it in place without a new job.
