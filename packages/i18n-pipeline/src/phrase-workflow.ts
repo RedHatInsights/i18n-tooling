@@ -2246,7 +2246,8 @@ export class PhraseWorkflow {
       replacementRecord,
       [...context.storedBatches.values()].map(({ record }) => record),
     )
-      .filter((record) => record.phase === "superseded")
+      // Submissions are serialized, so an earlier source's batch stays ready instead of being
+      // superseded; its open locale PR is still replaced by the newer batch's PR.
       .map((record) => context.storedBatches.get(record.key))
       .filter((stored): stored is StoredPhraseBatch => stored !== undefined)
       .filter((stored) => {

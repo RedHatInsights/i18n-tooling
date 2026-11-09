@@ -7418,6 +7418,26 @@ describe("superseded locale pull requests", () => {
     expect(savedOld?.record.phase).toBe("superseded");
   });
 
+  it("replaces the open PR of an earlier, still-ready batch once serialized source advances", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const old = await seedSupersededBatchFixture(scenario, {
+      key: "e".repeat(64),
+      phase: "ready",
+      pullRequestUrl: "https://github.com/example/app/pull/23",
+      createdAt: "2026-10-20T10:00:00.000Z",
+    });
+
+    await scenario.workflow.reconcile();
+
+    expect(scenario.repository.closePullRequestCalls).toEqual([
+      "https://github.com/example/app/pull/23",
+    ]);
+    expect((await scenario.state.readBatch(old.key))?.record.locales.fr).toMatchObject({
+      pullRequestFinalized: true,
+      pullRequestSupersededNoticePosted: true,
+    });
+  });
+
   it("leaves a reviewer-owned superseded PR open and saves a one-time notice flag", async () => {
     const scenario = await makeSupersededPullRequestScenario();
     const old = await seedSupersededBatchFixture(scenario, {
