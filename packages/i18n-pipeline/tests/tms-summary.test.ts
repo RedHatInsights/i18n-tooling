@@ -70,6 +70,41 @@ function phraseBatch(overrides: Partial<PhraseBatchRecord> = {}): PhraseBatchRec
 }
 
 describe("TMS result lines", () => {
+  it("explains deferral with the deferred commit, blocking job links and latest-source pickup", () => {
+    const batch = phraseBatch();
+    const summary = formatTmsSubmitSummary(context, {
+      batch,
+      createdThisRun: false,
+      deferred: {
+        kind: "in-progress",
+        reason: "Final-step Phrase jobs of batch 6c9099ac7718 are not complete for fr",
+        sourceCommit: "feedface0000",
+        blockingJobs: [{ uid: "job-fr", targetLang: "fr", workflowLevel: 1, status: "NEW" }],
+      },
+    });
+    expect(summary).toContain("> [!NOTE]");
+    expect(summary).toContain("**⏸️ Submission deferred.** Phrase submission of feedfac deferred");
+    expect(summary).toContain("latest base-branch source is submitted at the first sync after");
+    expect(summary).toContain("https://us.cloud.memsource.com/web/job/job-fr/translate");
+    expect(summary).not.toContain("job-ja");
+    expect(summary).toContain("| ⏸️ deferred |");
+    expect(summary).not.toContain("no source change");
+  });
+
+  it("flags deferrals that need explicit recovery", () => {
+    const summary = formatTmsSubmitSummary(context, {
+      batch: phraseBatch(),
+      createdThisRun: false,
+      deferred: {
+        kind: "recovery-required",
+        reason: "Phrase jobs of batch 6c9099ac7718 failed (fr: CANCELLED)",
+        sourceCommit: "feedface0000",
+        blockingJobs: [],
+      },
+    });
+    expect(summary).toContain("> [!CAUTION]");
+    expect(summary).toContain("Explicit recovery is required");
+  });
   it("prints the invalid translation next step and known links", () => {
     expect(
       formatTmsResultLine(
@@ -254,7 +289,7 @@ describe("TMS reconcile summary", () => {
 
 describe("TMS submit summary", () => {
   it("renders a newly submitted batch", () => {
-    expect(formatTmsSubmitSummary(context, phraseBatch(), true))
+    expect(formatTmsSubmitSummary(context, { batch: phraseBatch(), createdThisRun: true }))
       .toBe(`## 🌐 Phrase submit · \`i18n-hub-test-consumer\` · \`locales/translation-template.json\`
 
 | Batch | Result | Source | Jobs | Locales | |
@@ -263,22 +298,21 @@ describe("TMS submit summary", () => {
   });
 
   it("marks an existing unchanged batch", () => {
-    expect(formatTmsSubmitSummary(context, phraseBatch(), false)).toContain(
-      "| `6c9099ac7718` | ↩️ no source change | `cb54f58` | 4 | fr, ja, ko, zh-CN |",
-    );
+    expect(
+      formatTmsSubmitSummary(context, { batch: phraseBatch(), createdThisRun: false }),
+    ).toContain("| `6c9099ac7718` | ↩️ no source change | `cb54f58` | 4 | fr, ja, ko, zh-CN |");
   });
 
   it("places failed locales and import warnings in an alert above the table", () => {
-    const summary = formatTmsSubmitSummary(
-      context,
-      phraseBatch({
+    const summary = formatTmsSubmitSummary(context, {
+      batch: phraseBatch({
         phase: "failed",
         warningCount: 1,
         failureReason: "Phrase import failed for job job-fr",
         locales: { fr: { phase: "failed", failureReason: "Phrase import failed for job job-fr" } },
       }),
-      true,
-    );
+      createdThisRun: true,
+    });
 
     expect(summary).toContain("> [!CAUTION]");
     expect(summary).toContain(

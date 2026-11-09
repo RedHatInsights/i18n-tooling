@@ -6,7 +6,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 import { isCliEntryPoint, runCli } from "../src/cli.js";
-import { PhraseWorkflow, type PhraseReconcileResult } from "../src/phrase-workflow.js";
+import {
+  PhraseWorkflow,
+  type PhraseBatchRecord,
+  type PhraseReconcileResult,
+} from "../src/phrase-workflow.js";
 
 let projectRoot: string | undefined;
 let outsideRoot: string | undefined;
@@ -1270,6 +1274,13 @@ objects:
           { status: 200 },
         );
       }
+      if (url.includes("/submissions/")) {
+        return method === "GET"
+          ? new Response("", { status: 404 })
+          : new Response(JSON.stringify({ content: { sha: "claim-sha" } }));
+      }
+      if (url.endsWith("/contents/.github/i18n-state/batches?ref=i18n-tms-state"))
+        return new Response("[]");
       if (url.includes("/contents/.github/i18n-state/batches/")) {
         if (method === "GET") {
           if (!stateRevision) return new Response("", { status: 404 });
@@ -1367,6 +1378,73 @@ objects:
     expect(errors).toEqual([]);
   });
 
+  it.each([
+    ["in-progress", 0],
+    ["recovery-required", 1],
+    ["lookup-failed", 1],
+  ] as const)("reports a %s deferral in output, summary and exit code", async (kind, expected) => {
+    await prepareReconcileProject();
+    const summaryPath = join(projectRoot!, "step-summary.md");
+    await writeFile(summaryPath, "", "utf8");
+    const batch = {
+      schema: 1,
+      key: "b".repeat(64),
+      phase: "ready",
+      repository: "example/app",
+      baseRef: "main",
+      sourceCommit: "1111111aaaa",
+      sourceDigest: "c".repeat(64),
+      createdAt: "2026-11-09T10:00:00.000Z",
+      config: {
+        projectUid: "project-uid",
+        region: "us",
+        sourceCatalog: { path: "locales/en.json", filename: "en.json", adapter: "formatjs-json" },
+        targetAdapter: "formatjs-json",
+        targetLocales: [
+          { phraseLocale: "fr", repositoryLocale: "fr", outputPath: "locales/fr.json" },
+        ],
+        completionPolicy: { default: "per-locale" },
+      },
+      jobs: [{ uid: "job-fr", targetLang: "fr", workflowLevel: 1, status: "NEW" }],
+      warningCount: 0,
+      locales: { fr: { phase: "pending" } },
+    } as unknown as PhraseBatchRecord;
+    const submit = vi.spyOn(PhraseWorkflow.prototype, "submitWithOutcome").mockResolvedValue({
+      batch,
+      createdThisRun: false,
+      deferred: {
+        kind,
+        reason: "Final-step Phrase jobs of batch bbbbbbbbbbbb are not complete for fr",
+        sourceCommit: "abc1234ffff",
+        blockingJobs: batch.jobs,
+      },
+    });
+    const stdout: string[] = [];
+    try {
+      const exitCode = await runCli(["tms", "submit", "--config", "phrase.json"], {
+        cwd: projectRoot!,
+        env: {
+          PHRASE_PLATFORM_API_TOKEN: "platform-token",
+          GITHUB_TOKEN: "run-token",
+          GITHUB_REPOSITORY: "example/app",
+          GITHUB_REF: "refs/heads/main",
+          GITHUB_SHA: "abc1234ffff",
+          GITHUB_STEP_SUMMARY: summaryPath,
+        },
+        stdout: (message) => stdout.push(message),
+        stderr: () => undefined,
+      });
+      expect(exitCode).toBe(expected);
+    } finally {
+      submit.mockRestore();
+    }
+    expect(stdout.join("\n")).toContain("Phrase submission of abc1234 deferred");
+    const summary = await readFile(summaryPath, "utf8");
+    expect(summary).toContain("⏸️ Submission deferred");
+    expect(summary).toContain("| ⏸️ deferred |");
+    expect(summary).toContain("https://us.cloud.memsource.com/web/job/job-fr/translate");
+  });
+
   it("appends one failure block when submit cannot resolve its source input", async () => {
     projectRoot = await mkdtemp(join(tmpdir(), "i18n-cli-tms-submit-missing-source-"));
     await writeFile(join(projectRoot, "package.json"), "{}\n");
@@ -1431,6 +1509,11 @@ objects:
         }
         if (parsed.pathname.endsWith("/contents/.github/i18n-state/batches")) {
           return new Response("", { status: 404 });
+        }
+        if (parsed.pathname.includes("/submissions/")) {
+          return method === "GET"
+            ? new Response("", { status: 404 })
+            : new Response(JSON.stringify({ content: { sha: "claim-sha" } }));
         }
         const stateFile = parsed.pathname.match(
           /\/contents\/\.github\/i18n-state\/batches\/([a-f0-9]{64})\.json$/,

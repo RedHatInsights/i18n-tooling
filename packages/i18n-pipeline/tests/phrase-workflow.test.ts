@@ -38,6 +38,15 @@ const config: PhraseWorkflowConfig = {
 };
 
 class MemoryStateStore implements PhraseBatchStateStore {
+  readonly submissions = new Map<string, { batchKey: string; revision: string }>();
+  async readSubmissionReservation(scope: string) {
+    return this.submissions.get(scope);
+  }
+  async reserveSubmission(scope: string, record: PhraseBatchRecord, expectedRevision?: string) {
+    if (this.submissions.get(scope)?.revision !== expectedRevision)
+      throw new PhraseBatchStateConflictError();
+    this.submissions.set(scope, { batchKey: record.key, revision: record.key });
+  }
   readonly records = new Map<string, { record: PhraseBatchRecord; revision: string }>();
   readonly corruptKeys = new Set<string>();
   conflictOnPhase?: string;
@@ -666,6 +675,299 @@ function makeJapaneseWorkflowScenario(
 }
 
 const PHRASE_JOB_VISIBILITY_GRACE_TEST_MS = 15 * 60 * 1000;
+
+describe("serialized Phrase submissions", () => {
+  it("does not let same-source --retry-failed overlap a locale still in progress", async () => {
+    const s = makeJapaneseWorkflowScenario();
+    s.phrase.jobStatus = "NEW";
+    s.phrase.jobStatuses.set("job-fr", "CANCELLED");
+    await s.workflow.submit(s.input);
+    await s.workflow.reconcile();
+
+    const outcome = await s.workflow.submitWithOutcome({ ...s.input, retryFailed: true });
+    expect(outcome.deferred?.kind).toBe("in-progress");
+    expect(s.phrase.createJobCalls).toBe(1);
+    expect(await s.state.listBatches()).toHaveLength(1);
+  });
+  it("keeps a successful retry in flight until its own final jobs complete", async () => {
+    const s = makeJapaneseWorkflowScenario();
+    s.phrase.createError = new Error("request rejected");
+    await expect(s.workflow.submit(s.input)).rejects.toThrow("request rejected");
+    s.phrase.jobStatus = "NEW";
+    const retry = await s.workflow.submit({ ...s.input, retryFailed: true });
+    expect(retry.retryParentDelegated).toBe(true);
+    const next = {
+      ...s.input,
+      config: {
+        ...s.input.config,
+        sourceCatalog: { ...config.sourceCatalog, importSettingsUid: "next-settings" },
+      },
+    };
+    expect((await s.workflow.submitWithOutcome(next)).deferred?.kind).toBe("in-progress");
+    expect(s.phrase.createJobCalls).toBe(2);
+    s.state.submissions.clear(); // Also verify bootstrap from legacy retry records.
+    expect((await s.workflow.submitWithOutcome(next)).deferred?.kind).toBe("in-progress");
+    s.phrase.jobStatus = "COMPLETED";
+    expect((await s.workflow.submitWithOutcome(next)).createdThisRun).toBe(true);
+  });
+  it("releases on final-step completion while locale PRs remain open", async () => {
+    const s = makeJapaneseWorkflowScenario();
+    await s.workflow.submit(s.input);
+    await s.workflow.reconcile();
+    expect(s.repository.pullRequests).toHaveLength(2);
+    const next = {
+      ...s.input,
+      config: {
+        ...s.input.config,
+        sourceCatalog: { ...config.sourceCatalog, importSettingsUid: "next-settings" },
+      },
+    };
+    expect((await s.workflow.submitWithOutcome(next)).createdThisRun).toBe(true);
+    expect(s.phrase.createJobCalls).toBe(2);
+  });
+
+  it("blocks on a later workflow step and a failed final job until explicit --retry-failed recovery", async () => {
+    const s = makeJapaneseWorkflowScenario();
+    s.phrase.jobParts.push({ uid: "review-fr", targetLang: "fr", workflowLevel: 2 });
+    s.phrase.jobStatuses.set("review-fr", "NEW");
+    await s.workflow.submit(s.input);
+    const next = {
+      ...s.input,
+      config: {
+        ...s.input.config,
+        sourceCatalog: { ...config.sourceCatalog, importSettingsUid: "next-settings" },
+      },
+    };
+    const pending = await s.workflow.submitWithOutcome(next);
+    expect(pending.deferred).toMatchObject({ kind: "in-progress", sourceCommit: "abc123" });
+    expect(pending.deferred?.blockingJobs.map(({ uid }) => uid)).toEqual(["review-fr"]);
+    // Partial failure: another locale still in flight, so --retry-failed must not release.
+    s.phrase.jobStatuses.set("review-fr", "CANCELLED");
+    s.phrase.jobStatuses.set("job-ja", "NEW");
+    const partial = await s.workflow.submitWithOutcome({ ...next, retryFailed: true });
+    expect(partial.deferred?.kind).toBe("in-progress");
+    s.phrase.jobStatuses.set("job-ja", "COMPLETED");
+    const failed = await s.workflow.submitWithOutcome(next);
+    expect(failed.deferred?.kind).toBe("recovery-required");
+    expect(failed.deferred?.reason).toContain("--retry-failed");
+    expect(s.phrase.createJobCalls).toBe(1);
+    // Base source has moved on; explicit recovery submits it as a fresh batch.
+    const recovered = await s.workflow.submitWithOutcome({ ...next, retryFailed: true });
+    expect(recovered.createdThisRun).toBe(true);
+    expect(recovered.batch.retryParentBatchKey).toBeUndefined();
+    expect(s.phrase.createJobCalls).toBe(2);
+  });
+
+  it("does not block newer source on a definite job-creation failure", async () => {
+    const s = makeJapaneseWorkflowScenario();
+    s.phrase.createError = new PhraseApiError("Phrase API returned HTTP 403", 403);
+    await expect(s.workflow.submit(s.input)).rejects.toThrow("HTTP 403");
+    s.phrase.createError = undefined;
+    const next = {
+      ...s.input,
+      config: {
+        ...s.input.config,
+        sourceCatalog: { ...config.sourceCatalog, importSettingsUid: "next-settings" },
+      },
+    };
+    expect((await s.workflow.submitWithOutcome(next)).createdThisRun).toBe(true);
+    expect(s.phrase.createJobCalls).toBe(2);
+  });
+
+  it("bootstraps without a reservation from the newest legacy batch that may be in flight", async () => {
+    for (const phase of ["superseded", "completed", "ready"] as const) {
+      const s = makeJapaneseWorkflowScenario();
+      s.phrase.jobStatus = "NEW";
+      const legacy = await s.workflow.submit(s.input);
+      s.state.submissions.clear();
+      s.state.records.get(legacy.key)!.record.phase = phase;
+      const outcome = await s.workflow.submitWithOutcome({
+        ...s.input,
+        config: {
+          ...s.input.config,
+          sourceCatalog: { ...config.sourceCatalog, importSettingsUid: "next-settings" },
+        },
+      });
+      if (phase === "ready") {
+        // Its Phrase jobs are still open, so the legacy batch blocks.
+        expect(outcome.deferred?.kind).toBe("in-progress");
+      } else {
+        // Earlier releases superseded batches and cancelled or recycled their jobs. Skipping
+        // them without a lookup means even open (NEW) jobs there cannot block every later submit.
+        expect(outcome.createdThisRun).toBe(true);
+      }
+    }
+  });
+
+  it("fails closed after a crash between batch creation and reservation, then recovers without an operator", async () => {
+    let clock = Date.parse("2026-10-19T10:00:00Z");
+    const s = makeJapaneseWorkflowScenario({ now: () => clock });
+    const reserve = s.state.reserveSubmission.bind(s.state);
+    s.state.reserveSubmission = async () => {
+      throw new Error("storage unavailable");
+    };
+    await expect(s.workflow.submit(s.input)).rejects.toThrow("storage unavailable");
+    s.state.reserveSubmission = reserve;
+    expect(s.phrase.createJobCalls).toBe(0);
+    const next = {
+      ...s.input,
+      config: {
+        ...s.input.config,
+        sourceCatalog: { ...config.sourceCatalog, importSettingsUid: "next-settings" },
+      },
+    };
+    // The unreserved record may still be creating jobs, so it blocks until it is voided.
+    expect((await s.workflow.submitWithOutcome(next)).deferred?.kind).toBe("in-progress");
+    clock += PHRASE_JOB_VISIBILITY_GRACE_TEST_MS + 1;
+    await s.workflow.reconcile({ repairScope: phraseRepairScope });
+    expect((await s.workflow.submitWithOutcome(next)).createdThisRun).toBe(true);
+    expect(s.phrase.createJobCalls).toBe(1);
+  });
+
+  it("creates no extra jobs for concurrent identical submissions", async () => {
+    const s = makeJapaneseWorkflowScenario();
+    await Promise.allSettled([s.workflow.submit(s.input), s.workflow.submit(s.input)]);
+    expect(s.phrase.createJobCalls).toBe(1);
+    expect(await s.state.listBatches()).toHaveLength(1);
+  });
+  it("coalesces snapshots until all final jobs complete, independently of open PRs", async () => {
+    const s = makeJapaneseWorkflowScenario();
+    s.phrase.jobStatus = "NEW";
+    const first = await s.workflow.submit(s.input);
+    const newer = (message: string) => {
+      const bytes = new TextEncoder().encode(
+        JSON.stringify({ greeting: { defaultMessage: message } }),
+      );
+      s.repository.baseSourceBytes = bytes;
+      return { ...s.input, sourceCommit: message, sourceBytes: bytes };
+    };
+    expect((await s.workflow.submitWithOutcome(newer("second"))).deferred?.sourceCommit).toBe(
+      "second",
+    );
+    s.phrase.jobStatuses.set("job-fr", "COMPLETED");
+    expect((await s.workflow.submitWithOutcome(newer("third"))).deferred?.kind).toBe("in-progress");
+    expect(s.phrase.createJobCalls).toBe(1);
+    // Even a tooling-completed phase must not bypass an incomplete Phrase job.
+    const stored = await s.state.readBatch(first.key);
+    stored!.record.phase = "completed";
+    await s.state.updateBatch(stored!.record, stored!.revision);
+    expect((await s.workflow.submitWithOutcome(newer("fourth"))).deferred?.kind).toBe(
+      "in-progress",
+    );
+    s.phrase.jobStatuses.set("job-ja", "COMPLETED");
+    const latest = newer("latest");
+    const next = await s.workflow.submitWithOutcome(latest);
+    expect(next.createdThisRun).toBe(true);
+    expect(next.batch.sourceCommit).toBe("latest");
+    expect(s.phrase.createJobCalls).toBe(2);
+    expect((await s.workflow.submitWithOutcome(latest)).createdThisRun).toBe(false);
+    expect(s.phrase.createJobCalls).toBe(2);
+  });
+
+  it("does not bypass a lookup failure or uncertain creation", async () => {
+    const s = makeJapaneseWorkflowScenario();
+    const first = await s.workflow.submit(s.input);
+    const next = {
+      ...s.input,
+      config: {
+        ...s.input.config,
+        sourceCatalog: { ...config.sourceCatalog, importSettingsUid: "new-settings" },
+      },
+    };
+    s.phrase.getJobError = new PhraseApiError("Phrase API returned HTTP 503", 503);
+    for (const retryFailed of [false, true]) {
+      const lookup = await s.workflow.submitWithOutcome({ ...next, retryFailed });
+      expect(lookup.batch.key).toBe(first.key);
+      expect(lookup.deferred).toMatchObject({
+        kind: "lookup-failed",
+        reason: expect.stringContaining("HTTP 503"),
+      });
+      expect(lookup.deferred?.blockingJobs.length).toBeGreaterThan(0);
+    }
+    expect(s.phrase.createJobCalls).toBe(1);
+    s.phrase.getJobError = undefined;
+    const stored = await s.state.readBatch(first.key);
+    stored!.record.phase = "unknown";
+    await s.state.updateBatch(stored!.record, stored!.revision);
+    const unknown = await s.workflow.submitWithOutcome({ ...next, retryFailed: true });
+    expect(unknown.deferred?.kind).toBe("recovery-required");
+    expect(unknown.deferred?.reason).toContain("bind or void");
+    expect(s.phrase.createJobCalls).toBe(1);
+  });
+
+  it("does not block another consumer, catalog, or base branch", async () => {
+    for (const change of [
+      { repository: "another/app" },
+      { baseRef: "another-base" },
+      {
+        config: {
+          ...japaneseConfig,
+          sourceCatalog: { ...config.sourceCatalog, path: "another.json" },
+        },
+      },
+    ]) {
+      const s = makeJapaneseWorkflowScenario();
+      s.phrase.jobStatus = "NEW";
+      await s.workflow.submit(s.input);
+      s.repository.onReadFile = () => sourceBytes;
+      expect((await s.workflow.submitWithOutcome({ ...s.input, ...change })).createdThisRun).toBe(
+        true,
+      );
+      expect(s.phrase.createJobCalls).toBe(2);
+    }
+  });
+
+  it("serializes concurrent different identities through a durable scope claim", async () => {
+    const s = makeJapaneseWorkflowScenario();
+    const results = await Promise.allSettled([
+      s.workflow.submitWithOutcome(s.input),
+      s.workflow.submitWithOutcome({
+        ...s.input,
+        config: {
+          ...s.input.config,
+          sourceCatalog: { ...config.sourceCatalog, importSettingsUid: "new-settings" },
+        },
+      }),
+    ]);
+    expect(s.phrase.createJobCalls).toBe(1);
+    expect(
+      results.some((result) => result.status === "fulfilled" && result.value.createdThisRun),
+    ).toBe(true);
+    expect(results.some((result) => result.status === "fulfilled" && result.value.deferred)).toBe(
+      true,
+    );
+    // The losing run voids its job-less record instead of leaving it to block.
+    const open = (await s.state.listBatches()).filter(({ record }) => record.phase !== "failed");
+    expect(open).toHaveLength(1);
+  });
+
+  it("keeps refusing to overwrite reviewer changes after the base source advances", async () => {
+    const s = makeJapaneseWorkflowScenario();
+    await s.workflow.submit(s.input);
+    await s.workflow.reconcile();
+    const [created] = await s.state.listBatches();
+    const branch = created!.record.locales.fr!.pullRequestBranch!;
+    s.repository.pushHumanCommit(branch, ["locales/fr.json"]);
+    s.repository.baseSourceBytes = new TextEncoder().encode('{"new":{"defaultMessage":"New"}}');
+    s.phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+    const results = await s.workflow.reconcile();
+    const fr = results.find((result) => result.phraseLocale === "fr");
+    expect(fr?.phase).toBe("retrying");
+    expect(fr?.reason).toContain("refusing to overwrite reviewer changes");
+    expect(s.repository.commitCount(branch)).toBe(2);
+  });
+
+  it("delivers completed results after the base source advances", async () => {
+    const s = makeJapaneseWorkflowScenario();
+    await s.workflow.submit(s.input);
+    s.repository.baseSourceBytes = new TextEncoder().encode('{"new":{"defaultMessage":"New"}}');
+    const results = await s.workflow.reconcile();
+    expect(results.filter((result) => result.phase === "pr-created")).toHaveLength(2);
+    expect(s.repository.pullRequests.every((pr) => pr.baseCommit === s.input.sourceCommit)).toBe(
+      true,
+    );
+  });
+});
 
 function listedPhraseJob(
   uid: string,
@@ -1889,7 +2191,9 @@ describe("PhraseWorkflow submission", () => {
     expect((await workflow.submit(input)).key).toBe(submitted.key);
     expect(phrase.createJobCalls).toBe(1);
 
+    phrase.importStatuses.set("job-fr", "ERROR");
     phrase.importStatus = "OK";
+    phrase.jobParts = [{ uid: "job-fr-retry", targetLang: "fr", workflowLevel: 1 }];
     const retried = await workflow.submit({ ...input, retryFailed: true });
 
     expect(retried.phase).toBe("ready");
@@ -2228,8 +2532,8 @@ describe("PhraseWorkflow submission", () => {
       "job-ja-retry",
       new TextEncoder().encode('{"greeting":"こんにちは {name}"}'),
     );
-    phrase.getJobErrors.set("job-fr", new PhraseApiError("Phrase job was not found", 404));
     const retried = await workflow.submit({ ...input, retryFailed: true });
+    phrase.getJobErrors.set("job-fr", new PhraseApiError("Phrase job was not found", 404));
 
     expect(retried.key).not.toBe(first.key);
     expect(retried.attempt).toBe(1);
@@ -2887,9 +3191,9 @@ describe("PhraseWorkflow submission", () => {
       '{"greeting":{"defaultMessage":"Welcome {name}","description":"Greeting"}}',
     );
     const repeated = await workflow.reconcile();
-    expect(repeated).toEqual([]);
-    expect((await state.listBatches())[0]?.record.phase).toBe("superseded");
-    expect(phrase.targetDownloadCalls).toBe(1);
+    expect(repeated[0]?.phase).toBe("pr-created");
+    expect((await state.listBatches())[0]?.record.phase).toBe("ready");
+    expect(phrase.targetDownloadCalls).toBe(2);
     expect(repository.pullRequests).toHaveLength(1);
   });
 
@@ -4558,7 +4862,7 @@ describe("PhraseWorkflow submission", () => {
     expect(await state.listBatches()).toHaveLength(0);
   });
 
-  it("supersedes a generated Frontend batch when the template is invalid on the base commit", async () => {
+  it("delivers pinned generated Frontend source when the latest template is invalid", async () => {
     const template =
       "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n        - id: roles\n          title: Roles\n";
     const invalidTemplate = "kind: Template\nobjects: [\n";
@@ -4611,15 +4915,10 @@ describe("PhraseWorkflow submission", () => {
     const [result] = await workflow.reconcile();
     const [stored] = await state.listBatches();
 
-    expect(result).toMatchObject({
-      phase: "superseded",
-      reason: expect.stringMatching(
-        /^Frontend template cannot be inlined on resolved-base-commit:/,
-      ),
-    });
-    expect(stored?.record.phase).toBe("superseded");
-    expect(phrase.targetDownloadCalls).toBe(0);
-    expect(repository.pullRequests).toHaveLength(0);
+    expect(result).toMatchObject({ phase: "pr-created" });
+    expect(stored?.record.phase).toBe("ready");
+    expect(phrase.targetDownloadCalls).toBe(1);
+    expect(repository.pullRequests[0]?.baseCommit).toBe("abc123");
   });
 
   it("pins stale checks, Frontend reads, and the locale commit to one resolved base SHA", async () => {
@@ -4680,7 +4979,7 @@ describe("PhraseWorkflow submission", () => {
     phrase.jobStatus = "COMPLETED";
 
     expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
-    expect(repository.resolvedRefs).toEqual(["phrase-pilot", "phrase-pilot"]);
+    expect(repository.resolvedRefs).toEqual(["phrase-pilot"]);
     expect(reads).toContainEqual({ path: "deploy/frontend.yaml", ref: repository.baseCommit });
     expect(reads).not.toContainEqual({ path: "deploy/frontend.yaml", ref: "phrase-pilot" });
     expect(
@@ -4717,7 +5016,7 @@ describe("PhraseWorkflow submission", () => {
     expect(await state.listBatches()).toHaveLength(0);
   });
 
-  it("supersedes generated Frontend source when English YAML changes before zh-CN reconciliation", async () => {
+  it("delivers generated Frontend source when English YAML changes before zh-CN reconciliation", async () => {
     const template =
       "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n        - id: roles\n          title: Roles\n";
     const repository = new FakeRepository();
@@ -4754,8 +5053,8 @@ describe("PhraseWorkflow submission", () => {
       },
     });
     phrase.jobStatus = "COMPLETED";
-    expect((await workflow.reconcile())[0]?.phase).toBe("superseded");
-    expect(repository.pullRequests).toHaveLength(0);
+    expect((await workflow.reconcile())[0]?.phase).toBe("invalid-translation");
+    expect(repository.pullRequests[0]?.baseCommit).toBe("abc123");
   });
 
   it("fails a locale on a permanent repository error before creating its PR", async () => {
@@ -5675,7 +5974,12 @@ describe("PhraseWorkflow submission", () => {
       const retry = [...state.records.values()].find(
         ({ record }) => record.retryParentBatchKey === parent.key,
       );
-      expect(phrase.getJobCalls.map(({ jobUid }) => jobUid)).toEqual(["job-fr", "job-ja-retry"]);
+      expect(phrase.getJobCalls.map(({ jobUid }) => jobUid)).toEqual([
+        "job-fr",
+        "job-ja", // Refresh the retry parent's jobs before reserving another batch.
+        "job-fr",
+        "job-ja-retry",
+      ]);
       expect(phrase.asyncRequestIds).toEqual([]);
       expect(phrase.targetDownloadCalls).toBe(downloadsBeforeRetry);
       expect(state.writes).toBe(writesBeforeRetry + 2);
@@ -5767,7 +6071,7 @@ describe("PhraseWorkflow submission", () => {
     expect(state.writes).toBe(writes);
   });
 
-  it("revives a superseded batch when the same source returns instead of creating a new job", async () => {
+  it("reuses the same batch after base source changes and returns", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
     const repository = new FakeRepository();
@@ -5788,7 +6092,7 @@ describe("PhraseWorkflow submission", () => {
     repository.baseSourceBytes = new TextEncoder().encode(
       '{"greeting":{"defaultMessage":"Welcome {name}"}}',
     );
-    expect((await workflow.reconcile())[0]?.phase).toBe("superseded");
+    expect((await workflow.reconcile())[0]?.phase).toBe("pending");
     repository.baseSourceBytes = sourceBytes;
 
     const revived = await workflow.submit(input);
@@ -5799,7 +6103,7 @@ describe("PhraseWorkflow submission", () => {
     expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
   });
 
-  it("resumes imports when reviving a superseded batch", async () => {
+  it("resumes imports after base source changes and returns", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
     const repository = new FakeRepository();
@@ -5824,8 +6128,8 @@ describe("PhraseWorkflow submission", () => {
     repository.baseSourceBytes = new TextEncoder().encode(
       '{"greeting":{"defaultMessage":"Welcome {name}"}}',
     );
-    expect((await workflow.reconcile())[0]?.phase).toBe("superseded");
-    expect((await state.readBatch(submitted.key))?.record.phase).toBe("superseded");
+    expect((await workflow.reconcile())[0]?.phase).toBe("retrying");
+    expect((await state.readBatch(submitted.key))?.record.phase).toBe("importing");
 
     repository.baseSourceBytes = sourceBytes;
     const revived = await workflow.submit(input);
@@ -6534,7 +6838,7 @@ describe("PhraseWorkflow submission", () => {
     expect(phrase.targetDownloadCalls).toBe(0);
   });
 
-  it("rechecks the source immediately before creating the locale PR", async () => {
+  it("uses its immutable source snapshot throughout locale export", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
     const repository = new FakeRepository();
@@ -6561,13 +6865,14 @@ describe("PhraseWorkflow submission", () => {
     const results = await workflow.reconcile();
     const [stored] = await state.listBatches();
 
-    expect(results[0]?.phase).toBe("superseded");
-    expect(stored?.record.phase).toBe("superseded");
+    expect(results[0]?.phase).toBe("pr-created");
+    expect(stored?.record.phase).toBe("ready");
     expect(phrase.targetDownloadCalls).toBe(1);
-    expect(repository.pullRequests).toHaveLength(0);
+    expect(repository.readFileCalls).toBe(3);
+    expect(repository.pullRequests[0]?.baseCommit).toBe(repository.baseCommit);
   });
 
-  it("supersedes a translation when the base branch moves to a commit with changed English", async () => {
+  it("delivers a translation when the base branch moves to a commit with changed English", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
     const repository = new FakeRepository();
@@ -6603,11 +6908,11 @@ describe("PhraseWorkflow submission", () => {
     const results = await workflow.reconcile();
     const [stored] = await state.listBatches();
 
-    expect(results[0]?.phase).toBe("superseded");
-    expect(stored?.record.phase).toBe("superseded");
-    expect(repository.resolvedRefs).toEqual(["phrase-pilot", "phrase-pilot"]);
+    expect(results[0]?.phase).toBe("pr-created");
+    expect(stored?.record.phase).toBe("ready");
+    expect(repository.resolvedRefs).toEqual(["phrase-pilot"]);
     expect(phrase.targetDownloadCalls).toBe(1);
-    expect(repository.pullRequests).toHaveLength(0);
+    expect(repository.pullRequests[0]?.baseCommit).toBe(oldBaseCommit);
   });
 
   it("keeps the locale commit on its original base when the branch moves with unrelated changes", async () => {
@@ -6639,7 +6944,7 @@ describe("PhraseWorkflow submission", () => {
     const results = await workflow.reconcile();
 
     expect(results[0]?.phase).toBe("pr-created");
-    expect(repository.resolvedRefs).toEqual(["phrase-pilot", "phrase-pilot"]);
+    expect(repository.resolvedRefs).toEqual(["phrase-pilot"]);
     expect(repository.pullRequests).toHaveLength(1);
     expect(repository.pullRequests[0]?.baseCommit).toBe(oldBaseCommit);
   });
@@ -6647,66 +6952,71 @@ describe("PhraseWorkflow submission", () => {
   it.each([
     '{"searchEntries.roles.title":"角色"}',
     '{"searchEntries.roles.title":"角色 {missing}"}',
-  ])("supersedes a late FEO template English change even with target %s", async (target) => {
-    const source = new TextEncoder().encode(
-      '{"searchEntries.roles.title":{"defaultMessage":"Roles","description":"Role title"}}',
-    );
-    const template =
-      "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n        - id: roles\n          title: Roles\n";
-    const changedTemplate = template.replace("title: Roles", "title: Users");
-    const oldBaseCommit = "base-before-download";
-    const newBaseCommit = "base-after-download";
-    const state = new MemoryStateStore();
-    const phrase = new FakePhrase();
-    phrase.expectedTargetLangs = ["zh_cn"];
-    phrase.jobParts = [{ uid: "job-zh_cn", targetLang: "zh_cn", workflowLevel: 1 }];
-    phrase.targetBytes = new TextEncoder().encode(target);
-    const repository = new FakeRepository();
-    repository.baseCommit = oldBaseCommit;
-    repository.onReadFile = (path, ref) => {
-      if (path === "deploy/frontend.yaml") {
-        return new TextEncoder().encode(ref === newBaseCommit ? changedTemplate : template);
-      }
-      return source;
-    };
-    phrase.onDownloadTargetFile = () => {
-      repository.baseCommit = newBaseCommit;
-    };
-    const workflow = new PhraseWorkflow({
-      phrase,
-      state,
-      repository,
-      catalogAdapters: new CatalogAdapterRegistry(),
-    });
-    await workflow.submit({
-      repository: "example/app",
-      baseRef: "phrase-pilot",
-      sourceCommit: "abc123",
-      sourceBytes: source,
-      config: {
-        ...config,
-        frontendTemplate: { path: "deploy/frontend.yaml" },
-        targetLocales: [
-          {
-            phraseLocale: "zh_cn",
-            repositoryLocale: "zh-CN",
-            outputPath: "deploy/locales/zh-CN.json",
-          },
-        ],
-      },
-    });
-    phrase.jobStatus = "COMPLETED";
+  ])(
+    "delivers against the pinned FEO template despite a late English change with target %s",
+    async (target) => {
+      const source = new TextEncoder().encode(
+        '{"searchEntries.roles.title":{"defaultMessage":"Roles","description":"Role title"}}',
+      );
+      const template =
+        "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n        - id: roles\n          title: Roles\n";
+      const changedTemplate = template.replace("title: Roles", "title: Users");
+      const oldBaseCommit = "base-before-download";
+      const newBaseCommit = "base-after-download";
+      const state = new MemoryStateStore();
+      const phrase = new FakePhrase();
+      phrase.expectedTargetLangs = ["zh_cn"];
+      phrase.jobParts = [{ uid: "job-zh_cn", targetLang: "zh_cn", workflowLevel: 1 }];
+      phrase.targetBytes = new TextEncoder().encode(target);
+      const repository = new FakeRepository();
+      repository.baseCommit = oldBaseCommit;
+      repository.onReadFile = (path, ref) => {
+        if (path === "deploy/frontend.yaml") {
+          return new TextEncoder().encode(ref === newBaseCommit ? changedTemplate : template);
+        }
+        return source;
+      };
+      phrase.onDownloadTargetFile = () => {
+        repository.baseCommit = newBaseCommit;
+      };
+      const workflow = new PhraseWorkflow({
+        phrase,
+        state,
+        repository,
+        catalogAdapters: new CatalogAdapterRegistry(),
+      });
+      await workflow.submit({
+        repository: "example/app",
+        baseRef: "phrase-pilot",
+        sourceCommit: "abc123",
+        sourceBytes: source,
+        config: {
+          ...config,
+          frontendTemplate: { path: "deploy/frontend.yaml" },
+          targetLocales: [
+            {
+              phraseLocale: "zh_cn",
+              repositoryLocale: "zh-CN",
+              outputPath: "deploy/locales/zh-CN.json",
+            },
+          ],
+        },
+      });
+      phrase.jobStatus = "COMPLETED";
 
-    const results = await workflow.reconcile();
-    const [stored] = await state.listBatches();
+      const results = await workflow.reconcile();
+      const [stored] = await state.listBatches();
 
-    expect(results[0]?.phase).toBe("superseded");
-    expect(stored?.record.phase).toBe("superseded");
-    expect(repository.resolvedRefs).toEqual(["phrase-pilot", "phrase-pilot"]);
-    expect(repository.pullRequests).toHaveLength(0);
-  });
+      expect(results[0]?.phase).toBe(
+        target.includes("{missing}") ? "invalid-translation" : "pr-created",
+      );
+      expect(stored?.record.phase).toBe("ready");
+      expect(repository.resolvedRefs).toEqual(["phrase-pilot"]);
+      expect(repository.pullRequests[0]?.baseCommit).toBe(oldBaseCommit);
+    },
+  );
 
-  it("marks a batch superseded when its source catalog changed before reconciliation", async () => {
+  it("delivers a batch when its source catalog changed before reconciliation", async () => {
     const state = new MemoryStateStore();
     const phrase = new FakePhrase();
     const repository = new FakeRepository();
@@ -6731,10 +7041,10 @@ describe("PhraseWorkflow submission", () => {
     const results = await workflow.reconcile();
     const [stored] = await state.listBatches();
 
-    expect(results[0]?.phase).toBe("superseded");
-    expect(stored?.record.phase).toBe("superseded");
-    expect(phrase.targetDownloadCalls).toBe(0);
-    expect(repository.pullRequests).toHaveLength(0);
+    expect(results[0]?.phase).toBe("pr-created");
+    expect(stored?.record.phase).toBe("ready");
+    expect(phrase.targetDownloadCalls).toBe(1);
+    expect(repository.pullRequests[0]?.baseCommit).toBe("abc123");
   });
 });
 
@@ -7125,6 +7435,26 @@ describe("superseded locale pull requests", () => {
       pullRequestSupersededNoticePosted: true,
     });
     expect(savedOld?.record.phase).toBe("superseded");
+  });
+
+  it("replaces the open PR of an earlier, still-ready batch once serialized source advances", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const old = await seedSupersededBatchFixture(scenario, {
+      key: "e".repeat(64),
+      phase: "ready",
+      pullRequestUrl: "https://github.com/example/app/pull/23",
+      createdAt: "2026-10-20T10:00:00.000Z",
+    });
+
+    await scenario.workflow.reconcile();
+
+    expect(scenario.repository.closePullRequestCalls).toEqual([
+      "https://github.com/example/app/pull/23",
+    ]);
+    expect((await scenario.state.readBatch(old.key))?.record.locales.fr).toMatchObject({
+      pullRequestFinalized: true,
+      pullRequestSupersededNoticePosted: true,
+    });
   });
 
   it("leaves a reviewer-owned superseded PR open and saves a one-time notice flag", async () => {

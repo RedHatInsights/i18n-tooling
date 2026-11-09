@@ -100,7 +100,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ steps.github-auth.outputs.target-repository }}
-          ref: ${{ steps.github-auth.outputs.checkout-ref }}
+          # Coalesce queued triggers to the latest configured base, then pin checkout HEAD.
+          ref: ${{ inputs.base-ref || github.ref }}
           token: ${{ steps.create-app-token.outputs.token || github.token }}
           persist-credentials: false
 
@@ -135,7 +136,6 @@ jobs:
           EXPECTED_PHRASE_PROJECT: ${{ inputs.expected-phrase-project }}
           EXPECTED_SOURCE_FILENAME: ${{ inputs.expected-source-filename }}
           TARGET_REPOSITORY: ${{ steps.github-auth.outputs.target-repository }}
-          CROSS_REPOSITORY: ${{ steps.github-auth.outputs.cross-repository }}
           GITHUB_AUTH_MODE: ${{ steps.github-auth.outputs.mode }}
           APP_SLUG: ${{ steps.create-app-token.outputs.app-slug }}
           PHRASE_PLATFORM_API_TOKEN: ${{ secrets.PHRASE_PLATFORM_API_TOKEN }}
@@ -150,12 +150,12 @@ jobs:
           else
             printf 'GitHub auth: GITHUB_TOKEN (github-actions[bot])\n'
           fi
-          set -- --repository "$TARGET_REPOSITORY"
+          set -- --repository "$TARGET_REPOSITORY" --source-commit "$(git rev-parse HEAD)"
           if [ "$RETRY_FAILED" = "true" ]; then set -- "$@" --retry-failed; fi
           if [ -n "$EXPECTED_PHRASE_PROJECT" ]; then set -- "$@" --expect-project "$EXPECTED_PHRASE_PROJECT"; fi
           if [ -n "$EXPECTED_SOURCE_FILENAME" ]; then set -- "$@" --expect-source-filename "$EXPECTED_SOURCE_FILENAME"; fi
-          if [ "$CROSS_REPOSITORY" = "true" ]; then
-            set -- "$@" --base-ref "$I18N_BASE_REF" --source-commit "$(git rev-parse HEAD)"
+          if [ -n "$I18N_BASE_REF" ]; then
+            set -- "$@" --base-ref "$I18N_BASE_REF"
           fi
           node "$GITHUB_WORKSPACE/i18n-tooling-source/packages/i18n-pipeline/dist/cli.js" \
             tms submit --config "$CONFIG_PATH" "$@"

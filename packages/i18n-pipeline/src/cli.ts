@@ -34,6 +34,7 @@ import {
 } from "./phrase-workflow.js";
 import { appendGitHubStepSummary } from "./append-step-summary.js";
 import {
+  describeSubmitDeferral,
   formatTmsFailureSummary,
   formatTmsResultLine,
   formatTmsRunSummary,
@@ -640,6 +641,7 @@ async function runTmsCommand(
         ...phrasePins,
       });
       const batch = outcome.batch;
+      if (outcome.deferred) options.stdout(describeSubmitDeferral(outcome.deferred));
       const warningSummary = batch.warningCount ? `, ${batch.warningCount} import warning(s)` : "";
       options.stdout(
         `Phrase batch ${batch.key} is ${batch.phase} (${batch.jobs.length} job parts${warningSummary}).`,
@@ -692,7 +694,8 @@ async function runTmsCommand(
         };
       });
       for (const result of localeResults) options.stdout(formatTmsResultLine(result));
-      await appendSummary(formatTmsSubmitSummary(summaryContext, batch, outcome.createdThisRun));
+      await appendSummary(formatTmsSubmitSummary(summaryContext, outcome));
+      if (outcome.deferred) return outcome.deferred.kind === "in-progress" ? 0 : 1;
       return failedLocales.length ? 1 : 0;
     }
 

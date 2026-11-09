@@ -54,6 +54,15 @@ const assembleLocalesScript = fileURLToPath(
 );
 
 class MemoryState implements PhraseBatchStateStore {
+  readonly submissions = new Map<string, { batchKey: string; revision: string }>();
+  async readSubmissionReservation(scope: string) {
+    return this.submissions.get(scope);
+  }
+  async reserveSubmission(scope: string, record: PhraseBatchRecord, expectedRevision?: string) {
+    if (this.submissions.get(scope)?.revision !== expectedRevision)
+      throw new Error("submission conflict");
+    this.submissions.set(scope, { batchKey: record.key, revision: record.key });
+  }
   private readonly batches = new Map<string, { record: PhraseBatchRecord; revision: string }>();
 
   async readBatch(key: string) {

@@ -109,7 +109,7 @@ A delivered catalog is not a live locale. rbac-ui's `src/locales/locale.ts` alwa
 
 After the pilot round trip, restore the triggers from the [example callers](../examples/phrase-consumer/.github/workflows/) so nobody has to dispatch a run:
 
-- **Submit** runs on a push to the default branch that changes the source input or the Phrase config. Watch the Phrase config and actual source input: use `frontendTemplate.path` when `frontendTemplate.generateSourceCatalog` is true, otherwise `sourceCatalog.path`. A rerun for unchanged source reuses its batch instead of creating a second Phrase job. A config change that Phrase sees, such as adding a target locale, submits a new batch for every locale; see [how batches are keyed](phrase-operations.md#batches).
+- **Submit** runs on a push to the default branch that changes the source input or the Phrase config, and on a weekday schedule so a submission deferred while Phrase work was in flight is picked up without another push. Watch the Phrase config and actual source input: use `frontendTemplate.path` when `frontendTemplate.generateSourceCatalog` is true, otherwise `sourceCatalog.path`. A rerun for unchanged source reuses its batch instead of creating a second Phrase job. A config change that Phrase sees, such as adding a target locale, submits a new batch for every locale; see [how batches are keyed](phrase-operations.md#batches).
 - **Reconcile** runs on a schedule. Pick your own minute, away from the top of the hour. Scheduled workflows run from the default branch only.
 - Keep `workflow_dispatch` on both. The submit dispatch offers `retry-failed` for a batch that failed in Phrase.
 - Restrict the Phrase environment's deployment refs to the default branch, and do not add required reviewers.

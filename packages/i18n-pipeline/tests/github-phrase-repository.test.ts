@@ -217,6 +217,52 @@ function openPullRequestHarness(
 }
 
 describe("GitHubPhraseRepository", () => {
+  it("persists submission claims with blob-SHA compare-and-swap outside batch listings", async () => {
+    let saved: { content: string; sha: string } | undefined;
+    const scope = "c".repeat(64);
+    let puts = 0;
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "run-token",
+      stateBranch: "i18n-state",
+      fetch: async (input, init) => {
+        const url = String(input);
+        if (url.includes("/git/ref/heads/")) return response({ object: { sha: "branch-head" } });
+        expect(url).toContain(`/batches/submissions/${scope}.json`);
+        if (init?.method === "PUT") {
+          const body = JSON.parse(String(init.body));
+          if (body.sha !== saved?.sha) return response({ message: "sha changed" }, 409);
+          saved = { content: body.content, sha: `blob-${++puts}` };
+          return response({ content: { sha: saved.sha } });
+        }
+        return saved ? response({ type: "file", encoding: "base64", ...saved }) : response({}, 404);
+      },
+    });
+    expect(await repository.readSubmissionReservation(scope)).toBeUndefined();
+    const first = batchRecord();
+    const second = batchRecord("b".repeat(64));
+    const concurrent = await Promise.allSettled([
+      repository.reserveSubmission(scope, first),
+      repository.reserveSubmission(scope, second),
+    ]);
+    expect(concurrent.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(concurrent.find((result) => result.status === "rejected")).toMatchObject({
+      reason: expect.any(PhraseBatchStateConflictError),
+    });
+    expect(await repository.readSubmissionReservation(scope)).toEqual({
+      batchKey: first.key,
+      revision: "blob-1",
+    });
+    await expect(repository.reserveSubmission(scope, second, "stale-sha")).rejects.toBeInstanceOf(
+      PhraseBatchStateConflictError,
+    );
+    await repository.reserveSubmission(scope, second, "blob-1");
+    expect(await repository.readSubmissionReservation(scope)).toEqual({
+      batchKey: second.key,
+      revision: "blob-2",
+    });
+  });
+
   it.each(["open", "race"] as const)(
     "adopts a ready PR (%s) without converting a valid update",
     async (discovery) => {
