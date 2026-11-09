@@ -265,7 +265,10 @@ describe("repository i18n contracts", () => {
       expect(consumerCheckout?.if).toBeUndefined();
       expect(consumerCheckout?.with).toMatchObject({
         repository: targetRepository,
-        ref: "${{ steps.github-auth.outputs.checkout-ref }}",
+        ref:
+          jobName === "submit"
+            ? "${{ inputs.base-ref || github.ref }}"
+            : "${{ steps.github-auth.outputs.checkout-ref }}",
         token: tokenReference,
         "persist-credentials": false,
       });

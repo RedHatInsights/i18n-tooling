@@ -35,6 +35,16 @@ A batch is keyed by repository, PR base, exact source bytes and the Phrase-facin
 
 Batches live on the state branch under `.github/i18n-state/batches/`; the GitHub contents API lists at most 1,000 records per directory.
 
+### Serialized submissions
+
+Only one Phrase batch may be in flight per repository, source catalog path and registered base branch. Before creating a different batch, submit refreshes the existing jobs in Phrase. Every configured locale's final workflow step must be `COMPLETED`; a tooling `completed` phase or an earlier workflow step is not sufficient. Open locale PRs do not hold this gate.
+
+While work is incomplete, submit reports **deferred**, links the existing jobs and creates no replacement jobs. Continue running reconcile. Changes accumulate on the base branch; the next sync after completion picks its latest snapshot, not intermediate commits. The reusable submit workflow checks out the latest configured base and pins its HEAD for the CLI. Standalone CLI/API callers must likewise supply the latest base snapshot and matching source bytes.
+
+The gate is enforced in tooling, not hub queue state. Atomic reservations live under `<state.directory>/submissions/<scope-digest>.json`; concurrent submissions with different identities cannot both claim the same scope. Reservations never expire. A lookup failure or an ambiguous job creation fails closed. If a crash left a reservation without a batch record, rerun the reserved source/settings to finish recording it before submitting newer source. Do not delete the reservation to bypass uncertain work.
+
+Completed translations remain deliverable after base English advances. New locale branches use the submitted commit when the current source differs; they still target the registered base branch. FEO YAML is generated against that immutable snapshot. Normal merge conflicts, draft validation and reviewer-edit protections remain consumer-owned safeguards.
+
 **Phases:** `creating` → `importing` → `ready` → `completed`, or `failed` / `superseded`.
 
 - `ready` lasts while any locale PR is open. The batch becomes `completed` once every locale is final and every PR is merged or closed. Reopening a PR after that does not resume automation.
@@ -47,17 +57,11 @@ Batches live on the state branch under `.github/i18n-state/batches/`; the GitHub
 
 ### Superseded batches
 
-When newer source is submitted, the older batch is superseded. Its locale PR closes automatically once the replacement carries the same translations for unchanged English: at the replacement's head while it is open, as merged once it merges. A replacement closed without merging carries nothing. An old PR with reviewer commits stays open with a notice. Resubmitting superseded source that has become current again revives the existing batch instead of creating a job.
+Base-branch advancement alone no longer supersedes a batch. Legacy superseded batches retain their existing cleanup policy: a locale PR closes automatically once the replacement carries the same translations for unchanged English: at the replacement's head while it is open, as merged once it merges. A replacement closed without merging carries nothing. An old PR with reviewer commits stays open with a notice. Resubmitting superseded source that has become current again revives the existing batch instead of creating a job.
 
 ### Cancelling stale Phrase jobs
 
-The tooling never cancels Phrase jobs, since that would discard translator work. Cancel stale jobs in Phrase yourself, in this order:
-
-1. Ask translators to confirm the segments they have finished. Confirmed segments are written to translation memory and pre-fill the replacement batch's jobs; unconfirmed edits are lost with the job.
-2. Wait until a reconcile run shows the old batch as `superseded`, in its run summary or its batch record. Reconcile supersedes a batch once the source on the PR base ref no longer matches what the batch submitted.
-3. Cancel the old batch's jobs. A `superseded` batch is never reconciled again, so its state does not change.
-
-Cancelling a job of a batch that is still active fails its locale. Reconcile records the locale as `failed` and reports it in that run, which exits non-zero; later runs do not report it again. A locale with an open locale PR is reported as failed on every run while the PR stays open, and its PR is no longer refreshed. Once the batch is superseded, nothing more is reported. If the source has not changed, the locale stays failed until `tms submit --retry-failed` creates a new job for it.
+The tooling never cancels Phrase jobs or bypasses them because newer source exists. Finish the active work instead. If a job is deliberately cancelled or abandoned, it continues blocking newer submissions; use explicit recovery of the recorded source with `tms submit --retry-failed` after addressing the failure. Confirm translator work has been saved before taking that action. Open PRs remain protected and are not automatically discarded.
 
 ### Retrying a failed batch
 

@@ -640,6 +640,10 @@ async function runTmsCommand(
         ...phrasePins,
       });
       const batch = outcome.batch;
+      if (outcome.deferred)
+        options.stdout(
+          "Phrase submission deferred; latest base-branch source will be picked up after existing Phrase work completes.",
+        );
       const warningSummary = batch.warningCount ? `, ${batch.warningCount} import warning(s)` : "";
       options.stdout(
         `Phrase batch ${batch.key} is ${batch.phase} (${batch.jobs.length} job parts${warningSummary}).`,
@@ -692,8 +696,10 @@ async function runTmsCommand(
         };
       });
       for (const result of localeResults) options.stdout(formatTmsResultLine(result));
-      await appendSummary(formatTmsSubmitSummary(summaryContext, batch, outcome.createdThisRun));
-      return failedLocales.length ? 1 : 0;
+      await appendSummary(
+        formatTmsSubmitSummary(summaryContext, batch, outcome.createdThisRun, outcome.deferred),
+      );
+      return batch.phase === "failed" || failedLocales.length ? 1 : 0;
     }
 
     const results: PhraseReconcileResult[] = await workflow.reconcile({

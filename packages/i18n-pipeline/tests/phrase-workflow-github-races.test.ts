@@ -41,6 +41,15 @@ type StateBeforeUpdate = (
 type PhraseClient = PhraseWorkflowDependencies["phrase"];
 
 class RevisionedStateStore implements PhraseBatchStateStore {
+  readonly submissions = new Map<string, { batchKey: string; revision: string }>();
+  async readSubmission(scope: string) {
+    return this.submissions.get(scope);
+  }
+  async claimSubmission(scope: string, record: PhraseBatchRecord, expectedRevision?: string) {
+    if (this.submissions.get(scope)?.revision !== expectedRevision)
+      throw new PhraseBatchStateConflictError();
+    this.submissions.set(scope, { batchKey: record.key, revision: record.key });
+  }
   private readonly records = new Map<string, { record: PhraseBatchRecord; revision: string }>();
   beforeUpdate?: StateBeforeUpdate;
   beforeOwnedCommitWrite?: (

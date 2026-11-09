@@ -1270,6 +1270,13 @@ objects:
           { status: 200 },
         );
       }
+      if (url.includes("/submissions/")) {
+        return method === "GET"
+          ? new Response("", { status: 404 })
+          : new Response(JSON.stringify({ content: { sha: "claim-sha" } }));
+      }
+      if (url.endsWith("/contents/.github/i18n-state/batches?ref=i18n-tms-state"))
+        return new Response("[]");
       if (url.includes("/contents/.github/i18n-state/batches/")) {
         if (method === "GET") {
           if (!stateRevision) return new Response("", { status: 404 });
@@ -1431,6 +1438,11 @@ objects:
         }
         if (parsed.pathname.endsWith("/contents/.github/i18n-state/batches")) {
           return new Response("", { status: 404 });
+        }
+        if (parsed.pathname.includes("/submissions/")) {
+          return method === "GET"
+            ? new Response("", { status: 404 })
+            : new Response(JSON.stringify({ content: { sha: "claim-sha" } }));
         }
         const stateFile = parsed.pathname.match(
           /\/contents\/\.github\/i18n-state\/batches\/([a-f0-9]{64})\.json$/,

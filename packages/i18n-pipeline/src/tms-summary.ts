@@ -125,8 +125,21 @@ export function formatTmsSubmitSummary(
   context: TmsSummaryContext,
   batch: PhraseBatchRecord,
   createdThisRun: boolean,
+  deferred = false,
 ): string {
   const lines = [submitHeading(context)];
+  if (deferred) {
+    lines.push(
+      "",
+      "Submission deferred: existing Phrase work must complete first. The latest base-branch source will be picked up after completion.",
+    );
+    if (batch.failureReason) lines.push("", escapeAlertText(batch.failureReason));
+    for (const job of batch.jobs) {
+      lines.push(
+        `- ${markdownLink(job.uid, phraseJobUrl(batch.config.region, job.uid))}: ${escapeAlertText(job.status ?? "unknown")}`,
+      );
+    }
+  }
   const failedLocales = batch.config.targetLocales
     .map((target) => batch.locales[target.phraseLocale])
     .filter((locale) => locale?.phase === "failed");
@@ -165,7 +178,7 @@ export function formatTmsSubmitSummary(
     "",
     "| Batch | Result | Source | Jobs | Locales | |",
     "| --- | --- | --- | --- | --- | --- |",
-    `| ${codeSpan(batch.key.slice(0, 12))} | ${createdThisRun ? "🆕 submitted" : "↩️ no source change"} | ${codeSpan(batch.sourceCommit.slice(0, 7))} | ${batch.jobs.length} | ${locales} | ${projectLink} |`,
+    `| ${codeSpan(batch.key.slice(0, 12))} | ${deferred ? "deferred" : createdThisRun ? "🆕 submitted" : "↩️ no source change"} | ${codeSpan(batch.sourceCommit.slice(0, 7))} | ${batch.jobs.length} | ${locales} | ${projectLink} |`,
   );
   return keepWithinStepSummaryLimit(lines);
 }

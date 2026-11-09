@@ -70,6 +70,13 @@ function phraseBatch(overrides: Partial<PhraseBatchRecord> = {}): PhraseBatchRec
 }
 
 describe("TMS result lines", () => {
+  it("explains deferral with blocking job links and latest-source pickup", () => {
+    const summary = formatTmsSubmitSummary(context, phraseBatch(), false, true);
+    expect(summary).toContain("Submission deferred");
+    expect(summary).toContain("latest base-branch source will be picked up after completion");
+    expect(summary).toContain("https://us.cloud.memsource.com/web/job/job-fr/translate");
+    expect(summary).not.toContain("no source change");
+  });
   it("prints the invalid translation next step and known links", () => {
     expect(
       formatTmsResultLine(

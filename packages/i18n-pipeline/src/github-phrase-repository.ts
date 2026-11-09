@@ -278,6 +278,34 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     );
   }
 
+  async readSubmission(scope: string): Promise<{ batchKey: string; revision: string } | undefined> {
+    const file = await this.getFile(this.submissionPath(scope), this.options.stateBranch);
+    if (!file) return undefined;
+    const value: unknown = JSON.parse(new TextDecoder().decode(file.bytes));
+    if (
+      !isRecord(value) ||
+      typeof value.batchKey !== "string" ||
+      !/^[a-f0-9]{64}$/.test(value.batchKey)
+    ) {
+      throw new GitHubRepositoryError("Phrase submission reservation is invalid", 500);
+    }
+    return { batchKey: value.batchKey, revision: file.sha };
+  }
+
+  async claimSubmission(
+    scope: string,
+    record: PhraseBatchRecord,
+    expectedRevision?: string,
+  ): Promise<void> {
+    await this.ensureBranch(this.options.stateBranch, record.baseRef);
+    await this.writeStateFile(
+      this.submissionPath(scope),
+      new TextEncoder().encode(`${JSON.stringify({ batchKey: record.key })}\n`),
+      expectedRevision,
+      `i18n: reserve Phrase submission ${record.key.slice(0, 12)}`,
+    );
+  }
+
   async updateBatch(record: PhraseBatchRecord, expectedRevision: string): Promise<string> {
     return this.writeState(
       record,
@@ -299,6 +327,15 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
   ): Promise<string> {
     const path = this.batchPath(record.key);
     const content = new TextEncoder().encode(`${JSON.stringify(record, null, 2)}\n`);
+    return this.writeStateFile(path, content, expectedRevision, message);
+  }
+
+  private async writeStateFile(
+    path: string,
+    content: Uint8Array,
+    expectedRevision: string | undefined,
+    message: string,
+  ): Promise<string> {
     for (let attempt = 1; ; attempt += 1) {
       const current = await this.getFile(path, this.options.stateBranch);
       if ((current?.sha ?? undefined) !== expectedRevision)
@@ -927,6 +964,12 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     if (!/^[a-f0-9]{64}$/.test(key))
       throw new TypeError("Phrase batch key must be a SHA-256 digest");
     return `${this.stateDirectory}/${key}.json`;
+  }
+
+  private submissionPath(scope: string): string {
+    if (!/^[a-f0-9]{64}$/.test(scope))
+      throw new TypeError("Phrase submission scope must be a SHA-256 digest");
+    return `${this.stateDirectory}/submissions/${scope}.json`;
   }
 
   private async getFile(path: string, ref: string): Promise<GitHubFile | null> {

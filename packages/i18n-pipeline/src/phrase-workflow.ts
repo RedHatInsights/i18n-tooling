@@ -153,6 +153,13 @@ export interface StoredPhraseBatch {
 }
 
 export interface PhraseBatchStateStore {
+  readSubmission(scope: string): Promise<{ batchKey: string; revision: string } | undefined>;
+  /** Atomic compare-and-swap; a claim survives crashes and must never expire automatically. */
+  claimSubmission(
+    scope: string,
+    record: PhraseBatchRecord,
+    expectedRevision?: string,
+  ): Promise<void>;
   readBatch(key: string): Promise<StoredPhraseBatch | undefined>;
   listBatchKeys(): Promise<string[]>;
   createBatch(record: PhraseBatchRecord): Promise<string>;
@@ -287,9 +294,11 @@ export interface PhraseSubmitInput {
 }
 
 export interface PhraseSubmitOutcome {
+  /** The requested batch, or the existing blocking batch when submission is deferred. */
   batch: PhraseBatchRecord;
   /** True only when this call created the batch record instead of resuming an existing one. */
   createdThisRun: boolean;
+  deferred?: boolean;
 }
 
 export interface PhraseReconcileResult {
@@ -1460,6 +1469,14 @@ export class PhraseWorkflow {
       const existing = await this.dependencies.state.readBatch(key);
       try {
         if (!existing) {
+          const blocked = await this.claimSubmission(
+            input,
+            key,
+            attempt,
+            sourceDigest,
+            previousFailedBatch,
+          );
+          if (blocked) return { batch: blocked, createdThisRun: false, deferred: true };
           return await this.createSubmission(
             input,
             key,
@@ -1492,6 +1509,82 @@ export class PhraseWorkflow {
     throw new PhraseWorkflowError(
       `Phrase submission failed ${MAX_SUBMISSION_ATTEMPTS} times for this source; fix the Phrase project before retrying`,
     );
+  }
+
+  private async claimSubmission(
+    input: PhraseSubmitInput,
+    key: string,
+    attempt: number,
+    sourceDigest: string,
+    retryParent?: PhraseBatchRecord,
+  ): Promise<PhraseBatchRecord | undefined> {
+    const scope = digest(
+      new TextEncoder().encode(
+        JSON.stringify([input.repository, input.baseRef, input.config.sourceCatalog.path]),
+      ),
+    );
+    const state = this.dependencies.state;
+    const claim = await state.readSubmission(scope);
+    if (claim?.batchKey === key) return;
+    // Bootstrap from legacy records once. Thereafter the claim identifies the latest batch;
+    // older completed jobs must not become dependencies of every future submission.
+    const candidateKeys = claim ? [claim.batchKey] : await state.listBatchKeys();
+    const candidates = await Promise.all(candidateKeys.map((key) => state.readBatch(key)));
+    const delegatedParents = new Set(
+      candidates.flatMap((stored) =>
+        stored?.record.retryParentDelegated && stored.record.retryParentBatchKey
+          ? [stored.record.retryParentBatchKey]
+          : [],
+      ),
+    );
+    for (const [index, stored] of candidates.entries()) {
+      if (!stored)
+        throw new PhraseWorkflowError(
+          "Phrase submission reservation has no batch record; explicit recovery is required before submitting newer source",
+          candidateKeys[index],
+        );
+      const record = stored.record;
+      if (
+        record.repository !== input.repository ||
+        record.baseRef !== input.baseRef ||
+        record.config.sourceCatalog.path !== input.config.sourceCatalog.path ||
+        record.key === retryParent?.key ||
+        delegatedParents.has(record.key) ||
+        isNoPhraseJobCreatedVoid(record)
+      )
+        continue;
+      // Batch completion also includes consumer PR decisions; only Phrase releases this gate.
+      if (["creating", "unknown"].includes(record.phase) || !record.jobs.length) return record;
+      const jobs = await Promise.all(
+        record.jobs.map((job) =>
+          this.getImportJob(record, job, {
+            expectedProjectUid: record.config.projectUid,
+            expectedSourceFilename: record.config.sourceCatalog.filename,
+          }),
+        ),
+      );
+      const complete = record.config.targetLocales.every(
+        (target) =>
+          assessReadiness(jobs.filter((job) => job.targetLang === target.phraseLocale)).phase ===
+          "ready",
+      );
+      if (!complete) return { ...record, jobs };
+    }
+    const reservation = makeBatchRecord(input, key, attempt, sourceDigest, this.now(), retryParent);
+    try {
+      await state.claimSubmission(scope, reservation, claim?.revision);
+    } catch (error) {
+      if (!(error instanceof PhraseBatchStateConflictError)) throw error;
+      const winner = await state.readSubmission(scope);
+      if (winner?.batchKey === key) return;
+      if (winner) {
+        const stored = await state.readBatch(winner.batchKey);
+        if (stored) return stored.record;
+      }
+      throw new PhraseWorkflowError(
+        "Concurrent Phrase submission is being reserved; retry reconciliation before submitting",
+      );
+    }
   }
 
   async reconcile(options: PhraseReconcileOptions = {}): Promise<PhraseReconcileResult[]> {
@@ -2952,7 +3045,7 @@ export class PhraseWorkflow {
         });
       }
     };
-    const baseCommit = await this.dependencies.repository.resolveCommit(record.baseRef);
+    let baseCommit = await this.dependencies.repository.resolveCommit(record.baseRef);
     let pinnedSource: SourceCatalogReadResult;
     let currentSource: SourceCatalogReadResult;
     try {
@@ -2964,11 +3057,18 @@ export class PhraseWorkflow {
       pushRetryingForTargets(error);
       return;
     }
+    // Deliver the submitted snapshot even if English has advanced. Branch from its immutable
+    // commit instead of overwriting newer English or trying to transplant obsolete FEO ids.
+    if (
+      !currentSource.bytes ||
+      currentSource.formatError ||
+      digest(currentSource.bytes) !== record.sourceDigest
+    ) {
+      baseCommit = record.sourceCommit;
+    }
     const invalidTemplateRead = pinnedSource.formatError
       ? { ref: record.sourceCommit, error: pinnedSource.formatError }
-      : currentSource.formatError
-        ? { ref: baseCommit, error: currentSource.formatError }
-        : undefined;
+      : undefined;
     if (invalidTemplateRead) {
       await this.closeBatch(
         record,
@@ -2980,32 +3080,12 @@ export class PhraseWorkflow {
       return;
     }
     const pinnedSourceBytes = pinnedSource.bytes;
-    const currentSourceBytes = currentSource.bytes;
     if (!pinnedSourceBytes || digest(pinnedSourceBytes) !== record.sourceDigest) {
       await this.closeBatch(
         record,
         revision,
         "failed",
         "Could not reproduce the exact source catalog submitted to Phrase",
-        results,
-      );
-      return;
-    }
-    if (!currentSourceBytes) {
-      pushRetryingForTargets(
-        new PhraseRepositoryError(
-          `Could not read source input ${sourceInputPath(record.config)} on ${baseCommit}`,
-          404,
-        ),
-      );
-      return;
-    }
-    if (digest(currentSourceBytes) !== record.sourceDigest) {
-      await this.closeBatch(
-        record,
-        revision,
-        "superseded",
-        "Source catalog changed on the recorded PR base ref",
         results,
       );
       return;
@@ -3216,43 +3296,7 @@ export class PhraseWorkflow {
           sourceCatalog,
           targetAdapter,
         );
-        const latestSource = await this.readSourceCatalog(record.config, baseCommit);
-        if (latestSource.formatError) {
-          await this.closeBatch(
-            record,
-            revision,
-            "superseded",
-            `Frontend template cannot be inlined on ${baseCommit}: ${latestSource.formatError}`,
-            results,
-          );
-          return;
-        }
-        const latestSourceBytes = latestSource.bytes;
-        if (!latestSourceBytes) {
-          push({
-            phase: "retrying",
-            reason: `Could not read source input ${sourceInputPath(record.config)} on ${baseCommit}`,
-          });
-          continue;
-        }
-        if (digest(latestSourceBytes) !== record.sourceDigest) {
-          await this.closeBatch(
-            record,
-            revision,
-            "superseded",
-            "Source catalog changed before the locale PR was created",
-            results,
-          );
-          return;
-        }
         const additionalFiles: { path: string; content: Uint8Array }[] = [];
-        let frontendTemplateData:
-          | {
-              path: string;
-              descriptors: FeoCatalog;
-              translated: Record<string, string>;
-            }
-          | undefined;
         // Batches submitted before FEO locale ids had to be canonical may hold `zh-cn`; inline those
         // under the canonical id, which also renames an existing block.
         const feoLocale = suggestFeoLocale(target.repositoryLocale) ?? target.repositoryLocale;
@@ -3280,7 +3324,6 @@ export class PhraseWorkflow {
                 inlineFeoLocale(template, descriptors, translated, feoLocale),
               ),
             });
-            frontendTemplateData = { path, descriptors, translated };
             const overlong = overlongFeoTranslationsWarning(feoLocale, translated);
             if (overlong) {
               warnings.push(overlong);
@@ -3290,78 +3333,6 @@ export class PhraseWorkflow {
             const problem = `Frontend template inline failed: ${error instanceof Error ? error.message : String(error)}`;
             errors.push(problem);
             findings.push({ severity: "error", problem });
-          }
-        }
-        const latestBaseCommit = await this.dependencies.repository.resolveCommit(record.baseRef);
-        if (latestBaseCommit !== baseCommit) {
-          const latestSource = await this.readSourceCatalog(record.config, latestBaseCommit);
-          if (latestSource.formatError) {
-            await this.closeBatch(
-              record,
-              revision,
-              "superseded",
-              `Frontend template cannot be inlined on ${latestBaseCommit}: ${latestSource.formatError}`,
-              results,
-            );
-            return;
-          }
-          const latestSourceBytes = latestSource.bytes;
-          if (!latestSourceBytes || digest(latestSourceBytes) !== record.sourceDigest) {
-            await this.closeBatch(
-              record,
-              revision,
-              "superseded",
-              "Source catalog changed before the locale PR was created",
-              results,
-            );
-            return;
-          }
-          if (record.config.frontendTemplate) {
-            const templatePath = record.config.frontendTemplate.path;
-            const latestTemplateBytes = await this.dependencies.repository.readFile(
-              templatePath,
-              latestBaseCommit,
-            );
-            if (!latestTemplateBytes) {
-              push({
-                phase: "retrying",
-                reason: `Could not read Frontend template ${templatePath} on ${latestBaseCommit}`,
-              });
-              continue;
-            }
-            const latestTemplate = new TextDecoder().decode(latestTemplateBytes);
-            if (
-              !record.config.frontendTemplate.generateSourceCatalog &&
-              !feoTemplateMatchesSourceCatalog(latestTemplate, sourceCatalog)
-            ) {
-              await this.closeBatch(
-                record,
-                revision,
-                "superseded",
-                `Frontend source catalog is stale on ${latestBaseCommit}: template English does not match the committed FEO source catalog`,
-                results,
-              );
-              return;
-            }
-            if (frontendTemplateData) {
-              try {
-                inlineFeoLocale(
-                  latestTemplate,
-                  frontendTemplateData.descriptors,
-                  frontendTemplateData.translated,
-                  feoLocale,
-                );
-              } catch (error) {
-                await this.closeBatch(
-                  record,
-                  revision,
-                  "superseded",
-                  `Frontend template changed on the recorded PR base ref: ${error instanceof Error ? error.message : String(error)}`,
-                  results,
-                );
-                return;
-              }
-            }
           }
         }
         const branch =
