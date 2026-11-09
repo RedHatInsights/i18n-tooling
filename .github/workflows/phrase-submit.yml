@@ -136,7 +136,6 @@ jobs:
           EXPECTED_PHRASE_PROJECT: ${{ inputs.expected-phrase-project }}
           EXPECTED_SOURCE_FILENAME: ${{ inputs.expected-source-filename }}
           TARGET_REPOSITORY: ${{ steps.github-auth.outputs.target-repository }}
-          CROSS_REPOSITORY: ${{ steps.github-auth.outputs.cross-repository }}
           GITHUB_AUTH_MODE: ${{ steps.github-auth.outputs.mode }}
           APP_SLUG: ${{ steps.create-app-token.outputs.app-slug }}
           PHRASE_PLATFORM_API_TOKEN: ${{ secrets.PHRASE_PLATFORM_API_TOKEN }}
