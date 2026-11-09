@@ -13,6 +13,11 @@ function rules(pattern: string, locale = "en"): string[] {
   return lintSourceMessage("id", pattern, locale).map((warning) => warning.rule);
 }
 
+/** Rules other than text-outside-branches, for fixtures that keep words beside a plural. */
+function plainRules(pattern: string, locale = "en"): string[] {
+  return rules(pattern, locale).filter((rule) => rule !== "text-outside-branches");
+}
+
 describe("plural-category-only-arguments", () => {
   it("reports a name rendered only in the one branch", () => {
     const [warning] = lintSourceMessage(
@@ -41,7 +46,7 @@ describe("plural-category-only-arguments", () => {
   });
 
   it("does not call an argument category-only when it also appears outside the plural", () => {
-    expect(rules("{name} has {count, plural, one {{name} item} other {# items}}")).toEqual([]);
+    expect(plainRules("{name} has {count, plural, one {{name} item} other {# items}}")).toEqual([]);
     expect(
       rules("{kind, select, other {{name}} x {{count, plural, one {{name}} other {#}}}}"),
     ).toEqual([]);
@@ -192,7 +197,7 @@ describe("unformatted-count-argument", () => {
       "id",
       "{count, plural, one {# role} other {# roles}} ({count}) of {total} for {userCount} in {name}",
       "en",
-    );
+    ).filter((finding) => finding.rule === "unformatted-count-argument");
 
     expect(findings.map((finding) => finding.message)).toEqual([
       expect.stringContaining("{count} prints a number as raw digits"),
@@ -203,7 +208,82 @@ describe("unformatted-count-argument", () => {
   });
 
   it("accepts number arguments and #", () => {
-    expect(rules("{count, plural, other {# roles}} of {total, number}")).toEqual([]);
+    expect(plainRules("{count, plural, other {# roles}} of {total, number}")).toEqual([]);
+  });
+});
+
+describe("text-outside-branches", () => {
+  const outside = (pattern: string) =>
+    rules(pattern).filter((rule) => rule === "text-outside-branches").length;
+
+  it("reports a plural whose sentence continues outside its branches", () => {
+    const findings = lintSourceMessage(
+      "id",
+      "The service {count, plural, one {account was} other {accounts were}} not added.",
+      "en",
+    ).filter((finding) => finding.rule === "text-outside-branches");
+
+    expect(findings).toEqual([
+      {
+        id: "id",
+        rule: "text-outside-branches",
+        severity: "warning",
+        message: expect.stringContaining('"id": plural {count} is part of a sentence'),
+      },
+    ]);
+  });
+
+  it("reports select and selectordinal, and words inside a sibling tag", () => {
+    expect(outside("{gender, select, female {She} other {They}} invited you")).toBe(1);
+    expect(outside("{n, selectordinal, one {#st} other {#th}} place")).toBe(1);
+    expect(outside("<b>Remove</b> {count, plural, one {account} other {accounts}}")).toBe(1);
+    expect(outside("サービス{count, plural, other {アカウント}}")).toBe(1);
+  });
+
+  it("sees through formatting tags around a selector", () => {
+    expect(outside("Remove <b>{count, plural, one {account} other {accounts}}</b> now.")).toBe(1);
+    expect(outside("<i>Remove</i> <b>{count, plural, one {account} other {accounts}}</b>")).toBe(1);
+    expect(
+      outside(
+        "{gender, select, female {She removed <b>{count, plural, one {# file} other {# files}}</b>.} other {They removed <b>{count, plural, one {# file} other {# files}}</b>.}}",
+      ),
+    ).toBe(2);
+  });
+
+  it("accepts a whole-sentence selector inside a formatting tag", () => {
+    expect(
+      outside(
+        "<b>{count, plural, one {The account was removed.} other {The accounts were removed.}}</b>",
+      ),
+    ).toBe(0);
+    expect(
+      outside(
+        "{count, plural, one {<b>{name}</b> was removed.} other {<b>#</b> accounts were removed.}}",
+      ),
+    ).toBe(0);
+  });
+
+  it("reports a plural nested in a branch beside words of that branch", () => {
+    expect(
+      outside(
+        "{gender, select, female {She has {count, plural, one {# file} other {# files}}} other {They have {count, plural, one {# file} other {# files}}}}",
+      ),
+    ).toBe(2);
+  });
+
+  it("accepts whole sentences in branches, and arguments or punctuation outside them", () => {
+    expect(
+      outside(
+        "{count, plural, one {The service account was not added.} other {The service accounts were not added.}}",
+      ),
+    ).toBe(0);
+    expect(outside("{count, plural, one {# role} other {# roles}}: {name}.")).toBe(0);
+    expect(
+      outside(
+        "{gender, select, female {{count, plural, one {She has # file.} other {She has # files.}}} other {{count, plural, one {They have # file.} other {They have # files.}}}}",
+      ),
+    ).toBe(0);
+    expect(outside("Remove {name}?")).toBe(0);
   });
 });
 

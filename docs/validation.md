@@ -57,7 +57,9 @@ The workflow installs consumer dependencies with `package-manager` (npm by defau
 The source-lint rule recognizes FormatJS `formatMessage`, `defineMessage(s)` and `<FormattedMessage>`.
 
 - **Errors:** a message ID missing from the catalog (`sourceLint.catalog`, or `catalog-path` without a config), a missing or dynamic inline ID, an opaque descriptor expression, invalid ICU, a plural without `other`, a hard-coded `1` in a `one` branch, and plural offsets.
-- **Warnings:** inline tags, sentence fragments, `{count}` instead of `#`, multiple plurals, and selectors with more than 20 combinations.
+- **Warnings:** inline tags, leading or trailing whitespace that suggests string concatenation, `{count}` instead of `#`, multiple plurals, and selectors with more than 20 combinations.
+
+Source catalog validation (`validate --role source`, `validate-project`) adds warnings for plural semantics, including a sentence that continues outside a plural's branches (`text-outside-branches`). See the [rule list](../packages/i18n-pipeline/README.md#cli).
 
 Declare reusable descriptors with `defineMessages` so their IDs are checked where they are defined.
 
