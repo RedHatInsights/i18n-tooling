@@ -677,6 +677,18 @@ function makeJapaneseWorkflowScenario(
 const PHRASE_JOB_VISIBILITY_GRACE_TEST_MS = 15 * 60 * 1000;
 
 describe("serialized Phrase submissions", () => {
+  it("does not let same-source --retry-failed overlap a locale still in progress", async () => {
+    const s = makeJapaneseWorkflowScenario();
+    s.phrase.jobStatus = "NEW";
+    s.phrase.jobStatuses.set("job-fr", "CANCELLED");
+    await s.workflow.submit(s.input);
+    await s.workflow.reconcile();
+
+    const outcome = await s.workflow.submitWithOutcome({ ...s.input, retryFailed: true });
+    expect(outcome.deferred?.kind).toBe("in-progress");
+    expect(s.phrase.createJobCalls).toBe(1);
+    expect(await s.state.listBatches()).toHaveLength(1);
+  });
   it("keeps a successful retry in flight until its own final jobs complete", async () => {
     const s = makeJapaneseWorkflowScenario();
     s.phrase.createError = new Error("request rejected");
@@ -2179,7 +2191,9 @@ describe("PhraseWorkflow submission", () => {
     expect((await workflow.submit(input)).key).toBe(submitted.key);
     expect(phrase.createJobCalls).toBe(1);
 
+    phrase.importStatuses.set("job-fr", "ERROR");
     phrase.importStatus = "OK";
+    phrase.jobParts = [{ uid: "job-fr-retry", targetLang: "fr", workflowLevel: 1 }];
     const retried = await workflow.submit({ ...input, retryFailed: true });
 
     expect(retried.phase).toBe("ready");
@@ -2518,8 +2532,8 @@ describe("PhraseWorkflow submission", () => {
       "job-ja-retry",
       new TextEncoder().encode('{"greeting":"こんにちは {name}"}'),
     );
-    phrase.getJobErrors.set("job-fr", new PhraseApiError("Phrase job was not found", 404));
     const retried = await workflow.submit({ ...input, retryFailed: true });
+    phrase.getJobErrors.set("job-fr", new PhraseApiError("Phrase job was not found", 404));
 
     expect(retried.key).not.toBe(first.key);
     expect(retried.attempt).toBe(1);
@@ -5960,7 +5974,12 @@ describe("PhraseWorkflow submission", () => {
       const retry = [...state.records.values()].find(
         ({ record }) => record.retryParentBatchKey === parent.key,
       );
-      expect(phrase.getJobCalls.map(({ jobUid }) => jobUid)).toEqual(["job-fr", "job-ja-retry"]);
+      expect(phrase.getJobCalls.map(({ jobUid }) => jobUid)).toEqual([
+        "job-fr",
+        "job-ja", // Refresh the retry parent's jobs before reserving another batch.
+        "job-fr",
+        "job-ja-retry",
+      ]);
       expect(phrase.asyncRequestIds).toEqual([]);
       expect(phrase.targetDownloadCalls).toBe(downloadsBeforeRetry);
       expect(state.writes).toBe(writesBeforeRetry + 2);

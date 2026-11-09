@@ -1523,7 +1523,7 @@ export class PhraseWorkflow {
       const existing = await this.dependencies.state.readBatch(key);
       try {
         if (!existing) {
-          const gate = await this.checkSubmissionReservation(input, key, previousFailedBatch);
+          const gate = await this.checkSubmissionReservation(input, key);
           if (gate.deferred) return gate.deferred;
           return await this.createSubmission(
             input,
@@ -1568,7 +1568,6 @@ export class PhraseWorkflow {
   private async checkSubmissionReservation(
     input: PhraseSubmitInput,
     key: string,
-    retryParent?: PhraseBatchRecord,
   ): Promise<SubmissionGate> {
     const scope = submissionScope(input.repository, input.baseRef, input.config.sourceCatalog.path);
     const state = this.dependencies.state;
@@ -1590,7 +1589,7 @@ export class PhraseWorkflow {
     } else {
       blocker = await this.newestLegacyBatch(input);
     }
-    if (!blocker || blocker.key === retryParent?.key || hasNoPhraseWork(blocker)) {
+    if (!blocker || hasNoPhraseWork(blocker)) {
       return { reservation: target };
     }
     const deferral = await this.assessBlockingBatch(blocker, input);
