@@ -7,6 +7,7 @@ import type {
   PhraseLocalePullRequestUpdateResult,
   PhraseLocalePullRequest,
   PhrasePullRequestState,
+  PhraseSubmissionReservation,
   PhraseWorkflowRepository,
   StoredPhraseBatch,
 } from "./phrase-workflow.js";
@@ -85,6 +86,10 @@ function fileBytes(value: unknown): GitHubFile | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSha256Digest(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 }
 
 function nonEmptyString(value: unknown): value is string {
@@ -278,21 +283,17 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     );
   }
 
-  async readSubmission(scope: string): Promise<{ batchKey: string; revision: string } | undefined> {
+  async readSubmissionReservation(scope: string): Promise<PhraseSubmissionReservation | undefined> {
     const file = await this.getFile(this.submissionPath(scope), this.options.stateBranch);
     if (!file) return undefined;
     const value: unknown = JSON.parse(new TextDecoder().decode(file.bytes));
-    if (
-      !isRecord(value) ||
-      typeof value.batchKey !== "string" ||
-      !/^[a-f0-9]{64}$/.test(value.batchKey)
-    ) {
+    if (!isRecord(value) || !isSha256Digest(value.batchKey)) {
       throw new GitHubRepositoryError("Phrase submission reservation is invalid", 500);
     }
     return { batchKey: value.batchKey, revision: file.sha };
   }
 
-  async claimSubmission(
+  async reserveSubmission(
     scope: string,
     record: PhraseBatchRecord,
     expectedRevision?: string,
@@ -961,13 +962,12 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
   }
 
   private batchPath(key: string): string {
-    if (!/^[a-f0-9]{64}$/.test(key))
-      throw new TypeError("Phrase batch key must be a SHA-256 digest");
+    if (!isSha256Digest(key)) throw new TypeError("Phrase batch key must be a SHA-256 digest");
     return `${this.stateDirectory}/${key}.json`;
   }
 
   private submissionPath(scope: string): string {
-    if (!/^[a-f0-9]{64}$/.test(scope))
+    if (!isSha256Digest(scope))
       throw new TypeError("Phrase submission scope must be a SHA-256 digest");
     return `${this.stateDirectory}/submissions/${scope}.json`;
   }

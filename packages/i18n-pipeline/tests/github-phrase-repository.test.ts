@@ -238,26 +238,26 @@ describe("GitHubPhraseRepository", () => {
         return saved ? response({ type: "file", encoding: "base64", ...saved }) : response({}, 404);
       },
     });
-    expect(await repository.readSubmission(scope)).toBeUndefined();
+    expect(await repository.readSubmissionReservation(scope)).toBeUndefined();
     const first = batchRecord();
     const second = batchRecord("b".repeat(64));
     const concurrent = await Promise.allSettled([
-      repository.claimSubmission(scope, first),
-      repository.claimSubmission(scope, second),
+      repository.reserveSubmission(scope, first),
+      repository.reserveSubmission(scope, second),
     ]);
     expect(concurrent.filter((result) => result.status === "fulfilled")).toHaveLength(1);
     expect(concurrent.find((result) => result.status === "rejected")).toMatchObject({
       reason: expect.any(PhraseBatchStateConflictError),
     });
-    expect(await repository.readSubmission(scope)).toEqual({
+    expect(await repository.readSubmissionReservation(scope)).toEqual({
       batchKey: first.key,
       revision: "blob-1",
     });
-    await expect(repository.claimSubmission(scope, second, "stale-sha")).rejects.toBeInstanceOf(
+    await expect(repository.reserveSubmission(scope, second, "stale-sha")).rejects.toBeInstanceOf(
       PhraseBatchStateConflictError,
     );
-    await repository.claimSubmission(scope, second, "blob-1");
-    expect(await repository.readSubmission(scope)).toEqual({
+    await repository.reserveSubmission(scope, second, "blob-1");
+    expect(await repository.readSubmissionReservation(scope)).toEqual({
       batchKey: second.key,
       revision: "blob-2",
     });

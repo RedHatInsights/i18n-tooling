@@ -152,10 +152,19 @@ export interface StoredPhraseBatch {
   revision: string;
 }
 
+/** Names the latest batch submitted for one repository, base ref and source catalog. */
+export interface PhraseSubmissionReservation {
+  batchKey: string;
+  revision: string;
+}
+
 export interface PhraseBatchStateStore {
-  readSubmission(scope: string): Promise<{ batchKey: string; revision: string } | undefined>;
-  /** Atomic compare-and-swap; a claim survives crashes and must never expire automatically. */
-  claimSubmission(
+  readSubmissionReservation(scope: string): Promise<PhraseSubmissionReservation | undefined>;
+  /**
+   * Atomic compare-and-swap, written after the batch record exists and before any Phrase job is
+   * created. A reservation never expires automatically.
+   */
+  reserveSubmission(
     scope: string,
     record: PhraseBatchRecord,
     expectedRevision?: string,
@@ -293,12 +302,28 @@ export interface PhraseSubmitInput {
   retryFailed?: boolean;
 }
 
+/**
+ * `in-progress`: Phrase work is still running; the next sync submits the latest source.
+ * `recovery-required`: an operator must act (failed or unverifiable jobs, unknown outcome).
+ * `lookup-failed`: Phrase status could not be read; the next sync checks again.
+ */
+export type PhraseSubmitDeferralKind = "in-progress" | "recovery-required" | "lookup-failed";
+
+export interface PhraseSubmitDeferral {
+  kind: PhraseSubmitDeferralKind;
+  reason: string;
+  /** The source commit that was not submitted. */
+  sourceCommit: string;
+  /** Final-step jobs of the blocking batch, where known. */
+  blockingJobs: PhraseJobPart[];
+}
+
 export interface PhraseSubmitOutcome {
-  /** The requested batch, or the existing blocking batch when submission is deferred. */
+  /** The requested batch, or the blocking batch when submission is deferred. */
   batch: PhraseBatchRecord;
   /** True only when this call created the batch record instead of resuming an existing one. */
   createdThisRun: boolean;
-  deferred?: boolean;
+  deferred?: PhraseSubmitDeferral;
 }
 
 export interface PhraseReconcileResult {
@@ -1225,6 +1250,35 @@ function isNoPhraseJobCreatedVoid(record: PhraseBatchRecord): boolean {
   );
 }
 
+/** Voided, or failed definitively before Phrase created any job: nothing to wait for. */
+function hasNoPhraseWork(record: PhraseBatchRecord): boolean {
+  return record.phase === "failed" && record.jobs.length === 0;
+}
+
+interface SubmissionReservationTarget {
+  scope: string;
+  expectedRevision?: string;
+}
+
+type SubmissionGate =
+  | { deferred: PhraseSubmitOutcome }
+  | { deferred?: undefined; reservation: SubmissionReservationTarget };
+
+function submissionScope(repository: string, baseRef: string, sourcePath: string): string {
+  return digest(new TextEncoder().encode(JSON.stringify([repository, baseRef, sourcePath])));
+}
+
+function assertRefreshedJobs(
+  jobs: readonly PhraseJobPart[],
+  requestedJobs: readonly PhraseJobPart[],
+  expectedSourceFilename?: string,
+): void {
+  for (const [index, job] of jobs.entries()) {
+    assertExpectedJobUid(job, requestedJobs[index]!.uid);
+    assertExpectedJobFilename(job, expectedSourceFilename);
+  }
+}
+
 function localePullRequestBranch(batchKey: string, repositoryLocale: string): string {
   const localeSlug = repositoryLocale.replace(/[^A-Za-z0-9._-]+/g, "-");
   return `i18n/phrase-${batchKey.slice(0, 16)}-${localeSlug}`;
@@ -1469,14 +1523,8 @@ export class PhraseWorkflow {
       const existing = await this.dependencies.state.readBatch(key);
       try {
         if (!existing) {
-          const blocked = await this.claimSubmission(
-            input,
-            key,
-            attempt,
-            sourceDigest,
-            previousFailedBatch,
-          );
-          if (blocked) return { batch: blocked, createdThisRun: false, deferred: true };
+          const gate = await this.checkSubmissionReservation(input, key, previousFailedBatch);
+          if (gate.deferred) return gate.deferred;
           return await this.createSubmission(
             input,
             key,
@@ -1484,6 +1532,7 @@ export class PhraseWorkflow {
             sourceDigest,
             previousFailedBatch,
             pins,
+            gate.reservation,
           );
         }
         if (isNoPhraseJobCreatedVoid(existing.record)) {
@@ -1511,80 +1560,189 @@ export class PhraseWorkflow {
     );
   }
 
-  private async claimSubmission(
+  /**
+   * One Phrase batch per repository, base ref and source catalog may be in flight. Only the
+   * reserved (latest) batch can block; before the first reservation, the newest legacy batch
+   * stands in for it.
+   */
+  private async checkSubmissionReservation(
     input: PhraseSubmitInput,
     key: string,
-    attempt: number,
-    sourceDigest: string,
     retryParent?: PhraseBatchRecord,
-  ): Promise<PhraseBatchRecord | undefined> {
-    const scope = digest(
-      new TextEncoder().encode(
-        JSON.stringify([input.repository, input.baseRef, input.config.sourceCatalog.path]),
-      ),
-    );
+  ): Promise<SubmissionGate> {
+    const scope = submissionScope(input.repository, input.baseRef, input.config.sourceCatalog.path);
     const state = this.dependencies.state;
-    const claim = await state.readSubmission(scope);
-    if (claim?.batchKey === key) return;
-    // Bootstrap from legacy records once. Thereafter the claim identifies the latest batch;
-    // older completed jobs must not become dependencies of every future submission.
-    const candidateKeys = claim ? [claim.batchKey] : await state.listBatchKeys();
-    const candidates = await Promise.all(candidateKeys.map((key) => state.readBatch(key)));
-    const delegatedParents = new Set(
-      candidates.flatMap((stored) =>
-        stored?.record.retryParentDelegated && stored.record.retryParentBatchKey
-          ? [stored.record.retryParentBatchKey]
-          : [],
-      ),
-    );
-    for (const [index, stored] of candidates.entries()) {
-      if (!stored)
+    const reservation = await state.readSubmissionReservation(scope);
+    const target: SubmissionReservationTarget = reservation
+      ? { scope, expectedRevision: reservation.revision }
+      : { scope };
+    if (reservation?.batchKey === key) return { reservation: target };
+    let blocker: PhraseBatchRecord | undefined;
+    if (reservation) {
+      const stored = await state.readBatch(reservation.batchKey);
+      if (!stored) {
         throw new PhraseWorkflowError(
-          "Phrase submission reservation has no batch record; explicit recovery is required before submitting newer source",
-          candidateKeys[index],
+          "Phrase submission reservation names a missing batch record; restore the record or delete the reservation on the state branch before submitting newer source",
+          reservation.batchKey,
         );
-      const record = stored.record;
-      if (
-        record.repository !== input.repository ||
-        record.baseRef !== input.baseRef ||
-        record.config.sourceCatalog.path !== input.config.sourceCatalog.path ||
-        record.key === retryParent?.key ||
-        delegatedParents.has(record.key) ||
-        isNoPhraseJobCreatedVoid(record)
-      )
-        continue;
-      // Batch completion also includes consumer PR decisions; only Phrase releases this gate.
-      if (["creating", "unknown"].includes(record.phase) || !record.jobs.length) return record;
-      const jobs = await Promise.all(
-        record.jobs.map((job) =>
-          this.getImportJob(record, job, {
-            expectedProjectUid: record.config.projectUid,
-            expectedSourceFilename: record.config.sourceCatalog.filename,
-          }),
-        ),
-      );
-      const complete = record.config.targetLocales.every(
-        (target) =>
-          assessReadiness(jobs.filter((job) => job.targetLang === target.phraseLocale)).phase ===
-          "ready",
-      );
-      if (!complete) return { ...record, jobs };
+      }
+      blocker = stored.record;
+    } else {
+      blocker = await this.newestLegacyBatch(input);
     }
-    const reservation = makeBatchRecord(input, key, attempt, sourceDigest, this.now(), retryParent);
+    if (!blocker || blocker.key === retryParent?.key || hasNoPhraseWork(blocker)) {
+      return { reservation: target };
+    }
+    const deferral = await this.assessBlockingBatch(blocker, input);
+    if (!deferral) return { reservation: target };
+    return { deferred: { batch: blocker, createdThisRun: false, deferred: deferral } };
+  }
+
+  private async newestLegacyBatch(
+    input: PhraseSubmitInput,
+  ): Promise<PhraseBatchRecord | undefined> {
+    const state = this.dependencies.state;
+    const stored = await Promise.all(
+      (await state.listBatchKeys()).map((key) => state.readBatch(key)),
+    );
+    return stored
+      .flatMap((entry) => (entry ? [entry.record] : []))
+      .filter(
+        (record) =>
+          record.repository === input.repository &&
+          record.baseRef === input.baseRef &&
+          record.config.sourceCatalog.path === input.config.sourceCatalog.path &&
+          // Earlier releases superseded batches on source change and cancelled their jobs.
+          record.phase !== "superseded" &&
+          record.phase !== "completed" &&
+          !hasNoPhraseWork(record),
+      )
+      .sort(
+        (left, right) =>
+          Date.parse(right.createdAt) - Date.parse(left.createdAt) ||
+          (right.attempt ?? 0) - (left.attempt ?? 0) ||
+          right.key.localeCompare(left.key),
+      )[0];
+  }
+
+  /** Returns why `record` defers a newer submission, or undefined when it releases it. */
+  private async assessBlockingBatch(
+    record: PhraseBatchRecord,
+    input: PhraseSubmitInput,
+  ): Promise<PhraseSubmitDeferral | undefined> {
+    const defer = (
+      kind: PhraseSubmitDeferralKind,
+      reason: string,
+      blockingJobs: PhraseJobPart[],
+    ): PhraseSubmitDeferral => ({ kind, reason, sourceCommit: input.sourceCommit, blockingJobs });
+    const batch = `batch ${record.key.slice(0, 12)}`;
+    if (record.phase === "creating" || record.phase === "unknown") {
+      return record.jobs.length
+        ? defer(
+            "recovery-required",
+            `Phrase job creation outcome of ${batch} is unknown; inspect Phrase and bind or void the batch`,
+            record.jobs,
+          )
+        : defer(
+            "in-progress",
+            `Phrase job creation of ${batch} is not confirmed yet; reconciliation binds or voids it`,
+            [],
+          );
+    }
+    const pins: PhrasePinOptions = {
+      expectedProjectUid: record.config.projectUid,
+      expectedSourceFilename: record.config.sourceCatalog.filename,
+    };
+    const pending: string[] = [];
+    const failed: string[] = [];
+    const blockingJobs: PhraseJobPart[] = [];
+    for (const target of record.config.targetLocales) {
+      const locale = target.phraseLocale;
+      const targetJobs = record.jobs.filter((job) => job.targetLang === locale);
+      let readiness: LocaleReadiness;
+      try {
+        const jobs = await Promise.all(
+          targetJobs.map((job) => this.getImportJob(record, job, pins)),
+        );
+        assertRefreshedJobs(jobs, targetJobs, pins.expectedSourceFilename);
+        readiness = jobs.length
+          ? assessReadiness(jobs)
+          : { phase: "failed", reason: "Phrase returned no job part for this target locale" };
+        if (readiness.phase !== "ready") blockingJobs.push(...finalWorkflowJobs(jobs));
+      } catch (error) {
+        blockingJobs.push(...finalWorkflowJobs(targetJobs));
+        if (error instanceof PhraseJobVisibilityError) {
+          pending.push(locale);
+        } else if (error instanceof PhrasePinMismatchError) {
+          // A definite answer: the stored job no longer verifies (for example, it was deleted).
+          failed.push(`${locale}: ${error.message}`);
+        } else {
+          return defer(
+            "lookup-failed",
+            `Could not read Phrase status of ${batch} for ${locale}: ${safeFailureReason(error)}`,
+            finalWorkflowJobs(record.jobs),
+          );
+        }
+        continue;
+      }
+      if (readiness.phase === "pending") pending.push(locale);
+      else if (readiness.phase === "failed") failed.push(`${locale}: ${readiness.reason}`);
+    }
+    if (pending.length) {
+      return defer(
+        "in-progress",
+        `Final-step Phrase jobs of ${batch} are not complete for ${pending.join(", ")}`,
+        blockingJobs,
+      );
+    }
+    // Explicit recovery: --retry-failed releases failed jobs once nothing else is in flight.
+    if (failed.length && !input.retryFailed) {
+      return defer(
+        "recovery-required",
+        `Phrase jobs of ${batch} failed (${failed.join("; ")}); fix them in Phrase, or rerun with --retry-failed to submit the latest source`,
+        blockingJobs,
+      );
+    }
+    return undefined;
+  }
+
+  /** Reserves the scope for `record`; a run that loses the race voids its job-less record. */
+  private async reserveSubmission(
+    record: PhraseBatchRecord,
+    revision: string,
+    target: SubmissionReservationTarget,
+    sourceCommit: string,
+  ): Promise<PhraseSubmitOutcome | undefined> {
+    const state = this.dependencies.state;
     try {
-      await state.claimSubmission(scope, reservation, claim?.revision);
+      await state.reserveSubmission(target.scope, record, target.expectedRevision);
+      return undefined;
     } catch (error) {
       if (!(error instanceof PhraseBatchStateConflictError)) throw error;
-      const winner = await state.readSubmission(scope);
-      if (winner?.batchKey === key) return;
-      if (winner) {
-        const stored = await state.readBatch(winner.batchKey);
-        if (stored) return stored.record;
-      }
+    }
+    record.phase = "failed";
+    record.failureReason =
+      "A concurrent run reserved this submission first; no Phrase job was created";
+    record.voidedEmptySubmission = true;
+    await state.updateBatch(record, revision);
+    const winner = await state.readSubmissionReservation(target.scope);
+    const stored = winner && (await state.readBatch(winner.batchKey));
+    if (!stored) {
       throw new PhraseWorkflowError(
-        "Concurrent Phrase submission is being reserved; retry reconciliation before submitting",
+        "A concurrent run reserved this Phrase submission, but its batch record is not readable; rerun submit",
+        record.key,
       );
     }
+    return {
+      batch: stored.record,
+      createdThisRun: false,
+      deferred: {
+        kind: "in-progress",
+        reason: `A concurrent run reserved this submission for batch ${stored.record.key.slice(0, 12)}`,
+        sourceCommit,
+        blockingJobs: finalWorkflowJobs(stored.record.jobs),
+      },
+    };
   }
 
   async reconcile(options: PhraseReconcileOptions = {}): Promise<PhraseReconcileResult[]> {
@@ -2417,8 +2575,9 @@ export class PhraseWorkflow {
     key: string,
     attempt: number,
     sourceDigest: string,
-    previousRecord?: PhraseBatchRecord,
-    pins: PhrasePinOptions = {},
+    previousRecord: PhraseBatchRecord | undefined,
+    pins: PhrasePinOptions,
+    reservation: SubmissionReservationTarget,
   ): Promise<PhraseSubmitOutcome> {
     if (previousRecord && hasPhrasePins(pins)) {
       assertExpectedBatchConfig(previousRecord, pins);
@@ -2441,6 +2600,9 @@ export class PhraseWorkflow {
       }
       throw error;
     }
+    // Reserve only once the record exists, so a reservation always names a readable batch.
+    const lost = await this.reserveSubmission(record, revision, reservation, input.sourceCommit);
+    if (lost) return lost;
 
     let created: PhraseJobCreation;
     try {
@@ -3045,13 +3207,13 @@ export class PhraseWorkflow {
         });
       }
     };
-    let baseCommit = await this.dependencies.repository.resolveCommit(record.baseRef);
+    const latestBaseCommit = await this.dependencies.repository.resolveCommit(record.baseRef);
     let pinnedSource: SourceCatalogReadResult;
     let currentSource: SourceCatalogReadResult;
     try {
       [pinnedSource, currentSource] = await Promise.all([
         this.readSourceCatalog(record.config, record.sourceCommit),
-        this.readSourceCatalog(record.config, baseCommit),
+        this.readSourceCatalog(record.config, latestBaseCommit),
       ]);
     } catch (error) {
       pushRetryingForTargets(error);
@@ -3059,22 +3221,18 @@ export class PhraseWorkflow {
     }
     // Deliver the submitted snapshot even if English has advanced. Branch from its immutable
     // commit instead of overwriting newer English or trying to transplant obsolete FEO ids.
-    if (
+    // Locale PRs are based on this commit, so later checks validate the content they deliver.
+    const sourceAdvanced =
       !currentSource.bytes ||
-      currentSource.formatError ||
-      digest(currentSource.bytes) !== record.sourceDigest
-    ) {
-      baseCommit = record.sourceCommit;
-    }
-    const invalidTemplateRead = pinnedSource.formatError
-      ? { ref: record.sourceCommit, error: pinnedSource.formatError }
-      : undefined;
-    if (invalidTemplateRead) {
+      Boolean(currentSource.formatError) ||
+      digest(currentSource.bytes) !== record.sourceDigest;
+    const baseCommit = sourceAdvanced ? record.sourceCommit : latestBaseCommit;
+    if (pinnedSource.formatError) {
       await this.closeBatch(
         record,
         revision,
         "superseded",
-        `Frontend template cannot be inlined on ${invalidTemplateRead.ref}: ${invalidTemplateRead.error}`,
+        `Frontend template cannot be inlined on ${record.sourceCommit}: ${pinnedSource.formatError}`,
         results,
       );
       return;
@@ -3182,10 +3340,7 @@ export class PhraseWorkflow {
         const jobs = pinnedJobs
           ? pinnedJobs.filter((job) => job.targetLang === target.phraseLocale)
           : await Promise.all(targetJobs.map((job) => this.getImportJob(record, job, pins)));
-        for (const [index, job] of jobs.entries()) {
-          assertExpectedJobUid(job, targetJobs[index]!.uid);
-          assertExpectedJobFilename(job, pins.expectedSourceFilename);
-        }
+        assertRefreshedJobs(jobs, targetJobs, pins.expectedSourceFilename);
         refreshedJobs.push(...jobs);
         readiness.set(target.phraseLocale, assessReadiness(jobs));
       } catch (error) {

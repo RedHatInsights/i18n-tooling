@@ -39,10 +39,10 @@ const config: PhraseWorkflowConfig = {
 
 class MemoryStateStore implements PhraseBatchStateStore {
   readonly submissions = new Map<string, { batchKey: string; revision: string }>();
-  async readSubmission(scope: string) {
+  async readSubmissionReservation(scope: string) {
     return this.submissions.get(scope);
   }
-  async claimSubmission(scope: string, record: PhraseBatchRecord, expectedRevision?: string) {
+  async reserveSubmission(scope: string, record: PhraseBatchRecord, expectedRevision?: string) {
     if (this.submissions.get(scope)?.revision !== expectedRevision)
       throw new PhraseBatchStateConflictError();
     this.submissions.set(scope, { batchKey: record.key, revision: record.key });
@@ -691,10 +691,10 @@ describe("serialized Phrase submissions", () => {
         sourceCatalog: { ...config.sourceCatalog, importSettingsUid: "next-settings" },
       },
     };
-    expect((await s.workflow.submitWithOutcome(next)).deferred).toBe(true);
+    expect((await s.workflow.submitWithOutcome(next)).deferred?.kind).toBe("in-progress");
     expect(s.phrase.createJobCalls).toBe(2);
     s.state.submissions.clear(); // Also verify bootstrap from legacy retry records.
-    expect((await s.workflow.submitWithOutcome(next)).deferred).toBe(true);
+    expect((await s.workflow.submitWithOutcome(next)).deferred?.kind).toBe("in-progress");
     s.phrase.jobStatus = "COMPLETED";
     expect((await s.workflow.submitWithOutcome(next)).createdThisRun).toBe(true);
   });
@@ -714,7 +714,7 @@ describe("serialized Phrase submissions", () => {
     expect(s.phrase.createJobCalls).toBe(2);
   });
 
-  it("blocks on a later workflow step and a failed final job, without creating replacement work", async () => {
+  it("blocks on a later workflow step and a failed final job until explicit --retry-failed recovery", async () => {
     const s = makeJapaneseWorkflowScenario();
     s.phrase.jobParts.push({ uid: "review-fr", targetLang: "fr", workflowLevel: 2 });
     s.phrase.jobStatuses.set("review-fr", "NEW");
@@ -726,19 +726,31 @@ describe("serialized Phrase submissions", () => {
         sourceCatalog: { ...config.sourceCatalog, importSettingsUid: "next-settings" },
       },
     };
-    expect((await s.workflow.submitWithOutcome(next)).deferred).toBe(true);
+    const pending = await s.workflow.submitWithOutcome(next);
+    expect(pending.deferred).toMatchObject({ kind: "in-progress", sourceCommit: "abc123" });
+    expect(pending.deferred?.blockingJobs.map(({ uid }) => uid)).toEqual(["review-fr"]);
+    // Partial failure: another locale still in flight, so --retry-failed must not release.
     s.phrase.jobStatuses.set("review-fr", "CANCELLED");
-    expect((await s.workflow.submitWithOutcome(next)).deferred).toBe(true);
+    s.phrase.jobStatuses.set("job-ja", "NEW");
+    const partial = await s.workflow.submitWithOutcome({ ...next, retryFailed: true });
+    expect(partial.deferred?.kind).toBe("in-progress");
+    s.phrase.jobStatuses.set("job-ja", "COMPLETED");
+    const failed = await s.workflow.submitWithOutcome(next);
+    expect(failed.deferred?.kind).toBe("recovery-required");
+    expect(failed.deferred?.reason).toContain("--retry-failed");
     expect(s.phrase.createJobCalls).toBe(1);
+    // Base source has moved on; explicit recovery submits it as a fresh batch.
+    const recovered = await s.workflow.submitWithOutcome({ ...next, retryFailed: true });
+    expect(recovered.createdThisRun).toBe(true);
+    expect(recovered.batch.retryParentBatchKey).toBeUndefined();
+    expect(s.phrase.createJobCalls).toBe(2);
   });
 
-  it("fails closed after a crash between reservation and batch creation, and resumes the reserved identity", async () => {
+  it("does not block newer source on a definite job-creation failure", async () => {
     const s = makeJapaneseWorkflowScenario();
-    const create = s.state.createBatch.bind(s.state);
-    s.state.createBatch = async () => {
-      throw new Error("storage unavailable");
-    };
-    await expect(s.workflow.submit(s.input)).rejects.toThrow("storage unavailable");
+    s.phrase.createError = new PhraseApiError("Phrase API returned HTTP 403", 403);
+    await expect(s.workflow.submit(s.input)).rejects.toThrow("HTTP 403");
+    s.phrase.createError = undefined;
     const next = {
       ...s.input,
       config: {
@@ -746,10 +758,57 @@ describe("serialized Phrase submissions", () => {
         sourceCatalog: { ...config.sourceCatalog, importSettingsUid: "next-settings" },
       },
     };
-    await expect(s.workflow.submit(next)).rejects.toThrow("explicit recovery");
+    expect((await s.workflow.submitWithOutcome(next)).createdThisRun).toBe(true);
+    expect(s.phrase.createJobCalls).toBe(2);
+  });
+
+  it("bootstraps without a reservation from the newest legacy batch that may be in flight", async () => {
+    for (const phase of ["superseded", "completed", "ready"] as const) {
+      const s = makeJapaneseWorkflowScenario();
+      s.phrase.jobStatus = "NEW";
+      const legacy = await s.workflow.submit(s.input);
+      s.state.submissions.clear();
+      s.state.records.get(legacy.key)!.record.phase = phase;
+      const outcome = await s.workflow.submitWithOutcome({
+        ...s.input,
+        config: {
+          ...s.input.config,
+          sourceCatalog: { ...config.sourceCatalog, importSettingsUid: "next-settings" },
+        },
+      });
+      if (phase === "ready") {
+        // Its Phrase jobs are still open, so the legacy batch blocks.
+        expect(outcome.deferred?.kind).toBe("in-progress");
+      } else {
+        // Earlier releases superseded batches and cancelled or recycled their jobs. Skipping
+        // them without a lookup means even open (NEW) jobs there cannot block every later submit.
+        expect(outcome.createdThisRun).toBe(true);
+      }
+    }
+  });
+
+  it("fails closed after a crash between batch creation and reservation, then recovers without an operator", async () => {
+    let clock = Date.parse("2026-10-19T10:00:00Z");
+    const s = makeJapaneseWorkflowScenario({ now: () => clock });
+    const reserve = s.state.reserveSubmission.bind(s.state);
+    s.state.reserveSubmission = async () => {
+      throw new Error("storage unavailable");
+    };
+    await expect(s.workflow.submit(s.input)).rejects.toThrow("storage unavailable");
+    s.state.reserveSubmission = reserve;
     expect(s.phrase.createJobCalls).toBe(0);
-    s.state.createBatch = create;
-    expect((await s.workflow.submitWithOutcome(s.input)).createdThisRun).toBe(true);
+    const next = {
+      ...s.input,
+      config: {
+        ...s.input.config,
+        sourceCatalog: { ...config.sourceCatalog, importSettingsUid: "next-settings" },
+      },
+    };
+    // The unreserved record may still be creating jobs, so it blocks until it is voided.
+    expect((await s.workflow.submitWithOutcome(next)).deferred?.kind).toBe("in-progress");
+    clock += PHRASE_JOB_VISIBILITY_GRACE_TEST_MS + 1;
+    await s.workflow.reconcile({ repairScope: phraseRepairScope });
+    expect((await s.workflow.submitWithOutcome(next)).createdThisRun).toBe(true);
     expect(s.phrase.createJobCalls).toBe(1);
   });
 
@@ -770,15 +829,19 @@ describe("serialized Phrase submissions", () => {
       s.repository.baseSourceBytes = bytes;
       return { ...s.input, sourceCommit: message, sourceBytes: bytes };
     };
-    expect((await s.workflow.submitWithOutcome(newer("second"))).deferred).toBe(true);
+    expect((await s.workflow.submitWithOutcome(newer("second"))).deferred?.sourceCommit).toBe(
+      "second",
+    );
     s.phrase.jobStatuses.set("job-fr", "COMPLETED");
-    expect((await s.workflow.submitWithOutcome(newer("third"))).deferred).toBe(true);
+    expect((await s.workflow.submitWithOutcome(newer("third"))).deferred?.kind).toBe("in-progress");
     expect(s.phrase.createJobCalls).toBe(1);
     // Even a tooling-completed phase must not bypass an incomplete Phrase job.
     const stored = await s.state.readBatch(first.key);
     stored!.record.phase = "completed";
     await s.state.updateBatch(stored!.record, stored!.revision);
-    expect((await s.workflow.submitWithOutcome(newer("fourth"))).deferred).toBe(true);
+    expect((await s.workflow.submitWithOutcome(newer("fourth"))).deferred?.kind).toBe(
+      "in-progress",
+    );
     s.phrase.jobStatuses.set("job-ja", "COMPLETED");
     const latest = newer("latest");
     const next = await s.workflow.submitWithOutcome(latest);
@@ -799,13 +862,24 @@ describe("serialized Phrase submissions", () => {
         sourceCatalog: { ...config.sourceCatalog, importSettingsUid: "new-settings" },
       },
     };
-    s.phrase.getJobError = new Error("status unavailable");
-    await expect(s.workflow.submit(next)).rejects.toThrow("status unavailable");
+    s.phrase.getJobError = new PhraseApiError("Phrase API returned HTTP 503", 503);
+    for (const retryFailed of [false, true]) {
+      const lookup = await s.workflow.submitWithOutcome({ ...next, retryFailed });
+      expect(lookup.batch.key).toBe(first.key);
+      expect(lookup.deferred).toMatchObject({
+        kind: "lookup-failed",
+        reason: expect.stringContaining("HTTP 503"),
+      });
+      expect(lookup.deferred?.blockingJobs.length).toBeGreaterThan(0);
+    }
     expect(s.phrase.createJobCalls).toBe(1);
+    s.phrase.getJobError = undefined;
     const stored = await s.state.readBatch(first.key);
     stored!.record.phase = "unknown";
     await s.state.updateBatch(stored!.record, stored!.revision);
-    expect((await s.workflow.submitWithOutcome(next)).deferred).toBe(true);
+    const unknown = await s.workflow.submitWithOutcome({ ...next, retryFailed: true });
+    expect(unknown.deferred?.kind).toBe("recovery-required");
+    expect(unknown.deferred?.reason).toContain("bind or void");
     expect(s.phrase.createJobCalls).toBe(1);
   });
 
@@ -847,7 +921,28 @@ describe("serialized Phrase submissions", () => {
     expect(
       results.some((result) => result.status === "fulfilled" && result.value.createdThisRun),
     ).toBe(true);
-    expect(await s.state.listBatches()).toHaveLength(1);
+    expect(results.some((result) => result.status === "fulfilled" && result.value.deferred)).toBe(
+      true,
+    );
+    // The losing run voids its job-less record instead of leaving it to block.
+    const open = (await s.state.listBatches()).filter(({ record }) => record.phase !== "failed");
+    expect(open).toHaveLength(1);
+  });
+
+  it("keeps refusing to overwrite reviewer changes after the base source advances", async () => {
+    const s = makeJapaneseWorkflowScenario();
+    await s.workflow.submit(s.input);
+    await s.workflow.reconcile();
+    const [created] = await s.state.listBatches();
+    const branch = created!.record.locales.fr!.pullRequestBranch!;
+    s.repository.pushHumanCommit(branch, ["locales/fr.json"]);
+    s.repository.baseSourceBytes = new TextEncoder().encode('{"new":{"defaultMessage":"New"}}');
+    s.phrase.targetBytes = new TextEncoder().encode('{"greeting":"Salut {name}"}');
+    const results = await s.workflow.reconcile();
+    const fr = results.find((result) => result.phraseLocale === "fr");
+    expect(fr?.phase).toBe("retrying");
+    expect(fr?.reason).toContain("refusing to overwrite reviewer changes");
+    expect(s.repository.commitCount(branch)).toBe(2);
   });
 
   it("delivers completed results after the base source advances", async () => {

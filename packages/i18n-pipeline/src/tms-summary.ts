@@ -4,7 +4,12 @@ import {
   NO_PHRASE_JOB_CREATED_VOID_REASON,
   normalizeTableCell,
 } from "./phrase-workflow.js";
-import type { PhraseBatchRecord, PhraseReconcileResult } from "./phrase-workflow.js";
+import type {
+  PhraseReconcileResult,
+  PhraseSubmitDeferral,
+  PhraseSubmitDeferralKind,
+  PhraseSubmitOutcome,
+} from "./phrase-workflow.js";
 
 export interface TmsSummaryContext {
   repository: string;
@@ -121,32 +126,42 @@ export function formatTmsRunSummary(
   return keepWithinStepSummaryLimit(lines);
 }
 
+const DEFERRAL_NEXT_STEP: Record<PhraseSubmitDeferralKind, string> = {
+  "in-progress":
+    "The latest base-branch source is submitted at the first sync after the blocking final-step Phrase jobs complete.",
+  "recovery-required":
+    "Explicit recovery is required before the latest base-branch source can be submitted.",
+  "lookup-failed":
+    "The next sync reads Phrase status again; the latest base-branch source is submitted once the blocking jobs complete.",
+};
+
+export function describeSubmitDeferral(deferral: PhraseSubmitDeferral): string {
+  return `Phrase submission of ${deferral.sourceCommit.slice(0, 7)} deferred: ${deferral.reason}. ${DEFERRAL_NEXT_STEP[deferral.kind]}`;
+}
+
 export function formatTmsSubmitSummary(
   context: TmsSummaryContext,
-  batch: PhraseBatchRecord,
-  createdThisRun: boolean,
-  deferred = false,
+  { batch, createdThisRun, deferred }: PhraseSubmitOutcome,
 ): string {
   const lines = [submitHeading(context)];
-  if (deferred) {
-    lines.push(
-      "",
-      "Submission deferred: existing Phrase work must complete first. The latest base-branch source will be picked up after completion.",
-    );
-    if (batch.failureReason) lines.push("", escapeAlertText(batch.failureReason));
-    for (const job of batch.jobs) {
-      lines.push(
-        `- ${markdownLink(job.uid, phraseJobUrl(batch.config.region, job.uid))}: ${escapeAlertText(job.status ?? "unknown")}`,
-      );
-    }
-  }
   const failedLocales = batch.config.targetLocales
     .map((target) => batch.locales[target.phraseLocale])
     .filter((locale) => locale?.phase === "failed");
   const failureCount = failedLocales.length || (batch.phase === "failed" ? 1 : 0);
   const importWarnings = batch.warningCount;
 
-  if (failureCount) {
+  if (deferred) {
+    lines.push(
+      "",
+      deferred.kind === "in-progress" ? "> [!NOTE]" : "> [!CAUTION]",
+      `> **⏸️ Submission deferred.** ${escapeAlertText(describeSubmitDeferral(deferred))}`,
+    );
+    for (const job of deferred.blockingJobs) {
+      lines.push(
+        `> - ${markdownLink(job.uid, phraseJobUrl(batch.config.region, job.uid))}: ${escapeAlertText(job.status ?? "unknown")}`,
+      );
+    }
+  } else if (failureCount) {
     const firstReason = failedLocales.find((locale) => locale.failureReason)?.failureReason;
     const reason = shorten(firstReason ?? batch.failureReason ?? "Phrase submission failed.", 200);
     lines.push(
@@ -178,7 +193,7 @@ export function formatTmsSubmitSummary(
     "",
     "| Batch | Result | Source | Jobs | Locales | |",
     "| --- | --- | --- | --- | --- | --- |",
-    `| ${codeSpan(batch.key.slice(0, 12))} | ${deferred ? "deferred" : createdThisRun ? "🆕 submitted" : "↩️ no source change"} | ${codeSpan(batch.sourceCommit.slice(0, 7))} | ${batch.jobs.length} | ${locales} | ${projectLink} |`,
+    `| ${codeSpan(batch.key.slice(0, 12))} | ${deferred ? "⏸️ deferred" : createdThisRun ? "🆕 submitted" : "↩️ no source change"} | ${codeSpan(batch.sourceCommit.slice(0, 7))} | ${batch.jobs.length} | ${locales} | ${projectLink} |`,
   );
   return keepWithinStepSummaryLimit(lines);
 }
