@@ -20,6 +20,7 @@ export type IcuLintRule =
   | "plural-category-only-arguments"
   | "unused-plural-category"
   | "unformatted-count-argument"
+  | "text-outside-branches"
   | "missing-exact-plural-selector"
   | "plural-count-dropped"
   | "ambiguous-plural-occurrence"
@@ -36,6 +37,7 @@ export interface IcuLintFinding {
 }
 
 type PluralElement = Extract<MessageFormatElement, { type: TYPE.plural }>;
+type SelectorElement = Extract<MessageFormatElement, { type: TYPE.plural | TYPE.select }>;
 
 /** An argument a plural renders only under a CLDR category branch, never under `other`. */
 interface CategoryOnlyArguments {
@@ -231,6 +233,46 @@ function exactSelectors(elements: MessageFormatElement[]): Map<string, Set<strin
   return selectors;
 }
 
+/** True when literal text, including text inside tags, contains a letter in any script. */
+function hasWords(elements: MessageFormatElement[]): boolean {
+  return elements.some(
+    (element) =>
+      (element.type === TYPE.literal && /\p{L}/u.test(element.value)) ||
+      (element.type === TYPE.tag && hasWords(element.children)),
+  );
+}
+
+/**
+ * Selectors that belong to this level of the sentence. Formatting tags are transparent, so a
+ * selector inside `<b>` still counts; selector branches start a new sentence and are not entered.
+ */
+function sentenceSelectors(elements: MessageFormatElement[]): SelectorElement[] {
+  return elements.flatMap((element) => {
+    if (element.type === TYPE.plural || element.type === TYPE.select) return [element];
+    if (element.type === TYPE.tag) return sentenceSelectors(element.children);
+    return [];
+  });
+}
+
+/** Plurals and selects whose sentence has words outside their branches, at any depth. */
+function selectorsWithOutsideText(elements: MessageFormatElement[]): SelectorElement[] {
+  const found: SelectorElement[] = [];
+  const visit = (sentence: MessageFormatElement[]) => {
+    const selectors = sentenceSelectors(sentence);
+    if (selectors.length && hasWords(sentence)) found.push(...selectors);
+    for (const selector of selectors) {
+      for (const option of Object.values(selector.options)) visit(option.value);
+    }
+  };
+  visit(elements);
+  return found;
+}
+
+function selectorKind(element: SelectorElement): string {
+  if (element.type === TYPE.select) return "select";
+  return element.pluralType === "ordinal" ? "selectordinal" : "plural";
+}
+
 function formatNames(names: string[]): string {
   return names.map((name) => `{${name}}`).join(", ");
 }
@@ -292,6 +334,21 @@ export function lintSourceMessage(id: string, pattern: string, locale: string): 
   }
 
   findings.push(...unusedCategoryFindings(id, elements, locale, "source"));
+
+  for (const element of selectorsWithOutsideText(elements)) {
+    const kind = selectorKind(element);
+    findings.push({
+      id,
+      rule: "text-outside-branches",
+      severity: "warning",
+      message:
+        `"${id}": ${kind} {${element.value}} is part of a sentence that continues outside its ` +
+        `branches. Word order, articles, and agreement change with the branch in other ` +
+        `languages, and translation tools show each branch as a separate segment, so ` +
+        `translators cannot rebuild the sentence. Put the whole sentence in every branch: ` +
+        `{count, plural, one {The account was removed.} other {The accounts were removed.}}.`,
+    });
+  }
 
   const pluralNames = new Set(plurals(elements).map((element) => element.value));
   const reported = new Set<string>();
