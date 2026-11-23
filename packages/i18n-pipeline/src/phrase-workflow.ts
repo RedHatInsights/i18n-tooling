@@ -120,7 +120,7 @@ export interface PhraseLocaleRecord {
   pullRequestMerged?: boolean;
   /** The superseded-PR notice was successfully posted. */
   pullRequestSupersededNoticePosted?: true;
-  /** Reviewer commits were found on a superseded PR, so it must stay open. */
+  /** Unowned commits were found during refresh or supersession, so the PR must stay open. */
   pullRequestSupersededReviewerCommits?: true;
   /**
    * Messages whose translation on this superseded PR its replacement does not carry, as of the
@@ -186,13 +186,19 @@ export interface PhraseLocalePullRequest {
   expectedToolingCommitSha?: string;
   expectedPendingToolingCommitSha?: string;
   /** Fence state against the verified owned predecessor, which may precede the branch head. */
-  recordToolingCommitSha: (toolingSha: string, previousOwnedSha: string | null) => Promise<void>;
+  recordToolingCommitSha: (
+    toolingSha: string,
+    previousOwnedSha: string | null,
+    hasReviewerCommits?: boolean,
+  ) => Promise<void>;
   recheckOwnedCommitEligibility?: (previousOwnedSha: string | null) => Promise<void>;
   title: string;
   body: string;
   path: string;
   content: Uint8Array;
   additionalFiles?: { path: string; content: Uint8Array }[];
+  /** Also protect these outputs when this export does not write them. Written paths are always protected. */
+  managedPaths?: string[];
 }
 
 export type PhrasePullRequestState =
@@ -223,13 +229,19 @@ export interface PhraseLocalePullRequestUpdate {
   expectedToolingCommitSha?: string;
   expectedPendingToolingCommitSha?: string;
   /** Fence state against the verified owned predecessor, which may precede the branch head. */
-  recordToolingCommitSha: (toolingSha: string, previousOwnedSha: string | null) => Promise<void>;
+  recordToolingCommitSha: (
+    toolingSha: string,
+    previousOwnedSha: string | null,
+    hasReviewerCommits?: boolean,
+  ) => Promise<void>;
   recheckOwnedCommitEligibility?: (previousOwnedSha: string | null) => Promise<void>;
   title: string;
   path: string;
   content: Uint8Array;
   body: string;
   additionalFiles?: { path: string; content: Uint8Array }[];
+  /** Also protect these outputs when this export does not write them. Written paths are always protected. */
+  managedPaths?: string[];
 }
 
 export interface PhraseLocalePullRequestUpdateResult {
@@ -3454,6 +3466,10 @@ export class PhraseWorkflow {
           targetAdapter,
         );
         const additionalFiles: { path: string; content: Uint8Array }[] = [];
+        const managedPaths = [
+          target.outputPath,
+          ...(record.config.frontendTemplate ? [record.config.frontendTemplate.path] : []),
+        ];
         // Batches submitted before FEO locale ids had to be canonical may hold `zh-cn`; inline those
         // under the canonical id, which also renames an existing block.
         const feoLocale = suggestFeoLocale(target.repositoryLocale) ?? target.repositoryLocale;
@@ -3647,6 +3663,7 @@ export class PhraseWorkflow {
         const recordToolingCommitSha = async (
           toolingSha: string,
           previousHeadSha: string | null,
+          hasReviewerCommits = false,
         ) => {
           const locale = record.locales[target.phraseLocale];
           let ownershipShas = mergeToolingCommitShas(
@@ -3669,7 +3686,12 @@ export class PhraseWorkflow {
               ...record,
               locales: {
                 ...record.locales,
-                [target.phraseLocale]: { ...localeRecord, toolingCommitShas },
+                [target.phraseLocale]: {
+                  ...localeRecord,
+                  toolingCommitShas,
+                  // Refresh eligibility does not grant permission to close reviewer work.
+                  ...(hasReviewerCommits ? { pullRequestSupersededReviewerCommits: true } : {}),
+                },
               },
             };
             try {
@@ -3734,6 +3756,7 @@ export class PhraseWorkflow {
           body,
           path: target.outputPath,
           content,
+          managedPaths,
         };
         if (reexportingOpenPullRequest && existingPullRequestState?.state === "open") {
           if (existingLocale?.phase !== "pr-created" || !existingLocale.pullRequestUrl) {
@@ -3765,6 +3788,7 @@ export class PhraseWorkflow {
             path: target.outputPath,
             content,
             body,
+            managedPaths,
           });
           const updatedLocale: PhraseLocaleRecord = {
             ...(record.locales[target.phraseLocale] ?? existingLocale),

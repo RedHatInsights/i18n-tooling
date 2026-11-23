@@ -501,6 +501,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
           input.branch,
           branchHead,
           files,
+          input.managedPaths,
           input.expectedToolingCommitShas,
           input.expectedToolingCommitSha,
           input.expectedPendingToolingCommitSha,
@@ -659,6 +660,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       input.branch,
       headSha,
       files,
+      input.managedPaths,
       input.expectedToolingCommitShas,
       input.expectedToolingCommitSha,
       input.expectedPendingToolingCommitSha,
@@ -879,6 +881,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     branch: string,
     headSha: string,
     files: { path: string; content: Uint8Array }[],
+    managedPaths: string[] | undefined,
     expectedToolingCommitShas?: string[],
     expectedToolingCommitSha?: string,
     expectedPendingToolingCommitSha?: string,
@@ -892,6 +895,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     );
     if (ownedShas.has(headSha)) return headSha;
     if (ownedShas.size) {
+      const protectedPaths = new Set([...files.map(({ path }) => path), ...(managedPaths ?? [])]);
       for (const ownedSha of [...ownedShas].reverse()) {
         let compare: GitHubCompareResponse;
         try {
@@ -902,21 +906,22 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
           throw error;
         }
         if (compare.status !== "ahead") continue;
-        // Compare every managed file at immutable SHAs: compare.files is capped at 300.
-        let unchanged = true;
-        for (const { path } of files) {
-          const previous = await this.getFile(path, ownedSha);
-          const current = await this.getFile(path, headSha);
+        // The newest recorded ancestor is authoritative: falling back after a mismatch
+        // would mistake a reviewer's revert for an untouched export.
+        for (const path of protectedPaths) {
+          const previous = await this.getTreeEntry(path, ownedSha);
+          const current = await this.getTreeEntry(path, headSha);
           if (
             !previous ||
             !current ||
-            !Buffer.from(previous.bytes).equals(Buffer.from(current.bytes))
+            previous.sha !== current.sha ||
+            previous.mode !== current.mode ||
+            previous.type !== current.type
           ) {
-            unchanged = false;
-            break;
+            return null;
           }
         }
-        if (unchanged) return ownedSha;
+        return ownedSha;
       }
       return null;
     }
@@ -1005,6 +1010,38 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     return `${this.stateDirectory}/submissions/${scope}.json`;
   }
 
+  private async getTreeEntry(
+    path: string,
+    commit: string,
+  ): Promise<{ sha: string; mode: string; type: string } | null> {
+    assertRepositoryPath(path);
+    let treeSha = await this.getCommitTree(commit);
+    const segments = path.split("/");
+    for (const [index, segment] of segments.entries()) {
+      const response = await this.request(`${this.repositoryPath}/git/trees/${treeSha}`, {
+        method: "GET",
+      });
+      const value: unknown = await response.json();
+      if (!isRecord(value) || !Array.isArray(value.tree) || value.truncated) {
+        throw new GitHubRepositoryError("GitHub returned an incomplete git tree", 500);
+      }
+      const entry: unknown = value.tree.find((item) => isRecord(item) && item.path === segment);
+      if (
+        !isRecord(entry) ||
+        !nonEmptyString(entry.sha) ||
+        !nonEmptyString(entry.mode) ||
+        !nonEmptyString(entry.type)
+      )
+        return null;
+      if (index === segments.length - 1) {
+        return { sha: entry.sha, mode: entry.mode, type: entry.type };
+      }
+      if (entry.type !== "tree") return null;
+      treeSha = entry.sha;
+    }
+    return null;
+  }
+
   private async getFile(path: string, ref: string): Promise<GitHubFile | null> {
     assertRepositoryPath(path);
     assertGitRef(ref);
@@ -1052,7 +1089,11 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     files: { path: string; content: Uint8Array }[],
     createRef: boolean,
     ownedCommit: string | null,
-    recordToolingCommitSha: (toolingSha: string, previousHeadSha: string | null) => Promise<void>,
+    recordToolingCommitSha: (
+      toolingSha: string,
+      previousHeadSha: string | null,
+      hasReviewerCommits?: boolean,
+    ) => Promise<void>,
     recheckOwnedCommitEligibility?: (previousHeadSha: string | null) => Promise<void>,
     beforeRefUpdate?: () => Promise<PhrasePullRequestState>,
   ): Promise<LocaleCommitWriteResult> {
@@ -1122,7 +1163,11 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       }
     }
     // State fencing uses the verified owned ancestor; the Git write still uses the actual head.
-    await recordToolingCommitSha(commitValue.sha, ownedCommit);
+    await recordToolingCommitSha(
+      commitValue.sha,
+      ownedCommit,
+      ownedCommit !== null && parent !== ownedCommit,
+    );
     const refInit: RequestInit = createRef
       ? {
           method: "POST",

@@ -4190,6 +4190,7 @@ describe("PhraseWorkflow submission", () => {
     const pr = repository.pullRequests[0]!;
     expect(pr.draft).toBe(true);
     expect(pr.additionalFiles).toBeUndefined();
+    expect(pr.managedPaths).toEqual(["locales/fr.json", "deploy/frontend.yaml"]);
     expect(invalid?.phase).toBe("invalid-translation");
     phrase.targetBytes = new TextEncoder().encode('{"searchEntries.roles.title":"Rôles"}');
     expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
@@ -7398,6 +7399,71 @@ function replacementNoticePrefix(replacement: PhraseBatchRecord): string {
 }
 
 describe("superseded locale pull requests", () => {
+  it("keeps reviewer work open after a translation refresh and supersession", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const { workflow, repository, phrase, state } = scenario;
+    await workflow.reconcile();
+    const first = (await state.readBatch(scenario.batch.key))!.record;
+    const locale = first.locales.fr!;
+    const branch = locale.pullRequestBranch!;
+    const anchor = locale.toolingCommitSha!;
+    repository.branchHeads.set(branch, "reviewer-head");
+    repository.branchFiles.get(branch)!.set("README.md", new TextEncoder().encode("Reviewer work"));
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":{"defaultMessage":"Salut {name}"}}');
+
+    // Repository-level tests verify this eligibility and third callback argument.
+    // Exercise the real workflow's ownership persistence and supersession here.
+    const update = repository.updateOpenPullRequest.bind(repository);
+    repository.updateOpenPullRequest = async (input) =>
+      update({
+        ...input,
+        expectedToolingCommitShas: [...(input.expectedToolingCommitShas ?? []), input.headSha],
+        recordToolingCommitSha: (sha) => input.recordToolingCommitSha(sha, anchor, true),
+        recheckOwnedCommitEligibility: () => input.recheckOwnedCommitEligibility!(anchor),
+      });
+    await workflow.reconcile();
+    const refreshed = (await state.readBatch(first.key))!.record;
+    expect(refreshed.locales.fr?.toolingCommitSha).not.toBe(anchor);
+    expect(refreshed.locales.fr?.toolingCommitSha).toBe(repository.branchHeads.get(branch));
+
+    // A newer source carries the same translations, but not the reviewer's README edit.
+    refreshed.phase = "superseded";
+    refreshed.createdAt = "2026-10-20T10:00:00.000Z";
+    const stored = (await state.readBatch(first.key))!;
+    await state.updateBatch(refreshed, stored.revision);
+    const replacementSource = new TextEncoder().encode(
+      JSON.stringify({
+        greeting: { defaultMessage: "Hello {name}", description: "Updated context" },
+      }),
+    );
+    repository.baseSourceBytes = replacementSource;
+    repository.pinnedSourceBytes = replacementSource;
+    repository.onReadFile = (path, ref) => {
+      if (path === config.sourceCatalog.path) {
+        return ref === first.sourceCommit ? sourceBytes : replacementSource;
+      }
+      for (const [name, head] of repository.branchHeads) {
+        if (head === ref) return repository.branchFiles.get(name)?.get(path) ?? null;
+      }
+      return null;
+    };
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "replacement-source",
+      sourceBytes: replacementSource,
+      config,
+    });
+    const replacementResults = await workflow.reconcile();
+    expect(replacementResults).toEqual(
+      expect.arrayContaining([expect.objectContaining({ phase: "pr-created" })]),
+    );
+    expect(repository.closePullRequestCalls).not.toContain(locale.pullRequestUrl);
+    expect((await state.readBatch(first.key))?.record.locales.fr).toMatchObject({
+      pullRequestSupersededReviewerCommits: true,
+    });
+  });
+
   it("closes a tooling-owned superseded PR after posting the exact replacement notice", async () => {
     const scenario = await makeSupersededPullRequestScenario();
     const old = await seedSupersededBatchFixture(scenario, {
