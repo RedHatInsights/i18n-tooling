@@ -66,7 +66,11 @@ function openPullRequestHarness(
   initialHead: string,
   options: {
     currentContent?: string;
+    headAfterCommit?: string;
+    contentAtRef?: (ref: string) => string;
+    additionalContentAtRef?: (ref: string) => string;
     compare?: (headSha: string) => unknown;
+    compareUnavailable?: string;
     refUpdateStatuses?: number[];
     draft?: boolean;
     draftResult?: unknown;
@@ -130,10 +134,28 @@ function openPullRequestHarness(
         type: "file",
         sha: "translation-blob",
         encoding: "base64",
-        content: Buffer.from(currentContent).toString("base64"),
+        content: Buffer.from(
+          options.contentAtRef?.(new URL(url).searchParams.get("ref")!) ?? currentContent,
+        ).toString("base64"),
+      });
+    }
+    if (url.includes("/contents/frontend.yaml?ref=")) {
+      return response({
+        type: "file",
+        sha: "yaml-blob",
+        encoding: "base64",
+        content: Buffer.from(
+          options.additionalContentAtRef?.(new URL(url).searchParams.get("ref")!) ?? "old YAML",
+        ).toString("base64"),
       });
     }
     if (url.includes("/compare/")) {
+      if (
+        options.compareUnavailable &&
+        decodeURIComponent(url).includes(`/compare/${options.compareUnavailable}...`)
+      ) {
+        return response({ message: "Not Found" }, 404);
+      }
       return response(
         options.compare?.(branchHead) ?? {
           ahead_by: 1,
@@ -160,7 +182,9 @@ function openPullRequestHarness(
       return response({ sha: "tree-new" }, 201);
     }
     if (url.endsWith("/git/commits") && method === "POST") {
+      expect(JSON.parse(String(init?.body)).parents).toEqual([branchHead]);
       commitNumber += 1;
+      if (options.headAfterCommit) branchHead = options.headAfterCommit;
       return response({ sha: `${String(commitNumber).padStart(40, "0")}` }, 201);
     }
     if (url.endsWith("/git/ref/heads/i18n/phrase-batch-fr") && method === "GET") {
@@ -169,7 +193,8 @@ function openPullRequestHarness(
     if (url.endsWith("/git/refs/heads/i18n/phrase-batch-fr") && method === "PATCH") {
       const failedStatus = refUpdateStatuses.shift();
       if (failedStatus) return response({ message: "ref update failed" }, failedStatus);
-      const body = JSON.parse(String(init?.body)) as { sha: string };
+      const body = JSON.parse(String(init?.body)) as { sha: string; force: boolean };
+      expect(body.force).toBe(false);
       branchHead = body.sha;
       currentContent = pendingContent ?? currentContent;
       return response({ ref: "refs/heads/i18n/phrase-batch-fr" });
@@ -1278,6 +1303,173 @@ describe("GitHubPhraseRepository", () => {
       harness.calls.some(({ url, method }) => url.endsWith("/git/blobs") && method === "POST"),
     ).toBe(false);
   });
+
+  it.each(["update", "discovery"])(
+    "accepts unrelated branch updates during %s without adopting their heads as tooling commits",
+    async (mode) => {
+      const anchor = "tooling-head";
+      const harness = openPullRequestHarness("merge-head", {
+        compare: () => ({ status: "ahead", ahead_by: 2, commits: [], files: [] }),
+      });
+      const persisted: Array<string | null> = [];
+      const rechecked: Array<string | null> = [];
+      const input = harness.makeUpdate(
+        async (_sha, ownedSha) => {
+          persisted.push(ownedSha);
+        },
+        {
+          expectedToolingCommitShas: [anchor],
+          recheckOwnedCommitEligibility: async (ownedSha) => {
+            rechecked.push(ownedSha);
+          },
+        },
+      );
+      const result =
+        mode === "update"
+          ? await harness.repository.updateOpenPullRequest(input)
+          : await harness.repository.createOrUpdatePullRequestWithCommit({
+              ...pullRequest,
+              ...input,
+              baseCommit: baseCommitSha,
+            });
+      expect(result.toolingCommitSha).toBe(harness.branchHead);
+      expect(harness.currentContent).toBe("updated");
+      expect(persisted).toEqual([anchor]);
+      expect(rechecked).toEqual([anchor]);
+      expect(
+        harness.calls.some(({ url }) =>
+          decodeURIComponent(url).endsWith(`/compare/${anchor}...merge-head`),
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it.each(["update", "discovery"])(
+    "keeps the recorded ownership anchor on a no-op %s after an unrelated merge",
+    async (mode) => {
+      const harness = openPullRequestHarness("merge-head", {
+        currentContent: "updated",
+        compare: () => ({ status: "ahead", commits: [], files: [] }),
+      });
+      const input = harness.makeUpdate(noToolingCommitWrite, {
+        expectedToolingCommitShas: ["tooling-head"],
+      });
+      const result =
+        mode === "update"
+          ? await harness.repository.updateOpenPullRequest(input)
+          : await harness.repository.createOrUpdatePullRequestWithCommit({
+              ...pullRequest,
+              ...input,
+              baseCommit: baseCommitSha,
+            });
+      expect(result.toolingCommitSha).toBe("tooling-head");
+      expect(harness.branchHead).toBe("merge-head");
+      expect(harness.calls.some(({ method }) => method === "POST")).toBe(false);
+    },
+  );
+
+  it("skips unavailable recorded commits while looking for an owned ancestor", async () => {
+    const harness = openPullRequestHarness("merge-head", {
+      compare: () => ({ status: "ahead", commits: [], files: [] }),
+      compareUnavailable: "unavailable-head",
+    });
+    await expect(
+      harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(noToolingCommitWrite, {
+          expectedToolingCommitShas: ["tooling-head", "unavailable-head"],
+        }),
+      ),
+    ).resolves.toMatchObject({ changed: true });
+    expect(harness.calls.filter(({ url }) => url.includes("/compare/"))).toHaveLength(2);
+  });
+
+  it("rejects a racing reviewer commit after verifying unchanged managed files", async () => {
+    const harness = openPullRequestHarness("merge-head", {
+      compare: () => ({ status: "ahead", commits: [], files: [] }),
+      headAfterCommit: "racing-reviewer-head",
+    });
+    let recorded = false;
+    await expect(
+      harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(
+          async () => {
+            recorded = true;
+          },
+          { expectedToolingCommitShas: ["tooling-head"] },
+        ),
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(recorded).toBe(false);
+    expect(
+      harness.calls.some(({ url, method }) => url.includes("/git/refs/") && method === "PATCH"),
+    ).toBe(false);
+  });
+
+  it("keeps the state eligibility fence for a verified owned ancestor", async () => {
+    const harness = openPullRequestHarness("merge-head", {
+      compare: () => ({ status: "ahead", commits: [], files: [] }),
+    });
+    await expect(
+      harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(noToolingCommitWrite, {
+          expectedToolingCommitShas: ["tooling-head"],
+          recheckOwnedCommitEligibility: async (ownedSha) => {
+            expect(ownedSha).toBe("tooling-head");
+            throw new GitHubRepositoryError("batch was superseded", 409);
+          },
+        }),
+      ),
+    ).rejects.toThrow("batch was superseded");
+    expect(
+      harness.calls.some(({ url, method }) => url.includes("/git/refs/") && method === "PATCH"),
+    ).toBe(false);
+  });
+
+  it("rejects managed catalog edits even when the tooling commit remains an ancestor", async () => {
+    const harness = openPullRequestHarness("reviewer-head", {
+      compare: () => ({ status: "ahead", commits: [], files: [] }),
+      contentAtRef: (ref) => (ref === "tooling-head" ? "old" : "reviewer translation"),
+    });
+    await expect(
+      harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(noToolingCommitWrite, { expectedToolingCommitShas: ["tooling-head"] }),
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(harness.calls.some(({ method }) => method === "POST")).toBe(false);
+  });
+
+  it("rejects changes to additional managed files", async () => {
+    const harness = openPullRequestHarness("merge-head", {
+      compare: () => ({ status: "ahead", commits: [], files: [] }),
+      additionalContentAtRef: (ref) => (ref === "tooling-head" ? "old YAML" : "reviewer YAML"),
+    });
+    await expect(
+      harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(noToolingCommitWrite, {
+          expectedToolingCommitShas: ["tooling-head"],
+          additionalFiles: [
+            { path: "frontend.yaml", content: new TextEncoder().encode("new YAML") },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(harness.calls.some(({ method }) => method === "POST")).toBe(false);
+  });
+
+  it.each(["behind", "diverged", "identical", undefined])(
+    "rejects an unrecorded head when comparison status is %s",
+    async (status) => {
+      const harness = openPullRequestHarness("reviewer-head", {
+        compare: () => ({ status, commits: [], files: [] }),
+      });
+      await expect(
+        harness.repository.updateOpenPullRequest(
+          harness.makeUpdate(noToolingCommitWrite, { expectedToolingCommitShas: ["tooling-head"] }),
+        ),
+      ).rejects.toMatchObject({ status: 409 });
+      expect(harness.calls.some(({ method }) => method === "POST")).toBe(false);
+    },
+  );
 
   it("adopts a legacy single commit that changes only the expected output path", async () => {
     const harness = openPullRequestHarness("legacy-head", {

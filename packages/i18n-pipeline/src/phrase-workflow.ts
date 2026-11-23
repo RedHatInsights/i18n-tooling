@@ -185,8 +185,9 @@ export interface PhraseLocalePullRequest {
   expectedToolingCommitShas?: string[];
   expectedToolingCommitSha?: string;
   expectedPendingToolingCommitSha?: string;
-  recordToolingCommitSha: (toolingSha: string, previousHeadSha: string | null) => Promise<void>;
-  recheckOwnedCommitEligibility?: (previousHeadSha: string | null) => Promise<void>;
+  /** Fence state against the verified owned predecessor, which may precede the branch head. */
+  recordToolingCommitSha: (toolingSha: string, previousOwnedSha: string | null) => Promise<void>;
+  recheckOwnedCommitEligibility?: (previousOwnedSha: string | null) => Promise<void>;
   title: string;
   body: string;
   path: string;
@@ -221,8 +222,9 @@ export interface PhraseLocalePullRequestUpdate {
   expectedToolingCommitShas?: string[];
   expectedToolingCommitSha?: string;
   expectedPendingToolingCommitSha?: string;
-  recordToolingCommitSha: (toolingSha: string, previousHeadSha: string | null) => Promise<void>;
-  recheckOwnedCommitEligibility?: (previousHeadSha: string | null) => Promise<void>;
+  /** Fence state against the verified owned predecessor, which may precede the branch head. */
+  recordToolingCommitSha: (toolingSha: string, previousOwnedSha: string | null) => Promise<void>;
+  recheckOwnedCommitEligibility?: (previousOwnedSha: string | null) => Promise<void>;
   title: string;
   path: string;
   content: Uint8Array;

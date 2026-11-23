@@ -42,6 +42,7 @@ interface GitHubPullRequestResponse {
 }
 
 interface GitHubCompareResponse {
+  status?: string;
   ahead_by?: number;
   commits?: { sha?: string }[];
   files?: { filename?: string; previous_filename?: string }[];
@@ -494,18 +495,18 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     if (open && !branchHead) {
       throw new GitHubRepositoryError("Open Phrase pull request has no locale branch head", 409);
     }
-    if (
-      branchHead &&
-      !(await this.isToolingOwned(
-        input.baseRef,
-        input.branch,
-        branchHead,
-        files,
-        input.expectedToolingCommitShas,
-        input.expectedToolingCommitSha,
-        input.expectedPendingToolingCommitSha,
-      ))
-    ) {
+    const ownedCommit = branchHead
+      ? await this.findOwnedCommit(
+          input.baseRef,
+          input.branch,
+          branchHead,
+          files,
+          input.expectedToolingCommitShas,
+          input.expectedToolingCommitSha,
+          input.expectedPendingToolingCommitSha,
+        )
+      : null;
+    if (branchHead && !ownedCommit) {
       throw new GitHubRepositoryError(
         `Phrase locale branch ${input.branch} is not tooling-owned; refusing to overwrite reviewer changes`,
         409,
@@ -515,7 +516,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     // An existing branch may acquire a ready PR after discovery. Establish or adopt
     // its draft PR before changing invalid content, including the POST/422 race.
     if (!open && branchHead && input.draft) {
-      await input.recheckOwnedCommitEligibility?.(branchHead);
+      await input.recheckOwnedCommitEligibility?.(ownedCommit);
       const created = await this.createDraftPullRequest(input);
       pullRequestCreated = !created.adopted;
       open = { html_url: created.pullRequestUrl, state: "open" };
@@ -530,6 +531,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
         toolingCommitSha,
         changedFiles,
         branchHead === null,
+        ownedCommit,
         input.recordToolingCommitSha,
         input.recheckOwnedCommitEligibility,
         openPullRequestUrl
@@ -540,12 +542,14 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
         return {
           pullRequestUrl: open!.html_url!,
           ...(pullRequestCreated ? { pullRequestCreated: true } : {}),
-          toolingCommitSha,
+          toolingCommitSha: ownedCommit ?? toolingCommitSha,
           pullRequestFinalized: true,
           ...(commitResult.finalized === "merged" ? { pullRequestMerged: true } : {}),
         };
       }
       toolingCommitSha = commitResult.sha;
+    } else if (ownedCommit) {
+      toolingCommitSha = ownedCommit;
     }
     if (!open?.html_url) {
       const created = await this.createDraftPullRequest(input);
@@ -650,17 +654,16 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     }
     const headSha = pullRequestState.headSha;
     const files = [{ path: input.path, content: input.content }, ...(input.additionalFiles ?? [])];
-    if (
-      !(await this.isToolingOwned(
-        input.baseRef,
-        input.branch,
-        headSha,
-        files,
-        input.expectedToolingCommitShas,
-        input.expectedToolingCommitSha,
-        input.expectedPendingToolingCommitSha,
-      ))
-    ) {
+    const ownedCommit = await this.findOwnedCommit(
+      input.baseRef,
+      input.branch,
+      headSha,
+      files,
+      input.expectedToolingCommitShas,
+      input.expectedToolingCommitSha,
+      input.expectedPendingToolingCommitSha,
+    );
+    if (!ownedCommit) {
       throw new GitHubRepositoryError(
         `Phrase locale branch ${input.branch} is not tooling-owned; refusing to overwrite reviewer changes`,
         409,
@@ -672,7 +675,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     if (!changedFiles.length) {
       return {
         changed: false,
-        toolingCommitSha: headSha,
+        toolingCommitSha: ownedCommit,
         bodyUpdated: false,
       };
     }
@@ -682,6 +685,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       headSha,
       changedFiles,
       false,
+      ownedCommit,
       input.recordToolingCommitSha,
       input.recheckOwnedCommitEligibility,
       () => this.pullRequestIsOpenAtHead(input.pullRequestUrl, headSha),
@@ -689,7 +693,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     if ("finalized" in commitResult) {
       return {
         changed: false,
-        toolingCommitSha: headSha,
+        toolingCommitSha: ownedCommit,
         bodyUpdated: false,
         pullRequestFinalized: true,
         ...(commitResult.finalized === "merged" ? { pullRequestMerged: true } : {}),
@@ -870,7 +874,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     return changed;
   }
 
-  private async isToolingOwned(
+  private async findOwnedCommit(
     baseRef: string,
     branch: string,
     headSha: string,
@@ -878,7 +882,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     expectedToolingCommitShas?: string[],
     expectedToolingCommitSha?: string,
     expectedPendingToolingCommitSha?: string,
-  ): Promise<boolean> {
+  ): Promise<string | null> {
     const ownedShas = new Set(
       [
         ...(Array.isArray(expectedToolingCommitShas) ? expectedToolingCommitShas : []),
@@ -886,16 +890,45 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
         expectedPendingToolingCommitSha,
       ].filter(nonEmptyString),
     );
+    if (ownedShas.has(headSha)) return headSha;
     if (ownedShas.size) {
-      return ownedShas.has(headSha);
+      for (const ownedSha of [...ownedShas].reverse()) {
+        let compare: GitHubCompareResponse;
+        try {
+          compare = await this.compareCommits(ownedSha, headSha);
+        } catch (error) {
+          // A saved, unpushed commit may no longer be available on GitHub.
+          if (error instanceof GitHubRepositoryError && error.status === 404) continue;
+          throw error;
+        }
+        if (compare.status !== "ahead") continue;
+        // Compare every managed file at immutable SHAs: compare.files is capped at 300.
+        let unchanged = true;
+        for (const { path } of files) {
+          const previous = await this.getFile(path, ownedSha);
+          const current = await this.getFile(path, headSha);
+          if (
+            !previous ||
+            !current ||
+            !Buffer.from(previous.bytes).equals(Buffer.from(current.bytes))
+          ) {
+            unchanged = false;
+            break;
+          }
+        }
+        if (unchanged) return ownedSha;
+      }
+      return null;
     }
 
-    return this.isSingleToolingCommit(
+    return (await this.isSingleToolingCommit(
       baseRef,
       branch,
       headSha,
       new Set(files.map(({ path }) => path)),
-    );
+    ))
+      ? headSha
+      : null;
   }
 
   private async isSingleToolingCommit(
@@ -1018,6 +1051,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     parent: string,
     files: { path: string; content: Uint8Array }[],
     createRef: boolean,
+    ownedCommit: string | null,
     recordToolingCommitSha: (toolingSha: string, previousHeadSha: string | null) => Promise<void>,
     recheckOwnedCommitEligibility?: (previousHeadSha: string | null) => Promise<void>,
     beforeRefUpdate?: () => Promise<PhrasePullRequestState>,
@@ -1087,7 +1121,8 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
         if (pullRequestState.state !== "open") return { finalized: pullRequestState.state };
       }
     }
-    await recordToolingCommitSha(commitValue.sha, createRef ? null : parent);
+    // State fencing uses the verified owned ancestor; the Git write still uses the actual head.
+    await recordToolingCommitSha(commitValue.sha, ownedCommit);
     const refInit: RequestInit = createRef
       ? {
           method: "POST",
@@ -1097,7 +1132,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
           method: "PATCH",
           body: JSON.stringify({ sha: commitValue.sha, force: false }),
         };
-    if (!createRef) await recheckOwnedCommitEligibility?.(parent);
+    if (!createRef) await recheckOwnedCommitEligibility?.(ownedCommit);
     // Non-force ref updates still protect reviewer changes; rejection need not mean a race.
     await this.request(refPath, refInit);
     return { sha: commitValue.sha };
