@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CatalogAdapterRegistry } from "../src/index.js";
+import { GitHubPhraseRepository } from "../src/github-phrase-repository.js";
 import { PhraseApiError, PhraseAuthError, type PhraseJobListPart } from "../src/phrase-client.js";
 import {
   PhraseBatchStateConflictError,
@@ -2646,104 +2647,139 @@ describe("PhraseWorkflow submission", () => {
     ).toContain("Salut");
   });
 
-  it("refreshes a carried locale SHA when retry ownership transfers after import", async () => {
-    const state = new MemoryStateStore();
-    const phrase = new FakePhrase();
-    phrase.jobParts = [
-      { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
-      { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
-    ];
-    phrase.expectedTargetLangs = ["fr", "ja"];
-    phrase.jobStatuses.set("job-fr", "COMPLETED");
-    phrase.jobStatuses.set("job-ja", "CANCELLED");
-    phrase.targetBytesByJob.set(
-      "job-fr",
-      new TextEncoder().encode('{"greeting":"Bonjour {name}"}'),
-    );
-    phrase.targetBytesByJob.set(
-      "job-ja",
-      new TextEncoder().encode('{"greeting":"こんにちは {name}"}'),
-    );
-    const repository = new FakeRepository();
-    const workflow = new PhraseWorkflow({
-      phrase,
-      state,
-      repository,
-      catalogAdapters: new CatalogAdapterRegistry(),
-    });
-    const input = {
-      repository: "example/app",
-      baseRef: "phrase-pilot",
-      sourceCommit: "abc123",
-      sourceBytes,
-      config: {
-        ...config,
-        targetLocales: [
-          ...config.targetLocales,
-          { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
-        ],
-      },
-    };
-    await workflow.submit(input);
-    await workflow.reconcile();
-    const [parent] = await state.listBatches();
-    const branch = parent?.record.locales.fr?.pullRequestBranch;
-    const initialSha = parent?.record.locales.fr?.toolingCommitSha;
-    const handoffPendingSha = "unreferenced-pending-commit";
-    const handoffOwnedSha = "older-owned-tooling-commit";
-    const parentWithPending = structuredClone(parent!.record);
-    parentWithPending.locales.fr!.pendingToolingCommitSha = handoffPendingSha;
-    parentWithPending.locales.fr!.toolingCommitShas = [
-      ...(parentWithPending.locales.fr!.toolingCommitShas ?? []),
-      handoffOwnedSha,
-    ];
-    await state.updateBatch(parentWithPending, parent!.revision);
+  it.each([
+    { owner: "parent", refresh: true, protected: true },
+    { owner: "parent", refresh: false, protected: true },
+    { owner: "child", refresh: false, protected: true },
+    { owner: "neither", refresh: true, protected: undefined },
+  ])(
+    "transfers retry ownership (flag owner: $owner, refresh: $refresh)",
+    async ({ owner, refresh: refreshParent, protected: expectedProtection }) => {
+      const state = new MemoryStateStore();
+      const phrase = new FakePhrase();
+      phrase.jobParts = [
+        { uid: "job-fr", targetLang: "fr", workflowLevel: 1 },
+        { uid: "job-ja", targetLang: "ja", workflowLevel: 1 },
+      ];
+      phrase.expectedTargetLangs = ["fr", "ja"];
+      phrase.jobStatuses.set("job-fr", "COMPLETED");
+      phrase.jobStatuses.set("job-ja", "CANCELLED");
+      phrase.targetBytesByJob.set(
+        "job-fr",
+        new TextEncoder().encode('{"greeting":"Bonjour {name}"}'),
+      );
+      phrase.targetBytesByJob.set(
+        "job-ja",
+        new TextEncoder().encode('{"greeting":"こんにちは {name}"}'),
+      );
+      const repository = new FakeRepository();
+      const workflow = new PhraseWorkflow({
+        phrase,
+        state,
+        repository,
+        catalogAdapters: new CatalogAdapterRegistry(),
+      });
+      const input = {
+        repository: "example/app",
+        baseRef: "phrase-pilot",
+        sourceCommit: "abc123",
+        sourceBytes,
+        config: {
+          ...config,
+          targetLocales: [
+            ...config.targetLocales,
+            { phraseLocale: "ja", repositoryLocale: "ja", outputPath: "locales/ja.json" },
+          ],
+        },
+      };
+      await workflow.submit(input);
+      await workflow.reconcile();
+      const [parent] = await state.listBatches();
+      const branch = parent?.record.locales.fr?.pullRequestBranch;
+      const initialSha = parent?.record.locales.fr?.toolingCommitSha;
+      const handoffPendingSha = "unreferenced-pending-commit";
+      const handoffOwnedSha = "older-owned-tooling-commit";
+      const parentWithPending = structuredClone(parent!.record);
+      parentWithPending.locales.fr!.pendingToolingCommitSha = handoffPendingSha;
+      parentWithPending.locales.fr!.toolingCommitShas = [
+        ...(parentWithPending.locales.fr!.toolingCommitShas ?? []),
+        handoffOwnedSha,
+      ];
+      await state.updateBatch(parentWithPending, parent!.revision);
 
-    phrase.expectedTargetLangs = ["ja"];
-    phrase.jobParts = [{ uid: "job-ja-retry", targetLang: "ja", workflowLevel: 1 }];
-    phrase.jobStatuses.set("job-ja-retry", "NEW");
-    phrase.waitError = new PhraseWorkflowError("Timed out waiting for Phrase job imports");
-    await expect(workflow.submit({ ...input, retryFailed: true })).rejects.toThrow(
-      "Timed out waiting for Phrase job imports",
-    );
-    const retryAfterTimeout = (await state.listBatches()).find(
-      ({ record }) => record.retryParentBatchKey === parent?.record.key,
-    );
-    expect(retryAfterTimeout?.record.locales.fr).toMatchObject({
-      toolingCommitSha: initialSha,
-      pendingToolingCommitSha: handoffPendingSha,
-    });
-    expect(retryAfterTimeout?.record.locales.fr?.toolingCommitShas).toContain(handoffOwnedSha);
+      phrase.expectedTargetLangs = ["ja"];
+      phrase.jobParts = [{ uid: "job-ja-retry", targetLang: "ja", workflowLevel: 1 }];
+      phrase.jobStatuses.set("job-ja-retry", "NEW");
+      phrase.waitError = new PhraseWorkflowError("Timed out waiting for Phrase job imports");
+      await expect(workflow.submit({ ...input, retryFailed: true })).rejects.toThrow(
+        "Timed out waiting for Phrase job imports",
+      );
+      const retryAfterTimeout = (await state.listBatches()).find(
+        ({ record }) => record.retryParentBatchKey === parent?.record.key,
+      );
+      expect(retryAfterTimeout?.record.locales.fr).toMatchObject({
+        toolingCommitSha: initialSha,
+        pendingToolingCommitSha: handoffPendingSha,
+      });
+      expect(retryAfterTimeout?.record.locales.fr?.toolingCommitShas).toContain(handoffOwnedSha);
 
-    phrase.jobStatuses.set("job-fr", "COMPLETED");
-    phrase.targetBytesByJob.set("job-fr", new TextEncoder().encode('{"greeting":"Salut {name}"}'));
-    phrase.jobStatuses.set("job-ja-retry", "COMPLETED");
-    await workflow.reconcile();
-    const batchesAfterHandoff = await state.listBatches();
-    const updatedParent = batchesAfterHandoff.find(
-      ({ record }) => record.key === parent?.record.key,
-    );
-    const retry = batchesAfterHandoff.find(
-      ({ record }) => record.retryParentBatchKey === parent?.record.key,
-    );
-    const pushedSha = repository.branchHeads.get(branch!);
+      // The retry already holds its snapshot. Protection is discovered afterwards.
+      const protectionOwner =
+        owner === "child"
+          ? (await state.readBatch(retryAfterTimeout!.record.key))!
+          : (await state.readBatch(parent!.record.key))!;
+      if (owner !== "neither") {
+        protectionOwner.record.locales.fr!.pullRequestSupersededReviewerCommits = true;
+        await state.updateBatch(protectionOwner.record, protectionOwner.revision);
+      }
+      phrase.jobStatuses.set("job-fr", "COMPLETED");
+      if (refreshParent) {
+        phrase.targetBytesByJob.set(
+          "job-fr",
+          new TextEncoder().encode('{"greeting":"Salut {name}"}'),
+        );
+      }
+      phrase.jobStatuses.set("job-ja-retry", "COMPLETED");
+      await workflow.reconcile();
+      const batchesAfterHandoff = await state.listBatches();
+      const updatedParent = batchesAfterHandoff.find(
+        ({ record }) => record.key === parent?.record.key,
+      );
+      const retry = batchesAfterHandoff.find(
+        ({ record }) => record.retryParentBatchKey === parent?.record.key,
+      );
+      const pushedSha = repository.branchHeads.get(branch!);
 
-    expect(pushedSha).not.toBe(initialSha);
-    expect(updatedParent?.record.locales.fr?.toolingCommitSha).toBe(pushedSha);
-    expect(updatedParent?.record.locales.fr?.toolingCommitShas).toContain(handoffOwnedSha);
-    expect(updatedParent?.record.locales.fr?.pullRequestReexportDelegated).toBe(true);
-    expect(retry?.record.locales.fr?.toolingCommitSha).toBe(pushedSha);
-    expect(retry?.record.locales.fr?.toolingCommitShas).toContain(handoffOwnedSha);
+      if (refreshParent) {
+        expect(pushedSha).not.toBe(initialSha);
+      } else {
+        expect(pushedSha).toBe(initialSha);
+      }
+      expect(retry?.record.locales.fr?.pullRequestSupersededReviewerCommits).toBe(
+        expectedProtection,
+      );
+      expect(updatedParent?.record.locales.fr?.toolingCommitSha).toBe(pushedSha);
+      expect(updatedParent?.record.locales.fr?.toolingCommitShas).toContain(handoffOwnedSha);
+      expect(updatedParent?.record.locales.fr?.pullRequestReexportDelegated).toBe(true);
+      expect(retry?.record.locales.fr?.toolingCommitSha).toBe(pushedSha);
+      expect(retry?.record.locales.fr?.toolingCommitShas).toContain(handoffOwnedSha);
 
-    const retryResults = await workflow.reconcile();
-    const afterRetry = await state.readBatch(retry!.record.key);
-    expect(
-      retryResults.some(({ phraseLocale, phase }) => phraseLocale === "fr" && phase === "retrying"),
-    ).toBe(false);
-    expect(afterRetry?.record.locales.fr?.toolingCommitSha).toBe(pushedSha);
-    expect(afterRetry?.record.locales.fr?.pendingToolingCommitSha).toBeUndefined();
-    expect(repository.commitCount(branch!)).toBe(2);
-  });
+      const retryResults = await workflow.reconcile();
+      const afterRetry = await state.readBatch(retry!.record.key);
+      expect(
+        retryResults.some(
+          ({ phraseLocale, phase }) => phraseLocale === "fr" && phase === "retrying",
+        ),
+      ).toBe(false);
+      expect(afterRetry?.record.locales.fr?.toolingCommitSha).toBe(pushedSha);
+      if (refreshParent)
+        expect(afterRetry?.record.locales.fr?.pendingToolingCommitSha).toBeUndefined();
+      expect(afterRetry?.record.locales.fr?.pullRequestSupersededReviewerCommits).toBe(
+        expectedProtection,
+      );
+      expect(repository.commitCount(branch!)).toBe(refreshParent ? 2 : 1);
+    },
+  );
 
   it("reuses one Phrase job when the same source is submitted from a later commit", async () => {
     const state = new MemoryStateStore();
@@ -7399,7 +7435,7 @@ function replacementNoticePrefix(replacement: PhraseBatchRecord): string {
 }
 
 describe("superseded locale pull requests", () => {
-  it("keeps reviewer work open after a translation refresh and supersession", async () => {
+  it("keeps reviewer work open after real refresh, retry handoff and supersession", async () => {
     const scenario = await makeSupersededPullRequestScenario();
     const { workflow, repository, phrase, state } = scenario;
     await workflow.reconcile();
@@ -7407,29 +7443,97 @@ describe("superseded locale pull requests", () => {
     const locale = first.locales.fr!;
     const branch = locale.pullRequestBranch!;
     const anchor = locale.toolingCommitSha!;
+    const child = structuredClone(first);
+    child.key = "e".repeat(64);
+    child.retryParentBatchKey = first.key;
+    await state.createBatch(child);
+    const originalBytes = repository.branchFiles.get(branch)!.get("locales/fr.json")!;
     repository.branchHeads.set(branch, "reviewer-head");
     repository.branchFiles.get(branch)!.set("README.md", new TextEncoder().encode("Reviewer work"));
     phrase.targetBytes = new TextEncoder().encode('{"greeting":{"defaultMessage":"Salut {name}"}}');
 
-    // Repository-level tests verify this eligibility and third callback argument.
-    // Exercise the real workflow's ownership persistence and supersession here.
-    const update = repository.updateOpenPullRequest.bind(repository);
-    repository.updateOpenPullRequest = async (input) =>
-      update({
-        ...input,
-        expectedToolingCommitShas: [...(input.expectedToolingCommitShas ?? []), input.headSha],
-        recordToolingCommitSha: (sha) => input.recordToolingCommitSha(sha, anchor, true),
-        recheckOwnedCommitEligibility: () => input.recheckOwnedCommitEligibility!(anchor),
-      });
+    // Exercise the real GitHub ownership guard and callback, not a manually set flag.
+    let pendingBytes = originalBytes;
+    const github = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "token",
+      stateBranch: "i18n-state",
+      fetch: async (input, init) => {
+        const url = new URL(String(input));
+        const path = decodeURIComponent(url.pathname);
+        const method = init?.method ?? "GET";
+        const json = (value: unknown) => new Response(JSON.stringify(value));
+        if (path.includes("/compare/")) return json({ status: "ahead", commits: [], files: [] });
+        if (path.includes("/git/commits/") && method === "GET")
+          return json({ tree: { sha: "root-tree" } });
+        if (path.endsWith("/git/trees/root-tree"))
+          return json({
+            tree: [{ path: "locales", mode: "040000", type: "tree", sha: "locale-tree" }],
+          });
+        if (path.endsWith("/git/trees/locale-tree"))
+          return json({
+            tree: [{ path: "fr.json", mode: "100644", type: "blob", sha: "original-blob" }],
+          });
+        if (path.includes("/contents/"))
+          return json({
+            type: "file",
+            sha: "original-blob",
+            encoding: "base64",
+            content: Buffer.from(originalBytes).toString("base64"),
+          });
+        if (path.endsWith("/git/blobs")) {
+          pendingBytes = Buffer.from(JSON.parse(String(init?.body)).content, "base64");
+          return json({ sha: "new-blob" });
+        }
+        if (path.endsWith("/git/trees")) return json({ sha: "new-tree" });
+        if (path.endsWith("/git/commits")) {
+          expect(JSON.parse(String(init?.body)).parents).toEqual(["reviewer-head"]);
+          return json({ sha: "refreshed-head" });
+        }
+        if (path.includes("/git/ref/heads/"))
+          return json({ object: { sha: repository.branchHeads.get(branch) } });
+        if (path.includes("/git/refs/heads/")) {
+          expect(JSON.parse(String(init?.body))).toEqual({ sha: "refreshed-head", force: false });
+          repository.branchHeads.set(branch, "refreshed-head");
+          repository.branchFiles.get(branch)!.set("locales/fr.json", pendingBytes);
+          return json({});
+        }
+        if (path.includes("/pulls/")) {
+          return json(
+            method === "GET"
+              ? { state: "open", head: { sha: repository.branchHeads.get(branch) } }
+              : {},
+          );
+        }
+        throw new Error(`Unexpected GitHub request: ${method} ${path}`);
+      },
+    });
+    const fakeUpdate = repository.updateOpenPullRequest.bind(repository);
+    repository.updateOpenPullRequest = (input) =>
+      repository.branchHeads.get(branch) === "reviewer-head"
+        ? github.updateOpenPullRequest(input)
+        : fakeUpdate(input);
+    // Parent's in-flight reconcile discovered batches before the child was created.
+    // Keep the child snapshot out of that pass, then let its next pass take ownership.
+    const listBatchKeys = state.listBatchKeys.bind(state);
+    state.listBatchKeys = async () => (await listBatchKeys()).filter((key) => key !== child.key);
     await workflow.reconcile();
-    const refreshed = (await state.readBatch(first.key))!.record;
+    state.listBatchKeys = listBatchKeys;
+    expect((await state.readBatch(child.key))!.record.locales.fr?.toolingCommitSha).toBe(anchor);
+    await workflow.reconcile();
+    const refreshed = (await state.readBatch(child.key))!.record;
+    expect(refreshed.retryParentDelegated).toBe(true);
+    expect(refreshed.locales.fr?.pullRequestSupersededReviewerCommits).toBe(true);
+    expect(repository.branchFiles.get(branch)!.get("README.md")).toEqual(
+      new TextEncoder().encode("Reviewer work"),
+    );
     expect(refreshed.locales.fr?.toolingCommitSha).not.toBe(anchor);
     expect(refreshed.locales.fr?.toolingCommitSha).toBe(repository.branchHeads.get(branch));
 
     // A newer source carries the same translations, but not the reviewer's README edit.
     refreshed.phase = "superseded";
     refreshed.createdAt = "2026-10-20T10:00:00.000Z";
-    const stored = (await state.readBatch(first.key))!;
+    const stored = (await state.readBatch(child.key))!;
     await state.updateBatch(refreshed, stored.revision);
     const replacementSource = new TextEncoder().encode(
       JSON.stringify({
@@ -7458,10 +7562,57 @@ describe("superseded locale pull requests", () => {
     expect(replacementResults).toEqual(
       expect.arrayContaining([expect.objectContaining({ phase: "pr-created" })]),
     );
+    await workflow.reconcile();
+    const notices = repository.pullRequestComments.filter(
+      (comment) =>
+        comment.pullRequestUrl === locale.pullRequestUrl &&
+        comment.body.startsWith("Replaced by #"),
+    );
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.body).toContain(
+      "Left open because it has commits not made by i18n-pipeline",
+    );
     expect(repository.closePullRequestCalls).not.toContain(locale.pullRequestUrl);
-    expect((await state.readBatch(first.key))?.record.locales.fr).toMatchObject({
+    expect((await state.readBatch(child.key))?.record.locales.fr).toMatchObject({
       pullRequestSupersededReviewerCommits: true,
     });
+  });
+
+  it("retries replacement notices for protected PRs without ever auto-closing them", async () => {
+    const scenario = await makeSupersededPullRequestScenario();
+    const old = await seedSupersededBatchFixture(scenario, {
+      key: "f".repeat(64),
+      pullRequestUrl: "https://github.com/example/app/pull/19",
+      createdAt: "2026-10-20T10:00:00.000Z",
+      locale: { pullRequestSupersededReviewerCommits: true },
+    });
+    const { repository, workflow, state } = scenario;
+    const comment = repository.createPullRequestComment.bind(repository);
+    let failNotice = true;
+    let attempts = 0;
+    repository.createPullRequestComment = async (url, body) => {
+      if (url === old.locales.fr!.pullRequestUrl) {
+        attempts += 1;
+        if (failNotice) throw new PhraseRepositoryError("notice unavailable", 503);
+      }
+      return comment(url, body);
+    };
+    await workflow.reconcile();
+    expect(attempts).toBeGreaterThan(0);
+    expect(
+      (await state.readBatch(old.key))?.record.locales.fr?.pullRequestSupersededNoticePosted,
+    ).toBeUndefined();
+    failNotice = false;
+    await workflow.reconcile();
+    const successfulAttempts = attempts;
+    await workflow.reconcile();
+    expect(attempts).toBe(successfulAttempts);
+    expect(
+      repository.pullRequestComments.filter(
+        (entry) => entry.pullRequestUrl === old.locales.fr!.pullRequestUrl,
+      ),
+    ).toEqual([expect.objectContaining({ body: expect.stringContaining("Replaced by #42") })]);
+    expect(repository.closePullRequestCalls).toEqual([]);
   });
 
   it("closes a tooling-owned superseded PR after posting the exact replacement notice", async () => {

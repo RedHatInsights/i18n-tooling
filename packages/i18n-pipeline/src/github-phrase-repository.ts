@@ -911,6 +911,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
         for (const path of protectedPaths) {
           const previous = await this.getTreeEntry(path, ownedSha);
           const current = await this.getTreeEntry(path, headSha);
+          if (!previous && !current) continue;
           if (
             !previous ||
             !current ||
@@ -1026,17 +1027,24 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
         throw new GitHubRepositoryError("GitHub returned an incomplete git tree", 500);
       }
       const entry: unknown = value.tree.find((item) => isRecord(item) && item.path === segment);
+      if (entry === undefined) return null;
       if (
         !isRecord(entry) ||
         !nonEmptyString(entry.sha) ||
         !nonEmptyString(entry.mode) ||
         !nonEmptyString(entry.type)
-      )
-        return null;
+      ) {
+        throw new GitHubRepositoryError("GitHub returned an invalid git tree entry", 500);
+      }
       if (index === segments.length - 1) {
         return { sha: entry.sha, mode: entry.mode, type: entry.type };
       }
-      if (entry.type !== "tree") return null;
+      if (entry.type !== "tree") {
+        throw new GitHubRepositoryError(
+          `Repository path ${path} has a non-directory ancestor`,
+          409,
+        );
+      }
       treeSha = entry.sha;
     }
     return null;

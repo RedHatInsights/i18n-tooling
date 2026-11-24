@@ -2272,7 +2272,8 @@ export class PhraseWorkflow {
           !locale.pullRequestMerged &&
           !locale.pullRequestFinalized &&
           !locale.pullRequestReexportDelegated &&
-          locale.pullRequestSupersededReviewerCommits !== true
+          (locale.pullRequestSupersededReviewerCommits !== true ||
+            locale.pullRequestSupersededNoticePosted !== true)
         );
       })
       // Least recently inspected first (never inspected sorts first); the stable sort keeps
@@ -2315,7 +2316,7 @@ export class PhraseWorkflow {
           oldLocale.pendingToolingCommitSha ? [oldLocale.pendingToolingCommitSha] : undefined,
         );
         const headIsToolingOwned = ownedCommitShas.includes(pullRequestState.headSha);
-        if (headIsToolingOwned) {
+        if (headIsToolingOwned && oldLocale.pullRequestSupersededReviewerCommits !== true) {
           const divergentIds = await this.divergentSupersededTranslations(
             stored.record,
             replacementRecord,
@@ -4045,6 +4046,9 @@ export class PhraseWorkflow {
             carriedLocale.pullRequestUrl === locale.pullRequestUrl
           ) {
             const carriedLocaleUpdate: PhraseLocaleRecord = { ...carriedLocale };
+            if (locale.pullRequestSupersededReviewerCommits) {
+              carriedLocaleUpdate.pullRequestSupersededReviewerCommits = true;
+            }
             if (locale.toolingCommitSha) {
               carriedLocaleUpdate.toolingCommitSha = locale.toolingCommitSha;
             }
@@ -4068,15 +4072,7 @@ export class PhraseWorkflow {
             } else {
               delete carriedLocaleUpdate.toolingCommitShas;
             }
-            const ownershipChanged =
-              JSON.stringify(carriedLocaleUpdate.toolingCommitShas ?? []) !==
-              JSON.stringify(carriedLocale.toolingCommitShas ?? []);
-            if (
-              carriedLocaleUpdate.toolingCommitSha !== carriedLocale.toolingCommitSha ||
-              carriedLocaleUpdate.pendingToolingCommitSha !==
-                carriedLocale.pendingToolingCommitSha ||
-              ownershipChanged
-            ) {
+            if (stableJson(carriedLocaleUpdate) !== stableJson(carriedLocale)) {
               record.locales[target.phraseLocale] = carriedLocaleUpdate;
             }
             if (!locale.pullRequestReexportDelegated) {
