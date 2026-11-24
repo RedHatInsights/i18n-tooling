@@ -1,0 +1,50 @@
+{
+  "problemProcessingRequest": {
+    "id": "problemProcessingRequest",
+    "defaultMessage": "There was a problem processing the request. Try reloading the page. If the problem persists, contact"
+  },
+  "redHatSupport": {
+    "id": "redHatSupport",
+    "defaultMessage": "Red Hat support"
+  },
+  "openSupportCase": {
+    "id": "openSupportCase",
+    "defaultMessage": "Open a support case "
+  },
+  "filterByTagsPopoverCCGLink": {
+    "id": "filterByTagsPopoverCCGLink",
+    "defaultMessage": "Client Configuration Guide"
+  },
+  "filterByTagsPopoverSatelliteLink": {
+    "id": "filterByTagsPopoverSatelliteLink",
+    "defaultMessage": "imported"
+  },
+  "filterByTagsPopoverContent1": {
+    "id": "filterByTagsPopoverContent1",
+    "defaultMessage": "Tagging can be used to classify further and organize your hosts shown within the Insights inventory. If connected to a Satellite, tags from that Satellite can be"
+  },
+  "filterByTagsPopoverContent2": {
+    "id": "filterByTagsPopoverContent2",
+    "defaultMessage": ". Additionally, you can define your own tags via the Insights-Client configuration. Please see our"
+  },
+  "filterByTagsPopoverContent3": {
+    "id": "filterByTagsPopoverContent3",
+    "defaultMessage": "for more details. Please note that Workload tags are automatically added by the Insights service."
+  },
+  "describeReportBug": {
+    "id": "describeReportBug",
+    "defaultMessage": "Describe the bug you encountered. Include where it is located and what action caused it. If this issue is urgent or blocking your workflow, "
+  },
+  "informDirectionDescription": {
+    "id": "informDirectionDescription",
+    "defaultMessage": "By participating in feedback sessions, usability tests, and interviews with our "
+  },
+  "userResearchTeam": {
+    "id": "userResearchTeam",
+    "defaultMessage": "User Research Team"
+  },
+  "directInfluence": {
+    "id": "directInfluence",
+    "defaultMessage": ", your feedback will directly influence the future of Red Hat’s products. Opt in below to hear about future research opportunities via email."
+  }
+}

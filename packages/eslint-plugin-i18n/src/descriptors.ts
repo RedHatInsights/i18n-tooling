@@ -1,4 +1,5 @@
 import type * as ESTree from "estree";
+import type { TSESTree } from "@typescript-eslint/utils";
 
 /** AST helpers shared by the plugin's rules. */
 
@@ -31,6 +32,21 @@ export function staticString(node: unknown): string | undefined {
   return undefined;
 }
 
+export function jsxAttributeText(attribute: TSESTree.JSXAttribute): string | undefined {
+  const value = attribute.value;
+  return value?.type === "JSXExpressionContainer"
+    ? staticString(value.expression)
+    : staticString(value);
+}
+
+export function jsxElementName(name: TSESTree.JSXTagNameExpression): string | undefined {
+  return name.type === "JSXIdentifier"
+    ? name.name
+    : name.type === "JSXMemberExpression"
+      ? name.property.name
+      : undefined;
+}
+
 export function propertyName(property: ESTree.Property): string | undefined {
   if (property.computed) return undefined;
   return property.key.type === "Identifier" ? property.key.name : staticString(property.key);
@@ -56,11 +72,10 @@ export function isFormatJsMessageCall(callee: ESTree.Node): boolean {
   }
 
   if (callee.type !== "MemberExpression") return false;
-  const propertyName =
-    callee.property.type === "Identifier"
+  const propertyName = callee.computed
+    ? staticString(callee.property)
+    : callee.property.type === "Identifier"
       ? callee.property.name
-      : callee.computed
-        ? staticString(callee.property)
-        : undefined;
+      : undefined;
   return propertyName === "formatMessage";
 }

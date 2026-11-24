@@ -504,7 +504,65 @@ objects:
     });
   });
 
-  it("uses only the four ICU rules for a FormatJS consumer without config", async () => {
+  it.each(
+    (["configured", "zero-config", "catalog-only", "descriptors-only"] as const).flatMap((kind) =>
+      (["error", "warn", "fixed"] as const).map((scenario) => ({ kind, scenario })),
+    ),
+  )(
+    "checks fragment composition on activated paths ($kind, $scenario)",
+    async ({ kind, scenario }) => {
+      const root = await createRoot();
+      if (kind === "zero-config") {
+        await writeProjectFile(
+          root,
+          "package.json",
+          JSON.stringify({ dependencies: { "react-intl": "^7.0.0" } }),
+        );
+      } else {
+        await createPassProject(
+          root,
+          kind === "configured"
+            ? { files: ["src/**/*.tsx"] }
+            : kind === "descriptors-only"
+              ? { files: ["src/messages.ts"] }
+              : undefined,
+        );
+      }
+      await writeProjectFile(
+        root,
+        "src/messages.ts",
+        `export default { request: { id: 'request', defaultMessage: 'Try again. Contact', description: 'Request guidance' } };`,
+      );
+      await writeProjectFile(
+        root,
+        "src/View.tsx",
+        `import messages from './messages'; export const View = () => <p>{intl.formatMessage(messages.request)} <a>support.</a></p>;`,
+      );
+      if (scenario === "fixed") {
+        await writeProjectFile(
+          root,
+          "src/View.tsx",
+          `export const View = () => <p>{intl.formatMessage({ id: 'request', description: 'Request guidance', defaultMessage: 'Try again. Contact <SupportLink>support</SupportLink>.', }, { SupportLink: chunks => <a>{chunks}</a> })}</p>;`,
+        );
+      }
+      // One CLI invocation per case: do not put error, warn and fixed runs under one 5s budget.
+      const result = await runValidateCi(root, ["--mode", scenario === "warn" ? "warn" : "error"]);
+      if (kind === "catalog-only" || kind === "descriptors-only" || scenario === "fixed") {
+        expect(result.exitCode).toBe(0);
+        expect(result.stderr).toEqual([]);
+      } else {
+        expect(result.exitCode).toBe(scenario === "error" ? 1 : 0);
+        expect(result.stderr).toHaveLength(1);
+        expect(result.stderr[0]).toMatch(
+          /^src\/View.tsx:1:\d+ error i18n\/no-fragment-composition /u,
+        );
+        expect(result.stderr[0]).toContain("rich-text tags");
+        expect((await readResults(result.resultsDir)).I18N_ERRORS).toBe("1");
+      }
+    },
+  );
+
+  it("keeps zero-config ICU diagnostics independent of consumer config and inline disables", async () => {
     const root = await createRoot();
     await writeProjectFile(
       root,
