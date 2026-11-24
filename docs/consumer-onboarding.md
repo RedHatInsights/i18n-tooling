@@ -83,12 +83,67 @@ gh api "repos/$repo/rulesets?includes_parents=true" --paginate
 - A missing ref is expected before the first sync; still inspect its effective rules. Existing branches need the same check: successful creation does not prove that batch-file writes are allowed.
 - Inspect the matching repository and organization rulesets, their target patterns and bypass actors. Flag restrictions on creation or updates, required pull requests, and required status checks that prevent the automation's direct state writes. Verify access for the workflow's actual GitHub App or `GITHUB_TOKEN`, not the personal token used for inspection; an App bypass limited to pull requests does not permit direct writes.
 - Also inspect classic branch protection, including wildcard patterns in repository settings. For an existing branch, `gh api "repos/$repo/branches/$encoded_branch/protection"` reads its protection. A 403/404, missing bypass details, or inaccessible organization policy is unverified, not proof of unrestricted access; ask an administrator to confirm it.
-- Keep signing requirements unless separately proven incompatible. Do not disable default-branch protections or grant a repository-wide App bypass. If a matching ruleset blocks state writes, ask an administrator to exclude exactly `refs/heads/<state.branch>` from that ruleset, preserving its other settings. Check each configured state branch separately. Locale branches (`i18n/phrase-*`) also need creation and updates allowed, but their PRs must still satisfy the base branch's review and required checks.
+- Keep signing requirements unless separately proven incompatible. Do not disable default-branch protections or grant a repository-wide App bypass. If a matching ruleset blocks state writes, ask an administrator to exclude exactly `refs/heads/<state.branch>` from that ruleset, preserving its other settings. Check each configured state branch separately. Also complete the locale-branch checks below; a state-branch exclusion does not cover locale branches.
 - Record the branch, matching policy and ruleset URL, actual automation actor, and any unverified access or required admin action in the onboarding PR checklist and final report. Inspection is read-only: obtain explicit approval before changing repository settings, then re-check effective rules after the approved fix.
 
 **Trap: state writes look like pipeline failures.** A creation restriction can produce `HTTP 422: Reference update failed` on `POST /git/refs`. An existing state branch subject to PR/check requirements can produce `HTTP 409: Repository rule violations found` on a batch-file `PUT /contents/...`. Inspect the reported GitHub rejection and effective rules; neither error alone proves a concurrency conflict, and retrying does not bypass policy.
 
-**Done when:** every configured state branch has a recorded creation/direct-write assessment for the actual automation actor, with unresolved policy or access blockers listed as admin follow-ups. The Phrase round trip is not operational until those blockers are resolved; do not probe permissions by creating a branch or running live Phrase operations during onboarding inspection.
+#### Check locale branch creation and updates
+
+Reconcile creates `i18n/phrase-*` branches and later updates them directly when translators revise a completed job. Their PRs still need to satisfy the **base branch's** review and required checks. Inspect effective rules for an existing locale branch, or a representative name before the first delivery; the API call does not create it:
+
+```bash
+locale_branch=i18n/phrase-preflight-fr # Use an actual locale branch when available.
+encoded_locale=$(jq -rn --arg branch "$locale_branch" '$branch | @uri')
+gh api "repos/$repo/rules/branches/$encoded_locale" \
+  --jq '.[] | {type, parameters, ruleset_id, ruleset_source}'
+```
+
+Inspect all matching patterns, including locale-specific rules, and classic protection as for state branches above. Record separately whether the actual automation actor can create and directly update locale branches. Look for:
+
+- `creation` restrictions, which can reject the first locale branch even though state writes work.
+- `required_status_checks` with `do_not_enforce_on_create: false`. A PR-only check cannot run before the branch and PR exist, so requiring it on creation blocks delivery.
+- `pull_request` or required-check rules on locale branches that block subsequent direct updates. Allowing creation alone does not prove refresh works.
+
+Both creation restrictions and required checks on creation can surface as `HTTP 422: Reference update failed` on `POST /git/refs`. To distinguish them, inspect the failed run's rule evaluation when authorized:
+
+```bash
+gh api "repos/$repo/rulesets/rule-suites?rule_suite_result=fail&per_page=20" \
+  --jq '.[] | {id, actor_name, ref, pushed_at}'
+# Select the suite matching the run time, automation actor and rejected branch.
+suite_id=REPLACE_WITH_MATCHING_SUITE_ID
+gh api "repos/$repo/rulesets/rule-suites/$suite_id"
+```
+
+If audit access is unavailable, report that limit and the effective rules rather than claiming a specific rejection was confirmed. Retrying does not bypass policy.
+
+#### Approved locale-branch remediation
+
+Ask a repository administrator to approve the exact ruleset change. Exclude `refs/heads/i18n/phrase-*` only from the rulesets that block creation or direct updates, keeping every existing exclusion and the base branch's review/check protections. If such a ruleset also supplies signing or other protections that must apply to locale branches, retain those through a separate matching ruleset before adding the exclusion. Verify inherited organization rules rather than assuming they cover the excluded branches. A repository exclusion does not override another ruleset or classic protection.
+
+After that review and explicit approval, an administrator with repository-admin permission can use this command for one blocking **repository** ruleset at a time. Replace both variables with the inspected consumer and ruleset ID; this is a settings write, not an onboarding inspection step:
+
+```bash
+(
+  set -euo pipefail
+  repo=RedHatInsights/your-repository
+  ruleset_id=REPLACE_WITH_BLOCKING_RULESET_ID
+  endpoint="repos/$repo/rulesets/$ruleset_id"
+
+  gh api "$endpoint" |
+    jq '{name, target, enforcement, conditions, rules,
+         bypass_actors: (.bypass_actors // [])}
+      | .conditions.ref_name.exclude = (
+          ((.conditions.ref_name.exclude // []) +
+           ["refs/heads/i18n/phrase-*"]) | unique
+        )' |
+    gh api --method PUT "$endpoint" --input -
+)
+```
+
+Re-read effective rules for both state and locale branches and the actual PR base branch after the approved change. Confirm creation/direct-update blockers are resolved while signing and base-branch review/check requirements remain enforced. Only then retry the failed reconciliation in the separately approved operational workflow; onboarding inspection never creates a probe branch or runs live Phrase operations.
+
+**Done when:** every config has recorded creation/direct-write assessments for its state branch and locale branches, for the actual automation actor, with unresolved policy or access blockers listed as admin follow-ups. A successful run with no completed translations does not prove locale delivery permissions. The Phrase round trip is not operational until those blockers are resolved.
 
 ## 6. Pilot Phrase from a feature branch
 
