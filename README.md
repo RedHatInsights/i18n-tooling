@@ -25,7 +25,7 @@ The `i18n-onboarding` agent skill onboards a repository for you in Claude Code, 
    - A `RedHatInsights` organization owner installs the [`hcc-i18n-tms-sync`](https://github.com/apps/hcc-i18n-tms-sync) App on the repository.
    - An admin checks [Phrase branch permissions](docs/consumer-onboarding.md#check-phrase-branch-permissions-both-modes): automation must create each configured state branch and write its records directly. Resolve matching creation, PR or required-check restrictions with narrow exclusions, keeping the default branch protected.
 
-   Once the registration merges, the hub runs on its schedule: a merged source change goes to Phrase, and each translated locale comes back as a draft PR assigned to the people who changed the source strings. [Where is my translation?](docs/phrase-operations.md#where-is-my-translation) explains how to follow a string through.
+   Once the registration merges, the hub runs on its schedule: a merged source change goes to Phrase, and each translated locale comes back as a PR assigned to the people who changed the source strings. PRs follow the [findings-driven readiness policy](docs/phrase-operations.md#locale-pull-requests). [Where is my translation?](docs/phrase-operations.md#where-is-my-translation) explains how to follow a string through.
 
 To onboard by hand, follow the [consumer onboarding checklist](docs/consumer-onboarding.md).
 

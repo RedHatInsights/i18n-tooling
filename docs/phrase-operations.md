@@ -16,16 +16,16 @@ Submit runs when a merge changes the configured source paths, or when the submit
 | `retrying` | A temporary issue; the next run retries. `Phrase has not yet exposed the new jobs; the next run continues this batch` means wait. |
 | `failed` | A pipeline step failed. Read the job log and fix the Phrase job or config, then [retry](#retrying-a-failed-batch). `No Phrase job was created for this batch; voided after 15 minutes` means dispatch submit again. |
 | `invalid-translation` | The locale PR was delivered with translation errors. Fix the translation in Phrase and keep the final jobs `COMPLETED`; the next run updates the same PR. |
-| `pr-created` | Review the draft locale PR and its 🌐 Translation check comment. |
+| `pr-created` | Review the locale PR and its 🌐 Translation check comment. |
 | `superseded` | Delivery stopped because the batch's Frontend template or committed FEO catalog no longer matches its source, or an earlier tooling release replaced it with newer source. Follow the newer batch. See [superseded PRs](#superseded-batches). |
 
 ## Locale pull requests
 
-- One draft PR per locale, titled `i18n(<repositoryLocale>): Phrase translation update for <source path>`. The source path is `sourceCatalog.path`, or `frontendTemplate.path` for generated-source Frontend configs.
+- One PR per locale, titled `i18n(<repositoryLocale>): Phrase translation update for <source path>`. The source path is `sourceCatalog.path`, or `frontendTemplate.path` for generated-source Frontend configs.
 - The first creation assigns the people who changed the source strings since the previous matching batch; hub callers can pass `fallback-assignees` for when none can be assigned.
 - A PR opens **even when validation fails**. The description carries a one-line findings status, and the 🌐 Translation check comment has the error and warning tables. Each validation failure is reported once per export attempt, and a new comment is posted when the findings, batch or final job change. If parsing fails, the downloaded bytes are kept. Generated Frontend YAML is not updated until validation passes, so a retained YAML block may come from an earlier valid export: do not merge it alongside an invalid catalog.
 - **Corrections flow into the same PR.** Fix the translation in Phrase; while the PR is open, every reconcile re-exports from the same final job (one Phrase export per open PR per run) and commits to the same branch only if the files changed. The status line also refreshes when only the findings change. Phrase jobs stay `COMPLETED`; reconcile never comments in Phrase or changes job status.
-- **Drafts stay drafts.** Tooling never marks a PR ready or merges it. An invalid re-export converts a ready PR back to draft before writing; a valid one leaves a ready PR ready. The same holds when adopting a PR after interrupted or raced creation, and invalid content for a branch without a recorded PR waits until its draft PR is established. If draft conversion fails, the branch is not updated and the locale reports a delivery failure.
+- **Readiness follows findings automatically.** New clean PRs open ready for review. Errors or warnings convert an existing ready PR to draft before writing; once all findings clear, reconciliation marks the same PR ready after saving clean content and its description, even if the files are unchanged. This also applies to manually drafted PRs and PRs adopted after interrupted or raced creation. For exports with errors or warnings, a branch without a recorded PR is not updated until a draft PR is established. If draft conversion fails, the branch is not updated. A failed promotion is reported separately from description delivery and retried on the next run without another commit. Unchanged descriptions are not patched. Tooling never merges PRs; required reviews and checks still apply.
 - **Reviewer commits stop automation.** A branch whose head is not tooling-owned is no longer re-exported, and the commits are preserved.
 - **Closing a PR** without merging ends delivery for that locale in the batch and does not fail it. Reopening resumes re-export only while the batch is active and the branch head is tooling-owned. Submitting unchanged source does not open a replacement.
 
@@ -60,7 +60,7 @@ Completed translations remain deliverable after base English advances. New local
 - `ready` lasts while any locale PR is open. The batch becomes `completed` once every locale is final and every PR is merged or closed. Reopening a PR after that does not resume automation.
 - `failed` and `superseded` batches are not reconciled again, except that submit may move past an empty stuck batch after voiding it.
 - `COMPLETED` on the final Phrase workflow step is the only success signal; `DELIVERED` is not.
-- `per-locale` targets deliver each locale independently, including invalid drafts. An `all-locales` target waits for every locale's final job and stays pending while another locale has validation errors, including errors on an existing draft PR.
+- `per-locale` targets deliver each locale independently, including exports with errors or warnings (delivered as drafts under the [readiness policy](#locale-pull-requests)). An `all-locales` target waits for every locale's final job and stays pending while another locale has validation errors, including errors on an existing draft PR.
 - Reconciliation exports from one final job part per catalog and locale.
 - Reconcile resumes `importing` batches whose submit timed out and repairs eligible empty `creating` or `unknown` batches.
 - `tms reconcile` exits non-zero for locale failures or `retrying` errors. An error in one batch never blocks others.

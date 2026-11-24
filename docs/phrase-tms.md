@@ -1,6 +1,6 @@
 # Phrase TMS setup
 
-The reusable Phrase workflows submit one validated source catalog to Phrase and reconcile completed target jobs into draft pull requests, one per locale. This guide covers configuration, credentials and GitHub access. For day-to-day operation and troubleshooting, see [Phrase operations](phrase-operations.md). For copyable files, see the [Phrase consumer integration example](phrase-consumer-integration.md).
+The reusable Phrase workflows submit one validated source catalog to Phrase and reconcile completed target jobs into pull requests, one per locale. See the [readiness policy](phrase-operations.md#locale-pull-requests) for draft/ready transitions. This guide covers configuration, credentials and GitHub access. For day-to-day operation and troubleshooting, see [Phrase operations](phrase-operations.md). For copyable files, see the [Phrase consumer integration example](phrase-consumer-integration.md).
 
 Most HCC repositories should register in the central i18n hub (`RedHatInsights/i18n-hub`, not public), which owns the Phrase credential, the GitHub App and the schedule; see [hub-owned Phrase automation](consumer-onboarding.md#hub-owned-phrase-automation). The rest of this guide applies to both modes, and the [credentials](#phrase-credentials) and [GitHub authentication](#github-authentication) sections matter mainly to consumer-owned (standalone) callers.
 
@@ -11,7 +11,7 @@ Most HCC repositories should register in the central i18n hub (`RedHatInsights/i
 | `.github/workflows/phrase-submit.yml` | `workflow_call` for source submission, on merge or by hand |
 | `.github/workflows/phrase-reconcile.yml` | `workflow_call` for scheduled or manual reconciliation |
 | `i18n-pipeline tms submit --config <path>` | Validates and submits the pinned source revision. The PR base defaults to the pushed or dispatched branch; direct CLI runs for pull-request and tag events must pass `--base-ref`. |
-| `i18n-pipeline tms reconcile --config <path>` | Waits for each locale's final Phrase workflow step to reach `COMPLETED`, downloads and validates the target, and opens or updates one draft PR per locale |
+| `i18n-pipeline tms reconcile --config <path>` | Waits for each locale's final Phrase workflow step to reach `COMPLETED`, downloads and validates the target, and opens or updates one PR per locale, under the [readiness policy](phrase-operations.md#locale-pull-requests) |
 | `i18n-pipeline tms config --config <path>` | Prints the expanded config as JSON, without credentials or network access |
 
 The workflows are generic: they add no consumer configuration or schedules, use no PAT, and never merge PRs. The consumer, or the hub, owns the triggers and pins the reusable workflows to a reviewed commit. Start from the [example callers](../examples/phrase-consumer/.github/workflows/): submit runs when a merge changes the source input or the Phrase config, reconcile runs on a schedule, and both can be dispatched by hand. A schedule runs from the default branch only.
@@ -115,9 +115,9 @@ In both modes, grant the caller jobs `contents: write`, plus `pull-requests: wri
 
 ### Repository requirements
 
-- **Draft pull requests** must be supported. A rejected draft creation reports an actionable error (check draft support and whether the locale branch has a diff). Tooling never falls back to a ready PR, since that would remove its merge safeguard.
+- **Draft pull requests** must be supported for exports with findings. A rejected creation reports the requested readiness, branch and API error; check repository permissions, draft support and whether the branch has a diff. Tooling does not bypass findings by retrying draft creation as ready; see the [readiness policy](phrase-operations.md#locale-pull-requests).
 - **State branch:** automation must be able to create the configured `state.branch` and write batch records to it directly. Do not relax protection on the PR base branch. See [Check Phrase branch permissions](consumer-onboarding.md#check-phrase-branch-permissions-both-modes).
-- **Required checks:** require consumer validation in branch protection. A draft PR is a review signal, not a substitute for required checks.
+- **Required checks:** require consumer validation in branch protection. Neither draft nor ready status replaces required checks or reviewer approval.
 
 ### Target repository
 

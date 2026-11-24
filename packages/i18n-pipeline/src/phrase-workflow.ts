@@ -133,7 +133,7 @@ export interface PhraseLocaleRecord {
    * first, so PRs left open as divergent cannot starve older ones out of the per-run cap.
    */
   pullRequestSupersededCheckedAt?: string;
-  /** Last generated description; missing digest refreshes pre-upgrade PR safety notes once. */
+  /** Digest of generated title/body; old or missing digests refresh pre-upgrade metadata once. */
   pullRequestBodyDigest?: string;
   /** Retry the PR title and description update if it failed after a commit. */
   pullRequestBodyPending?: boolean;
@@ -176,8 +176,8 @@ export interface PhraseBatchStateStore {
 }
 
 export interface PhraseLocalePullRequest {
-  /** Require draft on adoption for invalid content. New PRs are always created as drafts. */
-  draft?: boolean;
+  /** Draft when findings exist; ready for review when findings are empty. */
+  draft: boolean;
   repository: string;
   baseRef: string;
   baseCommit: string;
@@ -215,16 +215,19 @@ export interface PhraseLocalePullRequestCreated {
   pullRequestFinalized?: boolean;
   pullRequestMerged?: boolean;
   bodyError?: unknown;
+  readinessError?: unknown;
 }
 
 export interface PhraseLocalePullRequestUpdate {
-  /** Convert to draft before writing invalid content; never auto-mark ready. */
-  draft?: boolean;
+  /** Draft before writing findings; mark ready only after clean content is saved. */
+  draft: boolean;
   repository: string;
   baseRef: string;
   branch: string;
   pullRequestUrl: string;
   headSha: string;
+  /** False skips metadata on unchanged exports; readiness is still reconciled. */
+  updateMetadata?: boolean;
   expectedToolingCommitShas?: string[];
   expectedToolingCommitSha?: string;
   expectedPendingToolingCommitSha?: string;
@@ -247,10 +250,12 @@ export interface PhraseLocalePullRequestUpdate {
 export interface PhraseLocalePullRequestUpdateResult {
   changed: boolean;
   toolingCommitSha: string;
+  /** True when metadata delivery succeeded or the caller confirmed it was not required. */
   bodyUpdated: boolean;
   pullRequestFinalized?: boolean;
   pullRequestMerged?: boolean;
   bodyError?: unknown;
+  readinessError?: unknown;
 }
 
 export interface PhraseWorkflowRepository {
@@ -679,7 +684,7 @@ function translationFindingsComment(
     "",
     "</details>",
     "",
-    "<sub>🤖 Posted by i18n-pipeline. A new run with changed findings adds a new report; this PR stays a draft and is never marked ready automatically.</sub>",
+    "<sub>🤖 Posted by i18n-pipeline. A new run with changed findings adds a new report; this PR is draft while errors or warnings remain and is marked ready automatically once findings are cleared.</sub>",
   );
   return lines.join("\n");
 }
@@ -3523,9 +3528,9 @@ export class PhraseWorkflow {
           `Source commit: ${record.sourceCommit}\n` +
           `Source SHA-256: ${record.sourceDigest}\n` +
           `Final job: ${ready.finalJob.uid}\n` +
-          "\nReview validation findings before marking ready or merging. " +
+          "\nReview validation findings before merging. " +
           "Corrections in Phrase are pulled into this PR on later reconciliation runs. " +
-          "Tooling never marks this PR ready automatically.\n" +
+          "Tooling keeps this PR draft while errors or warnings remain and marks it ready automatically once findings are cleared. It never merges the PR.\n" +
           (generatedYamlNote ? `\n${generatedYamlNote}\n` : "\n") +
           translationFindingsStatusLine(findings);
         const findingsDigest = digest(
@@ -3551,10 +3556,13 @@ export class PhraseWorkflow {
           },
           findingsDigest,
         );
+        const sourcePath = sourceInputPath(record.config);
+        // Resubmission can adopt a moved generated-source template path within this batch.
+        const title = `fix(${target.repositoryLocale}): update Phrase translations for ${sourcePath}`;
         const deliveryMetadata = {
           validationErrors: errors,
           validationWarnings: warnings,
-          pullRequestBodyDigest: digest(new TextEncoder().encode(body)),
+          pullRequestBodyDigest: digest(new TextEncoder().encode(stableJson({ title, body }))),
         };
         const metadataChanged =
           existingLocale?.pullRequestBodyDigest !== deliveryMetadata.pullRequestBodyDigest ||
@@ -3616,9 +3624,6 @@ export class PhraseWorkflow {
             reportDelivery(pullRequestUrl);
           }
         };
-        const sourcePath = sourceInputPath(record.config);
-        // Resubmission can adopt a moved generated-source template path within this batch.
-        const title = `fix(${target.repositoryLocale}): update Phrase translations for ${sourcePath}`;
         // Persist ownership before the ref update so an interrupted final save can still recover.
         const loadedLocale = structuredClone(
           record.locales[target.phraseLocale] ?? { phase: "exporting" as const },
@@ -3735,8 +3740,7 @@ export class PhraseWorkflow {
           }
         };
         const pullRequestInput: PhraseLocalePullRequest = {
-          // Creation is always draft; adoption only requires conversion for errors.
-          draft: errors.length > 0,
+          draft: errors.length > 0 || warnings.length > 0,
           ...(additionalFiles.length ? { additionalFiles } : {}),
           repository: record.repository,
           baseRef: record.baseRef,
@@ -3767,12 +3771,13 @@ export class PhraseWorkflow {
             );
           }
           const update = await this.dependencies.repository.updateOpenPullRequest({
-            ...(errors.length ? { draft: true } : {}),
+            draft: pullRequestInput.draft,
             repository: record.repository,
             baseRef: record.baseRef,
             branch,
             pullRequestUrl: existingLocale.pullRequestUrl,
             headSha: existingPullRequestState.headSha,
+            updateMetadata: Boolean(existingLocale.pullRequestBodyPending || metadataChanged),
             title,
             ...(existingLocale.toolingCommitShas !== undefined
               ? { expectedToolingCommitShas: existingLocale.toolingCommitShas }
@@ -3799,6 +3804,14 @@ export class PhraseWorkflow {
             ...deliveryMetadata,
           };
           delete updatedLocale.pendingToolingCommitSha;
+          const updateErrors = [
+            ...(update.bodyError ? [update.bodyError] : []),
+            ...(update.readinessError ? [update.readinessError] : []),
+          ];
+          const needsStateWrite =
+            update.changed ||
+            update.bodyError ||
+            (update.bodyUpdated && (existingLocale.pullRequestBodyPending || metadataChanged));
           if (update.pullRequestFinalized) {
             updatedLocale.pullRequestFinalized = true;
             if (update.pullRequestMerged) updatedLocale.pullRequestMerged = true;
@@ -3807,23 +3820,21 @@ export class PhraseWorkflow {
             delete updatedLocale.pullRequestCommentPending;
             record.locales[target.phraseLocale] = updatedLocale;
             revision = await this.dependencies.state.updateBatch(record, revision);
-          } else if (update.changed) {
+          } else if (needsStateWrite) {
             if (update.bodyUpdated) delete updatedLocale.pullRequestBodyPending;
             else updatedLocale.pullRequestBodyPending = true;
             record.locales[target.phraseLocale] = updatedLocale;
             revision = await this.dependencies.state.updateBatch(record, revision);
             await finishDelivery(
               existingLocale.pullRequestUrl,
-              update.bodyError
-                ? [update.bodyError]
-                : update.bodyUpdated
-                  ? []
-                  : [
-                      new PhraseRepositoryError(
-                        "GitHub did not confirm the updated locale pull request description",
-                        500,
-                      ),
-                    ],
+              updateErrors.length || update.bodyUpdated
+                ? updateErrors
+                : [
+                    new PhraseRepositoryError(
+                      "GitHub did not confirm the updated locale pull request description",
+                      500,
+                    ),
+                  ],
             );
           } else if (existingLocale.pullRequestBodyPending || metadataChanged) {
             let bodyUpdated = false;
@@ -3846,7 +3857,10 @@ export class PhraseWorkflow {
             record.locales[target.phraseLocale] = updatedLocale;
             revision = await this.dependencies.state.updateBatch(record, revision);
             if (bodyUpdated || bodyError) {
-              await finishDelivery(existingLocale.pullRequestUrl, bodyError ? [bodyError] : []);
+              await finishDelivery(existingLocale.pullRequestUrl, [
+                ...updateErrors,
+                ...(bodyError ? [bodyError] : []),
+              ]);
             }
           } else {
             if (
@@ -3856,7 +3870,7 @@ export class PhraseWorkflow {
               record.locales[target.phraseLocale] = updatedLocale;
               revision = await this.dependencies.state.updateBatch(record, revision);
             }
-            await finishDelivery(existingLocale.pullRequestUrl);
+            await finishDelivery(existingLocale.pullRequestUrl, updateErrors);
           }
         } else {
           const created =
@@ -3918,10 +3932,10 @@ export class PhraseWorkflow {
               reportDelivery(created.pullRequestUrl);
             }
           } else {
-            await finishDelivery(
-              created.pullRequestUrl,
-              created.bodyError ? [created.bodyError] : [],
-            );
+            await finishDelivery(created.pullRequestUrl, [
+              ...(created.bodyError ? [created.bodyError] : []),
+              ...(created.readinessError ? [created.readinessError] : []),
+            ]);
           }
         }
       } catch (error) {

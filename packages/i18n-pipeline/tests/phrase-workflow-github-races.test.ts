@@ -306,6 +306,7 @@ class FakeGitHub {
     const headSha = this.refs.get(pullRequest.branch);
     return {
       number,
+      draft: false,
       state: pullRequest.state,
       merged_at: pullRequest.merged ? "2026-10-15T00:00:00Z" : null,
       html_url: `https://github.com/example/app/pull/${number}`,

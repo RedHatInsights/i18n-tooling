@@ -514,11 +514,11 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       );
     }
     let pullRequestCreated = false;
-    // An existing branch may acquire a ready PR after discovery. Establish or adopt
-    // its draft PR before changing invalid content, including the POST/422 race.
+    // Discoveries can race PR creation. Establish draft state before publishing
+    // findings; clean exports are promoted only after content and metadata are saved.
     if (!open && branchHead && input.draft) {
       await input.recheckOwnedCommitEligibility?.(ownedCommit);
-      const created = await this.createDraftPullRequest(input);
+      const created = await this.createLocalePullRequest(input);
       pullRequestCreated = !created.adopted;
       open = { html_url: created.pullRequestUrl, state: "open" };
     }
@@ -553,9 +553,11 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       toolingCommitSha = ownedCommit;
     }
     if (!open?.html_url) {
-      const created = await this.createDraftPullRequest(input);
+      // Recovered branches can move before POST /pulls resolves their head.
+      // Keep them draft until the existing promotion path rechecks the ref.
+      const created = await this.createLocalePullRequest(input, input.draft || branchHead !== null);
       pullRequestCreated = !created.adopted;
-      if (!created.adopted) {
+      if (!created.adopted && branchHead === null) {
         return {
           pullRequestUrl: created.pullRequestUrl,
           pullRequestCreated: true,
@@ -565,26 +567,21 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       open = { html_url: created.pullRequestUrl, state: "open" };
     }
     const pullRequestUrl = open.html_url!;
-    try {
-      const bodyUpdated = await this.updatePullRequestBody(pullRequestUrl, input.body, input.title);
-      return {
+    return {
+      pullRequestUrl,
+      ...(pullRequestCreated ? { pullRequestCreated: true } : {}),
+      toolingCommitSha,
+      ...(await this.syncPullRequestMetadata(
+        input,
         pullRequestUrl,
-        ...(pullRequestCreated ? { pullRequestCreated: true } : {}),
-        toolingCommitSha,
-        ...(!bodyUpdated ? { pullRequestFinalized: true } : {}),
-      };
-    } catch (bodyError) {
-      return {
-        pullRequestUrl,
-        ...(pullRequestCreated ? { pullRequestCreated: true } : {}),
-        toolingCommitSha,
-        bodyError,
-      };
-    }
+        changedFiles.length ? toolingCommitSha : (branchHead ?? toolingCommitSha),
+      )),
+    };
   }
 
-  private async createDraftPullRequest(
+  private async createLocalePullRequest(
     input: PhraseLocalePullRequest,
+    draft = input.draft,
   ): Promise<{ pullRequestUrl: string; adopted: boolean }> {
     try {
       const response = await this.request(`${this.repositoryPath}/pulls`, {
@@ -594,7 +591,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
           body: input.body,
           head: input.branch,
           base: input.baseRef,
-          draft: true,
+          draft,
         }),
       });
       const value: unknown = await response.json();
@@ -615,7 +612,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       );
       if (!open?.html_url) {
         throw new GitHubRepositoryError(
-          `GitHub rejected draft PR creation (HTTP 422). No ready-PR fallback is allowed. ${error.message}`,
+          `GitHub rejected ${draft ? "draft" : "ready-for-review"} PR creation (HTTP 422), and no existing open PR was found for ${input.branch}. Check repository permissions, draft support, and whether the branch has a diff. ${error.message}`,
           422,
         );
       }
@@ -674,53 +671,97 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
 
     if (input.draft) await this.ensurePullRequestDraft(input.pullRequestUrl);
     const changedFiles = await this.changedFiles(files, headSha);
-    if (!changedFiles.length) {
-      return {
-        changed: false,
-        toolingCommitSha: ownedCommit,
-        bodyUpdated: false,
-      };
-    }
+    const changed = changedFiles.length > 0;
 
-    const commitResult = await this.writeLocaleCommit(
-      input.branch,
-      headSha,
-      changedFiles,
-      false,
-      ownedCommit,
-      input.recordToolingCommitSha,
-      input.recheckOwnedCommitEligibility,
-      () => this.pullRequestIsOpenAtHead(input.pullRequestUrl, headSha),
-    );
-    if ("finalized" in commitResult) {
-      return {
-        changed: false,
-        toolingCommitSha: ownedCommit,
-        bodyUpdated: false,
-        pullRequestFinalized: true,
-        ...(commitResult.finalized === "merged" ? { pullRequestMerged: true } : {}),
-      };
-    }
-    const toolingCommitSha = commitResult.sha;
-    try {
-      const bodyUpdated = await this.updatePullRequestBody(
-        input.pullRequestUrl,
-        input.body,
-        input.title,
+    let toolingCommitSha = ownedCommit;
+    if (changedFiles.length) {
+      const commitResult = await this.writeLocaleCommit(
+        input.branch,
+        headSha,
+        changedFiles,
+        false,
+        ownedCommit,
+        input.recordToolingCommitSha,
+        input.recheckOwnedCommitEligibility,
+        () => this.pullRequestIsOpenAtHead(input.pullRequestUrl, headSha),
       );
-      return {
-        changed: true,
-        toolingCommitSha,
-        bodyUpdated,
-        ...(!bodyUpdated ? { pullRequestFinalized: true } : {}),
-      };
-    } catch (bodyError) {
-      return { changed: true, toolingCommitSha, bodyUpdated: false, bodyError };
+      if ("finalized" in commitResult) {
+        return {
+          changed: false,
+          toolingCommitSha: headSha,
+          bodyUpdated: false,
+          pullRequestFinalized: true,
+          ...(commitResult.finalized === "merged" ? { pullRequestMerged: true } : {}),
+        };
+      }
+      toolingCommitSha = commitResult.sha;
     }
+    return {
+      changed,
+      toolingCommitSha,
+      ...(await this.syncPullRequestMetadata(
+        input,
+        input.pullRequestUrl,
+        changed ? toolingCommitSha : headSha,
+        changed || input.updateMetadata !== false,
+      )),
+    };
   }
 
-  /** Draft conversion must succeed before invalid content reaches an existing PR. */
+  private async syncPullRequestMetadata(
+    input: PhraseLocalePullRequest | PhraseLocalePullRequestUpdate,
+    pullRequestUrl: string,
+    headSha: string,
+    updateMetadata = true,
+  ): Promise<
+    Pick<
+      PhraseLocalePullRequestUpdateResult,
+      "bodyUpdated" | "bodyError" | "readinessError" | "pullRequestFinalized"
+    >
+  > {
+    try {
+      if (
+        updateMetadata &&
+        !(await this.updatePullRequestBody(pullRequestUrl, input.body, input.title))
+      ) {
+        return { bodyUpdated: false, pullRequestFinalized: true };
+      }
+    } catch (bodyError) {
+      return { bodyUpdated: false, bodyError };
+    }
+    if (!input.draft) {
+      try {
+        await this.ensurePullRequestReady(pullRequestUrl, input.branch, headSha);
+      } catch (readinessError) {
+        return { bodyUpdated: true, readinessError };
+      }
+    }
+    return { bodyUpdated: true };
+  }
+
+  /** Draft conversion must succeed before findings reach an existing PR. */
   private async ensurePullRequestDraft(pullRequestUrl: string): Promise<void> {
+    const value = await this.readOpenPullRequest(pullRequestUrl);
+    if (value.draft === true) return;
+    await this.changePullRequestReadiness(value.node_id, "convertPullRequestToDraft", true);
+  }
+
+  private async ensurePullRequestReady(
+    pullRequestUrl: string,
+    branch: string,
+    expectedHeadSha: string,
+  ): Promise<void> {
+    const value = await this.readOpenPullRequest(pullRequestUrl);
+    if (value.draft === false) return;
+    // The PR's cached head may lag a successful ref write. Check the actual ref,
+    // not propagation timing, before promoting the content we validated.
+    if ((await this.getReference(branch)) !== expectedHeadSha) {
+      throw new GitHubRepositoryError("Phrase branch head changed before readiness update", 409);
+    }
+    await this.changePullRequestReadiness(value.node_id, "markPullRequestReadyForReview", false);
+  }
+
+  private async readOpenPullRequest(pullRequestUrl: string): Promise<Record<string, unknown>> {
     const number = this.pullRequestNumber(pullRequestUrl);
     const response = await this.request(`${this.repositoryPath}/pulls/${number}`, {
       method: "GET",
@@ -732,19 +773,25 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
         409,
       );
     }
-    if (value.draft === true) return;
-    if (!nonEmptyString(value.node_id)) {
+    return value;
+  }
+
+  private async changePullRequestReadiness(
+    nodeId: unknown,
+    mutation: "convertPullRequestToDraft" | "markPullRequestReadyForReview",
+    expectedDraft: boolean,
+  ): Promise<void> {
+    if (!nonEmptyString(nodeId)) {
       throw new GitHubRepositoryError(
-        "GitHub returned no pull request node ID for draft conversion",
+        "GitHub returned no pull request node ID for readiness update",
         500,
       );
     }
     const converted = await this.request("/graphql", {
       method: "POST",
       body: JSON.stringify({
-        query:
-          "mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { pullRequest { isDraft } } }",
-        variables: { id: value.node_id },
+        query: `mutation($id: ID!) { ${mutation}(input: {pullRequestId: $id}) { pullRequest { isDraft } } }`,
+        variables: { id: nodeId },
       }),
     });
     const result: unknown = await converted.json();
@@ -752,12 +799,12 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       !isRecord(result) ||
       result.errors ||
       !isRecord(result.data) ||
-      !isRecord(result.data.convertPullRequestToDraft) ||
-      !isRecord(result.data.convertPullRequestToDraft.pullRequest) ||
-      result.data.convertPullRequestToDraft.pullRequest.isDraft !== true
+      !isRecord(result.data[mutation]) ||
+      !isRecord(result.data[mutation].pullRequest) ||
+      result.data[mutation].pullRequest.isDraft !== expectedDraft
     ) {
       throw new GitHubRepositoryError(
-        `GitHub did not confirm draft conversion; invalid content was not written${this.errorDetail(result)}`,
+        `GitHub did not confirm ${expectedDraft ? "draft conversion; content with findings was not written" : "ready-for-review conversion"}${this.errorDetail(result)}`,
         500,
       );
     }
@@ -769,8 +816,15 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
     title?: string,
   ): Promise<boolean> {
     const number = this.pullRequestNumber(pullRequestUrl);
-    const state = await this.getPullRequestState(pullRequestUrl);
-    if (state.state !== "open") return false;
+    const response = await this.request(`${this.repositoryPath}/pulls/${number}`, {
+      method: "GET",
+    });
+    const current: unknown = await response.json();
+    if (!isRecord(current) || (current.state !== "open" && current.state !== "closed")) {
+      throw new GitHubRepositoryError("GitHub returned an invalid pull request response", 500);
+    }
+    if (current.state === "closed" || current.merged_at) return false;
+    if (current.body === body && (title === undefined || current.title === title)) return true;
     await this.request(`${this.repositoryPath}/pulls/${number}`, {
       method: "PATCH",
       body: JSON.stringify({ ...(title === undefined ? {} : { title }), body }),
