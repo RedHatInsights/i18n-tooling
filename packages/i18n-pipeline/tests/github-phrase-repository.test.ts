@@ -1,7 +1,10 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { CatalogAdapterRegistry, inlineFeoLocale } from "../src/index.js";
 import { GitHubPhraseRepository, GitHubRepositoryError } from "../src/github-phrase-repository.js";
 import {
   PhraseBatchStateConflictError,
+  PhraseWorkflow,
   type PhraseBatchRecord,
   type PhraseLocalePullRequest,
   type PhraseLocalePullRequestUpdate,
@@ -66,7 +69,14 @@ function openPullRequestHarness(
   initialHead: string,
   options: {
     currentContent?: string;
+    outputPath?: string;
+    missingAtRef?: (ref: string, path: string) => boolean;
+    headAfterCommit?: string;
+    contentAtRef?: (ref: string) => string;
+    additionalContentAtRef?: (ref: string) => string;
     compare?: (headSha: string) => unknown;
+    modeAtRef?: (ref: string, path: string) => string;
+    compareUnavailable?: string;
     refUpdateStatuses?: number[];
     draft?: boolean;
     draftResult?: unknown;
@@ -74,6 +84,7 @@ function openPullRequestHarness(
     discovery?: "open" | "race" | "create" | "unsupported";
   } = {},
 ) {
+  const outputPath = options.outputPath ?? "locales/fr.json";
   const calls: Array<{ url: string; method: string }> = [];
   const events: string[] = [];
   const refUpdateStatuses = [...(options.refUpdateStatuses ?? [])];
@@ -125,15 +136,35 @@ function openPullRequestHarness(
       );
     }
     if (url.endsWith("/pulls/7") && method === "PATCH") return response({});
-    if (url.includes("/contents/locales/fr.json?ref=")) {
+    if (url.includes(`/contents/${outputPath}?ref=`)) {
+      const ref = new URL(url).searchParams.get("ref")!;
+      if (options.missingAtRef?.(ref, outputPath)) return response({}, 404);
       return response({
         type: "file",
         sha: "translation-blob",
         encoding: "base64",
-        content: Buffer.from(currentContent).toString("base64"),
+        content: Buffer.from(
+          options.contentAtRef?.(new URL(url).searchParams.get("ref")!) ?? currentContent,
+        ).toString("base64"),
+      });
+    }
+    if (url.includes("/contents/frontend.yaml?ref=")) {
+      return response({
+        type: "file",
+        sha: "yaml-blob",
+        encoding: "base64",
+        content: Buffer.from(
+          options.additionalContentAtRef?.(new URL(url).searchParams.get("ref")!) ?? "old YAML",
+        ).toString("base64"),
       });
     }
     if (url.includes("/compare/")) {
+      if (
+        options.compareUnavailable &&
+        decodeURIComponent(url).includes(`/compare/${options.compareUnavailable}...`)
+      ) {
+        return response({ message: "Not Found" }, 404);
+      }
       return response(
         options.compare?.(branchHead) ?? {
           ahead_by: 1,
@@ -142,10 +173,33 @@ function openPullRequestHarness(
         },
       );
     }
-    if (url.endsWith(`/git/commits/${branchHead}`) && method === "GET") {
+    if (url.includes("/git/trees/") && method === "GET") {
+      const tree = decodeURIComponent(url.split("/git/trees/")[1]!);
+      const nested = tree.startsWith("locales-");
+      const ref = tree.slice(nested ? "locales-".length : "root-".length);
+      const path = nested ? outputPath : "frontend.yaml";
+      const content = nested
+        ? (options.contentAtRef?.(ref) ?? currentContent)
+        : (options.additionalContentAtRef?.(ref) ?? "old YAML");
       return response({
-        sha: branchHead,
-        tree: { sha: "branch-tree" },
+        tree: [
+          ...(nested
+            ? []
+            : [{ path: "locales", mode: "040000", type: "tree", sha: `locales-${ref}` }]),
+          {
+            path: nested ? path.split("/").at(-1)! : path,
+            mode: options.modeAtRef?.(ref, path) ?? "100644",
+            type: "blob",
+            sha: createHash("sha1").update(content).digest("hex"),
+          },
+        ].filter((entry) => entry.type === "tree" || !options.missingAtRef?.(ref, path)),
+      });
+    }
+    if (url.includes("/git/commits/") && method === "GET") {
+      const ref = url.split("/git/commits/")[1]!;
+      return response({
+        sha: ref,
+        tree: { sha: `root-${ref}` },
         author: { name: "integration-bot", email: "bot@example.invalid" },
         committer: { name: "web-flow", email: "noreply@github.com" },
         verification: { verified: false, reason: "unsigned" },
@@ -160,7 +214,9 @@ function openPullRequestHarness(
       return response({ sha: "tree-new" }, 201);
     }
     if (url.endsWith("/git/commits") && method === "POST") {
+      expect(JSON.parse(String(init?.body)).parents).toEqual([branchHead]);
       commitNumber += 1;
+      if (options.headAfterCommit) branchHead = options.headAfterCommit;
       return response({ sha: `${String(commitNumber).padStart(40, "0")}` }, 201);
     }
     if (url.endsWith("/git/ref/heads/i18n/phrase-batch-fr") && method === "GET") {
@@ -169,7 +225,8 @@ function openPullRequestHarness(
     if (url.endsWith("/git/refs/heads/i18n/phrase-batch-fr") && method === "PATCH") {
       const failedStatus = refUpdateStatuses.shift();
       if (failedStatus) return response({ message: "ref update failed" }, failedStatus);
-      const body = JSON.parse(String(init?.body)) as { sha: string };
+      const body = JSON.parse(String(init?.body)) as { sha: string; force: boolean };
+      expect(body.force).toBe(false);
       branchHead = body.sha;
       currentContent = pendingContent ?? currentContent;
       return response({ ref: "refs/heads/i18n/phrase-batch-fr" });
@@ -184,7 +241,7 @@ function openPullRequestHarness(
     fetch,
   });
   const makeUpdate = (
-    recordToolingCommitSha = noToolingCommitWrite,
+    recordToolingCommitSha: PhraseLocalePullRequestUpdate["recordToolingCommitSha"] = noToolingCommitWrite,
     overrides: Partial<PhraseLocalePullRequestUpdate> = {},
   ): PhraseLocalePullRequestUpdate => ({
     repository: "example/app",
@@ -201,6 +258,7 @@ function openPullRequestHarness(
   });
   return {
     repository,
+    fetch,
     calls,
     events,
     makeUpdate,
@@ -1279,6 +1337,468 @@ describe("GitHubPhraseRepository", () => {
     ).toBe(false);
   });
 
+  it.each(["update", "discovery"])(
+    "accepts unrelated branch updates during %s without adopting their heads as tooling commits",
+    async (mode) => {
+      const anchor = "tooling-head";
+      const harness = openPullRequestHarness("merge-head", {
+        compare: () => ({ status: "ahead", ahead_by: 2, commits: [], files: [] }),
+      });
+      const persisted: Array<string | null> = [];
+      const reviewerFlags: Array<boolean | undefined> = [];
+      const rechecked: Array<string | null> = [];
+      const input = harness.makeUpdate(
+        async (_sha, ownedSha, hasReviewerCommits) => {
+          persisted.push(ownedSha);
+          reviewerFlags.push(hasReviewerCommits);
+        },
+        {
+          expectedToolingCommitShas: [anchor],
+          managedPaths: ["frontend.yaml"],
+          recheckOwnedCommitEligibility: async (ownedSha) => {
+            rechecked.push(ownedSha);
+          },
+        },
+      );
+      const result =
+        mode === "update"
+          ? await harness.repository.updateOpenPullRequest(input)
+          : await harness.repository.createOrUpdatePullRequestWithCommit({
+              ...pullRequest,
+              ...input,
+              baseCommit: baseCommitSha,
+            });
+      expect(result.toolingCommitSha).toBe(harness.branchHead);
+      expect(harness.currentContent).toBe("updated");
+      expect(persisted).toEqual([anchor]);
+      expect(reviewerFlags).toEqual([true]);
+      expect(rechecked).toEqual([anchor]);
+      expect(
+        harness.calls.some(({ url }) =>
+          decodeURIComponent(url).endsWith(`/compare/${anchor}...merge-head`),
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it.each(["update", "discovery"])(
+    "keeps the recorded ownership anchor on a no-op %s after an unrelated merge",
+    async (mode) => {
+      const harness = openPullRequestHarness("merge-head", {
+        currentContent: "updated",
+        compare: () => ({ status: "ahead", commits: [], files: [] }),
+      });
+      const input = harness.makeUpdate(noToolingCommitWrite, {
+        expectedToolingCommitShas: ["tooling-head"],
+      });
+      const result =
+        mode === "update"
+          ? await harness.repository.updateOpenPullRequest(input)
+          : await harness.repository.createOrUpdatePullRequestWithCommit({
+              ...pullRequest,
+              ...input,
+              baseCommit: baseCommitSha,
+            });
+      expect(result.toolingCommitSha).toBe("tooling-head");
+      expect(harness.branchHead).toBe("merge-head");
+      expect(harness.calls.some(({ method }) => method === "POST")).toBe(false);
+    },
+  );
+
+  it.each(["update", "discovery"])(
+    "protects a reviewer revert to an older tooling export during %s",
+    async (mode) => {
+      // Tooling A -> tooling B -> reviewer restores A. Never fall back from B to A.
+      const harness = openPullRequestHarness("reviewer-revert", {
+        compare: () => ({ status: "ahead", commits: [], files: [] }),
+        contentAtRef: (ref) => (ref === "tooling-B" ? "B" : "A"),
+      });
+      const input = harness.makeUpdate(noToolingCommitWrite, {
+        expectedToolingCommitShas: ["tooling-A", "tooling-B"],
+      });
+      await expect(
+        mode === "update"
+          ? harness.repository.updateOpenPullRequest(input)
+          : harness.repository.createOrUpdatePullRequestWithCommit({ ...pullRequest, ...input }),
+      ).rejects.toMatchObject({ status: 409 });
+      expect(harness.calls.some(({ method }) => method !== "GET")).toBe(false);
+    },
+  );
+
+  it.each(["update", "discovery"])(
+    "protects a same-content symlink replacement during %s",
+    async (mode) => {
+      const harness = openPullRequestHarness("reviewer-symlink", {
+        compare: () => ({ status: "ahead", commits: [], files: [] }),
+        modeAtRef: (ref) => (ref === "tooling-head" ? "100644" : "120000"),
+      });
+      const input = harness.makeUpdate(noToolingCommitWrite, {
+        expectedToolingCommitShas: ["tooling-head"],
+      });
+      await expect(
+        mode === "update"
+          ? harness.repository.updateOpenPullRequest(input)
+          : harness.repository.createOrUpdatePullRequestWithCommit({ ...pullRequest, ...input }),
+      ).rejects.toMatchObject({ status: 409 });
+      expect(harness.calls.some(({ method }) => method !== "GET")).toBe(false);
+    },
+  );
+
+  it.each(["update", "discovery"])(
+    "creates a remapped output absent at both revisions during %s",
+    async (mode) => {
+      const path = "locales/remapped-fr.json";
+      const harness = openPullRequestHarness("merge-head", {
+        outputPath: path,
+        missingAtRef: (_ref, entryPath) => entryPath === path,
+        compare: () => ({ status: "ahead", commits: [], files: [] }),
+      });
+      const files = new Map([["locales/fr.json", "old translation"]]);
+      let pending = "";
+      const repository = new GitHubPhraseRepository({
+        repository: "example/app",
+        token: "token",
+        stateBranch: "i18n-state",
+        fetch: async (input, init) => {
+          const url = String(input);
+          if (url.includes("/contents/locales/fr.json?")) {
+            return response({
+              type: "file",
+              sha: "old-blob",
+              encoding: "base64",
+              content: Buffer.from(files.get("locales/fr.json")!).toString("base64"),
+            });
+          }
+          if (url.includes("/git/trees/locales-")) {
+            return response({
+              tree: [{ path: "fr.json", type: "blob", mode: "100644", sha: "old-blob" }],
+            });
+          }
+          if (url.endsWith("/git/blobs"))
+            pending = Buffer.from(JSON.parse(String(init?.body)).content, "base64").toString();
+          if (url.endsWith("/git/trees") && init?.method === "POST") {
+            expect(
+              JSON.parse(String(init.body)).tree.map((entry: { path: string }) => entry.path),
+            ).toEqual([path]);
+          }
+          const result = await harness.fetch(input, init);
+          if (url.includes("/git/refs/heads/") && result.ok) files.set(path, pending);
+          return result;
+        },
+      });
+      const input = harness.makeUpdate(noToolingCommitWrite, {
+        path,
+        expectedToolingCommitShas: ["tooling-head"],
+      });
+      const result =
+        mode === "update"
+          ? await repository.updateOpenPullRequest(input)
+          : await repository.createOrUpdatePullRequestWithCommit({
+              ...pullRequest,
+              ...input,
+            });
+      expect(result.toolingCommitSha).toBe(harness.branchHead);
+      expect(harness.currentContent).toBe("updated");
+      expect(
+        new TextDecoder().decode(
+          (await repository.readFile("locales/fr.json", harness.branchHead))!,
+        ),
+      ).toBe("old translation");
+      expect(files.get(path)).toBe("updated");
+      expect(files.get("locales/fr.json")).toBe("old translation");
+    },
+  );
+
+  it.each(["tooling-head", "merge-head"])(
+    "blocks a managed path missing only at %s",
+    async (missingRef) => {
+      const harness = openPullRequestHarness("merge-head", {
+        missingAtRef: (ref) => ref === missingRef,
+        compare: () => ({ status: "ahead", commits: [], files: [] }),
+      });
+      await expect(
+        harness.repository.updateOpenPullRequest(
+          harness.makeUpdate(noToolingCommitWrite, {
+            expectedToolingCommitShas: ["tooling-head"],
+          }),
+        ),
+      ).rejects.toMatchObject({ status: 409 });
+      expect(harness.calls.some(({ method }) => method !== "GET")).toBe(false);
+    },
+  );
+
+  it.each([
+    {
+      scenario: "symlinked directory",
+      entry: { path: "locales", type: "blob", mode: "120000", sha: "symlink" },
+      status: 409,
+    },
+    {
+      scenario: "malformed directory entry",
+      entry: { path: "locales", type: "tree", mode: "040000" },
+      status: 500,
+    },
+  ])("does not treat a $scenario as an absent path", async ({ entry, status }) => {
+    const harness = openPullRequestHarness("merge-head", {
+      compare: () => ({ status: "ahead", commits: [], files: [] }),
+    });
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "token",
+      stateBranch: "i18n-state",
+      fetch: async (input, init) => {
+        const url = String(input);
+        if (url.includes("/git/trees/root-")) return response({ tree: [entry] });
+        return harness.fetch(input, init);
+      },
+    });
+    await expect(
+      repository.updateOpenPullRequest(
+        harness.makeUpdate(noToolingCommitWrite, {
+          expectedToolingCommitShas: ["tooling-head"],
+        }),
+      ),
+    ).rejects.toMatchObject({ status });
+    expect(harness.calls.some(({ method }) => method !== "GET")).toBe(false);
+  });
+
+  it("skips unavailable recorded commits while looking for an owned ancestor", async () => {
+    const harness = openPullRequestHarness("merge-head", {
+      compare: () => ({ status: "ahead", commits: [], files: [] }),
+      compareUnavailable: "unavailable-head",
+    });
+    await expect(
+      harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(noToolingCommitWrite, {
+          expectedToolingCommitShas: ["tooling-head", "unavailable-head"],
+        }),
+      ),
+    ).resolves.toMatchObject({ changed: true });
+    expect(harness.calls.filter(({ url }) => url.includes("/compare/"))).toHaveLength(2);
+  });
+
+  it("rejects a racing reviewer commit after verifying unchanged managed files", async () => {
+    const harness = openPullRequestHarness("merge-head", {
+      compare: () => ({ status: "ahead", commits: [], files: [] }),
+      headAfterCommit: "racing-reviewer-head",
+    });
+    let recorded = false;
+    await expect(
+      harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(
+          async () => {
+            recorded = true;
+          },
+          { expectedToolingCommitShas: ["tooling-head"] },
+        ),
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(recorded).toBe(false);
+    expect(
+      harness.calls.some(({ url, method }) => url.includes("/git/refs/") && method === "PATCH"),
+    ).toBe(false);
+  });
+
+  it("keeps the state eligibility fence for a verified owned ancestor", async () => {
+    const harness = openPullRequestHarness("merge-head", {
+      compare: () => ({ status: "ahead", commits: [], files: [] }),
+    });
+    await expect(
+      harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(noToolingCommitWrite, {
+          expectedToolingCommitShas: ["tooling-head"],
+          recheckOwnedCommitEligibility: async (ownedSha) => {
+            expect(ownedSha).toBe("tooling-head");
+            throw new GitHubRepositoryError("batch was superseded", 409);
+          },
+        }),
+      ),
+    ).rejects.toThrow("batch was superseded");
+    expect(
+      harness.calls.some(({ url, method }) => url.includes("/git/refs/") && method === "PATCH"),
+    ).toBe(false);
+  });
+
+  it("rejects managed catalog edits even when the tooling commit remains an ancestor", async () => {
+    const harness = openPullRequestHarness("reviewer-head", {
+      compare: () => ({ status: "ahead", commits: [], files: [] }),
+      contentAtRef: (ref) => (ref === "tooling-head" ? "old" : "reviewer translation"),
+    });
+    await expect(
+      harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(noToolingCommitWrite, {
+          expectedToolingCommitShas: ["tooling-head"],
+          managedPaths: ["frontend.yaml"],
+        }),
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(harness.calls.some(({ method }) => method === "POST")).toBe(false);
+  });
+
+  it.each([
+    { mode: "update", writeYaml: true },
+    { mode: "discovery", writeYaml: true },
+    { mode: "update", writeYaml: false },
+    { mode: "discovery", writeYaml: false },
+  ])(
+    "rejects managed YAML edits during $mode (write YAML: $writeYaml)",
+    async ({ mode, writeYaml }) => {
+      const harness = openPullRequestHarness("merge-head", {
+        compare: () => ({ status: "ahead", commits: [], files: [] }),
+        additionalContentAtRef: (ref) => (ref === "tooling-head" ? "old YAML" : "reviewer YAML"),
+      });
+      const input = harness.makeUpdate(noToolingCommitWrite, {
+        expectedToolingCommitShas: ["tooling-head"],
+        ...(writeYaml
+          ? {
+              additionalFiles: [
+                { path: "frontend.yaml", content: new TextEncoder().encode("new YAML") },
+              ],
+            }
+          : { managedPaths: ["frontend.yaml"] }),
+      });
+      await expect(
+        mode === "update"
+          ? harness.repository.updateOpenPullRequest(input)
+          : harness.repository.createOrUpdatePullRequestWithCommit({
+              ...pullRequest,
+              ...input,
+              baseCommit: baseCommitSha,
+            }),
+      ).rejects.toMatchObject({ status: 409 });
+      expect(harness.branchHead).toBe("merge-head");
+      expect(harness.calls.some(({ method }) => method !== "GET")).toBe(false);
+    },
+  );
+
+  it("protects reviewer YAML across invalid and corrected FEO exports", async () => {
+    const source = '{"searchEntries.roles.title":{"defaultMessage":"Roles"}}';
+    const template =
+      "kind: Template\nobjects:\n  - kind: Frontend\n    spec:\n      searchEntries:\n        - id: roles\n          title: Roles\n";
+    const reviewerYaml = inlineFeoLocale(
+      template,
+      JSON.parse(source),
+      { "searchEntries.roles.title": "Reviewer correction" },
+      "fr",
+    );
+    const harness = openPullRequestHarness("reviewer-head", {
+      currentContent: '{"searchEntries.roles.title":"Rôles"}',
+      compare: () => ({ status: "ahead", commits: [], files: [] }),
+      additionalContentAtRef: (ref) => (ref === "tooling-head" ? template : reviewerYaml),
+    });
+    let record = batchRecord();
+    record.phase = "ready";
+    record.sourceCommit = baseCommitSha;
+    record.sourceDigest = createHash("sha256").update(source).digest("hex");
+    record.config.frontendTemplate = { path: "frontend.yaml" };
+    record.config.targetAdapter = "icu-json";
+    record.jobs = [{ uid: "job-fr", targetLang: "fr", workflowLevel: 1, status: "COMPLETED" }];
+    record.locales.fr = {
+      phase: "pr-created",
+      pullRequestUrl: "https://github.com/example/app/pull/7",
+      pullRequestBranch: pullRequest.branch,
+      toolingCommitSha: "tooling-head",
+      toolingCommitShas: ["tooling-head"],
+    };
+    let revision = 1;
+    const repository = new GitHubPhraseRepository({
+      repository: "example/app",
+      token: "token",
+      stateBranch: "i18n-state",
+      fetch: async (input, init) => {
+        const url = String(input);
+        if (url.includes("/contents/locales/en.json?")) {
+          return response({
+            type: "file",
+            sha: "source-blob",
+            encoding: "base64",
+            content: Buffer.from(source).toString("base64"),
+          });
+        }
+        if (url.includes("/issues/7/comments")) {
+          return response(init?.method === "POST" ? {} : []);
+        }
+        if (url.endsWith("/git/ref/heads/phrase-pilot")) {
+          return response({ object: { sha: baseCommitSha } });
+        }
+        if (url.endsWith("/git/ref/heads/i18n-state")) {
+          return response({ object: { sha: "state-head" } });
+        }
+        if (url.includes("/contents/.github/i18n-state/batches")) {
+          if (url.includes(`${record.key}.json`)) {
+            if (init?.method === "PUT") {
+              const body = JSON.parse(String(init.body));
+              expect(body.sha).toBe(`state-${revision}`);
+              record = JSON.parse(Buffer.from(body.content, "base64").toString());
+              revision += 1;
+              return response({ content: { sha: `state-${revision}` } });
+            }
+            return response({
+              type: "file",
+              sha: `state-${revision}`,
+              encoding: "base64",
+              content: Buffer.from(JSON.stringify(record)).toString("base64"),
+            });
+          }
+          return response([{ type: "file", name: `${record.key}.json` }]);
+        }
+        return harness.fetch(input, init);
+      },
+    });
+    let target = '{"searchEntries.roles.title":"Rôles {missing}"}';
+    const workflow = new PhraseWorkflow({
+      repository,
+      state: repository,
+      phrase: {
+        createJob: async () => {
+          throw new Error("Re-export must not create Phrase jobs");
+        },
+        listJobs: async () => [],
+        getJob: async () => record.jobs[0]!,
+        startTargetDownload: async () => "download-id",
+        waitForAsyncRequest: async () => {},
+        downloadTargetFile: async () => new TextEncoder().encode(target),
+      },
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+
+    const [invalid] = await workflow.reconcile();
+    expect(invalid).toMatchObject({
+      phase: "retrying",
+      reason: expect.stringContaining("refusing to overwrite reviewer changes"),
+    });
+    expect(harness.branchHead).toBe("reviewer-head");
+    expect(record.locales.fr?.toolingCommitShas).toEqual(["tooling-head"]);
+
+    target = '{"searchEntries.roles.title":"Rôles corrigés"}';
+    const [corrected] = await workflow.reconcile();
+    expect(corrected).toMatchObject({
+      phase: "retrying",
+      reason: expect.stringContaining("refusing to overwrite reviewer changes"),
+    });
+    expect(harness.branchHead).toBe("reviewer-head");
+    expect(record.locales.fr?.toolingCommitShas).toEqual(["tooling-head"]);
+    expect(harness.calls.some(({ method }) => method !== "GET")).toBe(false);
+    expect(await repository.readFile("frontend.yaml", "reviewer-head")).toEqual(
+      new TextEncoder().encode(reviewerYaml),
+    );
+  });
+
+  it.each(["behind", "diverged", "identical", undefined])(
+    "rejects an unrecorded head when comparison status is %s",
+    async (status) => {
+      const harness = openPullRequestHarness("reviewer-head", {
+        compare: () => ({ status, commits: [], files: [] }),
+      });
+      await expect(
+        harness.repository.updateOpenPullRequest(
+          harness.makeUpdate(noToolingCommitWrite, { expectedToolingCommitShas: ["tooling-head"] }),
+        ),
+      ).rejects.toMatchObject({ status: 409 });
+      expect(harness.calls.some(({ method }) => method === "POST")).toBe(false);
+    },
+  );
+
   it("adopts a legacy single commit that changes only the expected output path", async () => {
     const harness = openPullRequestHarness("legacy-head", {
       compare: (headSha) => ({
@@ -1307,6 +1827,23 @@ describe("GitHubPhraseRepository", () => {
     expect(state.toolingCommitShas).toContain("legacy-head");
     expect(state.toolingCommitShas).toContain(result.toolingCommitSha);
     expect(harness.calls.some(({ url }) => url.includes("/app/commits/"))).toBe(false);
+  });
+
+  it("does not broaden legacy adoption to managed paths absent from the write-set", async () => {
+    const harness = openPullRequestHarness("legacy-head", {
+      compare: (headSha) => ({
+        ahead_by: 1,
+        commits: [{ sha: headSha }],
+        files: [{ filename: "frontend.yaml" }],
+      }),
+    });
+
+    await expect(
+      harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(noToolingCommitWrite, { managedPaths: ["frontend.yaml"] }),
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(harness.calls.some(({ method }) => method !== "GET")).toBe(false);
   });
 
   it("rejects a legacy branch with two commits even when both touch expected paths", async () => {
