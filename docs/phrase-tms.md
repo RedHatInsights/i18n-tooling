@@ -115,7 +115,7 @@ In both modes, grant the caller jobs `contents: write`, plus `pull-requests: wri
 
 ### Repository requirements
 
-- **Draft pull requests** must be supported for exports with findings. A rejected creation reports the requested readiness, branch and API error; check repository permissions, draft support and whether the branch has a diff. Tooling does not bypass findings by retrying draft creation as ready; see the [readiness policy](phrase-operations.md#locale-pull-requests).
+- **Draft pull requests** must be supported for all exports. PRs are created as drafts before clean exports are marked ready. A rejected creation reports the branch and API error; check repository permissions, draft support and whether the branch has a diff. Tooling never retries draft creation as ready; see the [readiness policy](phrase-operations.md#locale-pull-requests).
 - **State branch:** automation must be able to create the configured `state.branch` and write batch records to it directly. Do not relax protection on the PR base branch. See [Check Phrase branch permissions](consumer-onboarding.md#check-phrase-branch-permissions-both-modes).
 - **Required checks:** require consumer validation in branch protection. Neither draft nor ready status replaces required checks or reviewer approval.
 

@@ -553,17 +553,10 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       toolingCommitSha = ownedCommit;
     }
     if (!open?.html_url) {
-      // Recovered branches can move before POST /pulls resolves their head.
-      // Keep them draft until the existing promotion path rechecks the ref.
-      const created = await this.createLocalePullRequest(input, input.draft || branchHead !== null);
+      // Every branch can move before POST /pulls resolves its head. Create drafts
+      // and promote clean exports only after the shared path rechecks the ref.
+      const created = await this.createLocalePullRequest(input);
       pullRequestCreated = !created.adopted;
-      if (!created.adopted && branchHead === null) {
-        return {
-          pullRequestUrl: created.pullRequestUrl,
-          pullRequestCreated: true,
-          toolingCommitSha,
-        };
-      }
       open = { html_url: created.pullRequestUrl, state: "open" };
     }
     const pullRequestUrl = open.html_url!;
@@ -581,7 +574,6 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
 
   private async createLocalePullRequest(
     input: PhraseLocalePullRequest,
-    draft = input.draft,
   ): Promise<{ pullRequestUrl: string; adopted: boolean }> {
     try {
       const response = await this.request(`${this.repositoryPath}/pulls`, {
@@ -591,7 +583,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
           body: input.body,
           head: input.branch,
           base: input.baseRef,
-          draft,
+          draft: true,
         }),
       });
       const value: unknown = await response.json();
@@ -612,7 +604,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       );
       if (!open?.html_url) {
         throw new GitHubRepositoryError(
-          `GitHub rejected ${draft ? "draft" : "ready-for-review"} PR creation (HTTP 422), and no existing open PR was found for ${input.branch}. Check repository permissions, draft support, and whether the branch has a diff. ${error.message}`,
+          `GitHub rejected draft PR creation (HTTP 422), and no existing open PR was found for ${input.branch}. Check repository permissions, draft support, and whether the branch has a diff. ${error.message}`,
           422,
         );
       }
@@ -688,7 +680,7 @@ export class GitHubPhraseRepository implements PhraseBatchStateStore, PhraseWork
       if ("finalized" in commitResult) {
         return {
           changed: false,
-          toolingCommitSha: headSha,
+          toolingCommitSha: ownedCommit,
           bodyUpdated: false,
           pullRequestFinalized: true,
           ...(commitResult.finalized === "merged" ? { pullRequestMerged: true } : {}),

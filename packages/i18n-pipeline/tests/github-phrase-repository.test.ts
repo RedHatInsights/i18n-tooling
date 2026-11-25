@@ -84,6 +84,8 @@ function openPullRequestHarness(
     bodyUpdateStatus?: number;
     afterBodyUpdate?: "close" | "move";
     moveBeforeCreation?: boolean;
+    branchInitiallyAbsent?: boolean;
+    closeBeforeRefWrite?: boolean;
     laggingPullRequestHead?: boolean;
     apiUrl?: string;
     discovery?: "open" | "race" | "create" | "unsupported";
@@ -132,7 +134,11 @@ function openPullRequestHarness(
     }
     if (url.endsWith("/pulls/7") && method === "GET") {
       return response({
-        state: bodyUpdated && options.afterBodyUpdate === "close" ? "closed" : "open",
+        state:
+          (bodyUpdated && options.afterBodyUpdate === "close") ||
+          (options.closeBeforeRefWrite && commitNumber > 0)
+            ? "closed"
+            : "open",
         head: {
           sha: options.laggingPullRequestHead ? initialHead : branchHead,
         },
@@ -242,12 +248,20 @@ function openPullRequestHarness(
       return response({ sha: "tree-new" }, 201);
     }
     if (url.endsWith("/git/commits") && method === "POST") {
-      expect(JSON.parse(String(init?.body)).parents).toEqual([branchHead]);
+      expect(JSON.parse(String(init?.body)).parents).toEqual([
+        options.branchInitiallyAbsent && commitNumber === 0 ? baseCommitSha : branchHead,
+      ]);
       commitNumber += 1;
       if (options.headAfterCommit) branchHead = options.headAfterCommit;
       return response({ sha: `${String(commitNumber).padStart(40, "0")}` }, 201);
     }
+    if (url.endsWith("/git/refs") && method === "POST") {
+      branchHead = JSON.parse(String(init?.body)).sha;
+      currentContent = pendingContent ?? currentContent;
+      return response({ ref: "refs/heads/i18n/phrase-batch-fr" }, 201);
+    }
     if (url.endsWith("/git/ref/heads/i18n/phrase-batch-fr") && method === "GET") {
+      if (options.branchInitiallyAbsent && commitNumber === 0) return response({}, 404);
       return response({
         object: {
           sha: bodyUpdated && options.afterBodyUpdate === "move" ? "f".repeat(40) : branchHead,
@@ -393,11 +407,39 @@ describe("GitHubPhraseRepository", () => {
     },
   );
 
-  it("creates a ready PR when there are no findings", async () => {
-    const harness = openPullRequestHarness("b".repeat(40), { discovery: "create" });
-    await harness.repository.createOrUpdatePullRequestWithCommit({ ...pullRequest, draft: false });
-    expect(harness.draft).toBe(false);
+  it("keeps a newly created branch draft when its ref moves before PR creation", async () => {
+    const harness = openPullRequestHarness(baseCommitSha, {
+      discovery: "create",
+      branchInitiallyAbsent: true,
+      moveBeforeCreation: true,
+    });
+    const result = await harness.repository.createOrUpdatePullRequestWithCommit(pullRequest);
+    expect(result.pullRequestCreated).toBe(true);
+    expect(result.readinessError).toBeInstanceOf(Error);
+    expect(harness.draft).toBe(true);
+    expect(harness.calls.some(({ url }) => url.endsWith("/graphql"))).toBe(false);
   });
+
+  it.each([false, true])(
+    "promotes a new clean PR after checking its ref (initially absent: %s)",
+    async (branchInitiallyAbsent) => {
+      const harness = openPullRequestHarness(baseCommitSha, {
+        discovery: "create",
+        branchInitiallyAbsent,
+      });
+      const result = await harness.repository.createOrUpdatePullRequestWithCommit(pullRequest);
+      expect(result.readinessError).toBeUndefined();
+      expect(harness.draft).toBe(false);
+      const creation = harness.calls.findIndex(
+        ({ url, method }) => url.endsWith("/pulls") && method === "POST",
+      );
+      const promotion = harness.calls.findIndex(({ url }) => url.endsWith("/graphql"));
+      expect(promotion).toBeGreaterThan(creation);
+      expect(
+        harness.calls.slice(creation + 1, promotion).some(({ url }) => url.includes("/git/ref/")),
+      ).toBe(true);
+    },
+  );
 
   it.each(["open", "race"] as const)(
     "marks a recovered draft ready after a clean write (%s)",
@@ -1613,6 +1655,24 @@ describe("GitHubPhraseRepository", () => {
       ).toBe(true);
     },
   );
+
+  it("keeps the ownership anchor when a PR closes before writing onto a reviewer commit", async () => {
+    const harness = openPullRequestHarness("reviewer-head", {
+      closeBeforeRefWrite: true,
+      compare: () => ({ status: "ahead", commits: [], files: [] }),
+    });
+    const result = await harness.repository.updateOpenPullRequest(
+      harness.makeUpdate(undefined, { expectedToolingCommitShas: ["tooling-head"] }),
+    );
+    expect(result).toMatchObject({
+      changed: false,
+      toolingCommitSha: "tooling-head",
+      bodyUpdated: false,
+      pullRequestFinalized: true,
+    });
+    expect(harness.branchHead).toBe("reviewer-head");
+    expect(harness.calls.some(({ method }) => method === "PATCH")).toBe(false);
+  });
 
   it.each(["update", "discovery"])(
     "keeps the recorded ownership anchor on a no-op %s after an unrelated merge",
