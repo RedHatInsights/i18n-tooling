@@ -2,6 +2,7 @@ import type { Linter } from "eslint";
 import formatjs from "eslint-plugin-formatjs";
 import packageMetadata from "../package.json" with { type: "json" };
 import noDuplicateMessageId from "./rules/no-duplicate-message-id.js";
+import noFragmentComposition from "./rules/no-fragment-composition.js";
 import noMissingDefaultCatalogEntry from "./rules/no-missing-default-catalog-entry.js";
 
 type Plugin = {
@@ -11,6 +12,7 @@ type Plugin = {
   };
   rules: {
     "no-duplicate-message-id": typeof noDuplicateMessageId;
+    "no-fragment-composition": typeof noFragmentComposition;
     "no-missing-default-catalog-entry": typeof noMissingDefaultCatalogEntry;
   };
   configs?: {
@@ -29,6 +31,7 @@ const plugin: Plugin = {
   },
   rules: {
     "no-duplicate-message-id": noDuplicateMessageId,
+    "no-fragment-composition": noFragmentComposition,
     "no-missing-default-catalog-entry": noMissingDefaultCatalogEntry,
   },
 };
@@ -41,6 +44,7 @@ plugin.configs = {
       rules: {
         "i18n/no-missing-default-catalog-entry": "error",
         "formatjs/no-invalid-icu": "error",
+        "i18n/no-fragment-composition": "error",
         "formatjs/enforce-plural-rules": ["error", { other: true }],
         "formatjs/no-missing-icu-plural-one-placeholders": "error",
         "formatjs/no-offset": "error",
@@ -64,5 +68,5 @@ plugin.configs = {
   },
 };
 
-export { noDuplicateMessageId, noMissingDefaultCatalogEntry };
+export { noDuplicateMessageId, noFragmentComposition, noMissingDefaultCatalogEntry };
 export default plugin;

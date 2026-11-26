@@ -1,20 +1,18 @@
 import type * as ESTree from "estree";
 import type { TSESTree } from "@typescript-eslint/utils";
 import type { Rule } from "eslint";
-import { isFormatJsMessageCall, objectProperty, staticString } from "../descriptors.js";
+import {
+  isFormatJsMessageCall,
+  jsxAttributeText,
+  objectProperty,
+  staticString,
+} from "../descriptors.js";
 
 type Declaration = {
   node: ESTree.Node;
   defaultMessage: string | undefined;
   description: string | undefined;
 };
-
-function jsxAttributeText(attribute: TSESTree.JSXAttribute): string | undefined {
-  const value = attribute.value;
-  if (value?.type === "Literal" && typeof value.value === "string") return value.value;
-  if (value?.type === "JSXExpressionContainer") return staticString(value.expression);
-  return undefined;
-}
 
 const rule: Rule.RuleModule = {
   meta: {

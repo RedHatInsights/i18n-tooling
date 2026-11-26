@@ -25,7 +25,7 @@ Options:
 Without --config, discovery checks i18n/catalog-validation.json, then
 .github/i18n/catalog-validation.json. Under GitHub Actions, errors and warnings are printed as
 annotations.
-Without a config, FormatJS dependencies enable zero-config ICU lint; other consumers are
+Without a config, FormatJS dependencies enable zero-config ICU and composition lint; other consumers are
 reported as not configured. Configured source lint is opt-in through sourceLint in the config.
 
 warn exits 0 for findings and tool errors. error exits 1 for errors and tool errors, and 0
@@ -414,15 +414,14 @@ async function lintSource(
   };
   const rules: Linter.RulesRecord = {
     ...ICU_RULES,
+    "i18n/no-fragment-composition": "error",
     ...(configured ? TRANSLATABILITY_RULES : {}),
   };
-  if (configured || catalog) {
-    const require = createRequire(import.meta.url);
-    const pluginModule = require("@redhat-cloud-services/eslint-plugin-i18n") as {
-      default?: unknown;
-    };
-    plugins.i18n = (pluginModule.default ?? pluginModule) as ESLintApi.Plugin;
-  }
+  const require = createRequire(import.meta.url);
+  const pluginModule = require("@redhat-cloud-services/eslint-plugin-i18n") as {
+    default?: unknown;
+  };
+  plugins.i18n = (pluginModule.default ?? pluginModule) as ESLintApi.Plugin;
   if (catalog) rules["i18n/no-missing-default-catalog-entry"] = ["error", { catalog }];
 
   const config: Linter.Config = {
