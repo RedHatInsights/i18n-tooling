@@ -108,6 +108,8 @@ export interface CatalogValidationConfig {
 
 export interface SourceLintConfig {
   files?: string[];
+  /** Glob patterns excluded from source lint; applied as ESLint global ignores. */
+  ignores?: string[];
   catalog?: string;
 }
 
@@ -262,7 +264,7 @@ function parseCatalogDirectory(value: unknown, label: string): CatalogDirectory 
 function parseSourceLintConfig(value: unknown): SourceLintConfig {
   const sourceLint = recordValue(value, 'Catalog validation config "sourceLint"');
   const label = 'Catalog validation config "sourceLint"';
-  rejectUnknownKeys(sourceLint, ["files", "catalog"], label);
+  rejectUnknownKeys(sourceLint, ["files", "ignores", "catalog"], label);
 
   let files: string[] | undefined;
   if (sourceLint.files !== undefined) {
@@ -276,13 +278,33 @@ function parseSourceLintConfig(value: unknown): SourceLintConfig {
     });
   }
 
+  let ignores: string[] | undefined;
+  if (sourceLint.ignores !== undefined) {
+    if (!Array.isArray(sourceLint.ignores)) {
+      throw new TypeError(`${label}.ignores must be an array`);
+    }
+    ignores = sourceLint.ignores.map((value, index) => {
+      const pattern = requiredString(value, `${label}.ignores[${index}]`);
+      if (pattern.startsWith("!")) {
+        throw new TypeError(
+          `${label}.ignores[${index}] must be a positive pattern; negations are not supported`,
+        );
+      }
+      return pattern;
+    });
+  }
+
   let catalog: string | undefined;
   if (sourceLint.catalog !== undefined) {
     catalog = requiredString(sourceLint.catalog, `${label}.catalog`);
     validateRepoPath(catalog, `${label}.catalog`);
   }
 
-  return { ...(files === undefined ? {} : { files }), ...(catalog ? { catalog } : {}) };
+  return {
+    ...(files === undefined ? {} : { files }),
+    ...(ignores === undefined ? {} : { ignores }),
+    ...(catalog ? { catalog } : {}),
+  };
 }
 
 function parseFeoTemplateValidation(value: unknown, index: number): FeoTemplateValidation {

@@ -399,6 +399,7 @@ function formatLintFinding(
 async function lintSource(
   root: string,
   files: string[],
+  ignores: string[],
   configured: boolean,
   catalog: string | undefined,
 ): Promise<LintFindings> {
@@ -442,7 +443,7 @@ async function lintSource(
   const eslint = new ESLint({
     cwd: root,
     overrideConfigFile: true,
-    overrideConfig: [config],
+    overrideConfig: ignores.length ? [{ ignores }, config] : [config],
     errorOnUnmatchedPattern: false,
     cache: false,
   });
@@ -532,6 +533,7 @@ export async function executeValidateCi(
         const lint = await lintSource(
           root,
           config.sourceLint.files ?? DEFAULT_SOURCE_FILES,
+          config.sourceLint.ignores ?? [],
           true,
           config.sourceLint.catalog ? resolve(root, config.sourceLint.catalog) : undefined,
         );
@@ -552,7 +554,7 @@ export async function executeValidateCi(
 
     configKind = "zero-config";
     onConfig?.(configKind);
-    const lint = await lintSource(root, DEFAULT_SOURCE_FILES, false, undefined);
+    const lint = await lintSource(root, DEFAULT_SOURCE_FILES, [], false, undefined);
     return reportForFindings(configKind, lint.errors, lint.warnings);
   } catch (error) {
     return reportForToolError(errorMessage(error), configKind);
