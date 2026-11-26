@@ -187,6 +187,72 @@ afterEach(async () => {
 });
 
 describe("i18n-pipeline validate-ci", () => {
+  it.each([
+    { name: "missing", target: undefined },
+    { name: "empty", target: "{}" },
+    {
+      name: "older source revision",
+      target: JSON.stringify({ greeting: "Hello {name}.", removedFragment: "Old fragment." }),
+    },
+    { name: "invalid JSON", target: "{" },
+    { name: "invalid ICU", target: JSON.stringify({ greeting: "Hello {name" }) },
+  ])("validates source independently of $name Phrase targets", async ({ target }) => {
+    const root = await createRoot();
+    await writeProjectFile(
+      root,
+      "phrase-tms.json",
+      JSON.stringify({
+        preset: "hcc-ui",
+        locales: ["fr"],
+        sourceCatalog: { path: "locales/en.json", filename: "sample.ui.en.json" },
+        targetOutputPath: "locales/{locale}.json",
+      }),
+    );
+    await writeProjectFile(
+      root,
+      "locales/en.json",
+      JSON.stringify({
+        greeting: { defaultMessage: "Hello {user}." },
+        completeMessage: { defaultMessage: "Visit <SupportLink>support</SupportLink>." },
+      }),
+    );
+    if (target !== undefined) await writeProjectFile(root, "locales/fr.json", target);
+    await writeConfig(root, {
+      version: 1,
+      tmsConfig: "phrase-tms.json",
+      checks: [],
+      catalogDirectories: [{ path: "locales" }],
+    });
+
+    const result = await runValidateCi(root, ["--mode", "error"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toEqual([]);
+    expect(result.stdout.at(-1)).toContain("errors=0");
+  });
+
+  it("still rejects invalid source ICU when Phrase targets are not delivered", async () => {
+    const root = await createRoot();
+    await writeProjectFile(
+      root,
+      "phrase-tms.json",
+      JSON.stringify({
+        preset: "hcc-ui",
+        locales: ["fr"],
+        sourceCatalog: { path: "locales/en.json", filename: "sample.ui.en.json" },
+        targetOutputPath: "locales/{locale}.json",
+      }),
+    );
+    await writeProjectFile(root, "locales/en.json", JSON.stringify({ greeting: "Hello {name" }));
+    await writeConfig(root, { version: 1, tmsConfig: "phrase-tms.json", checks: [] });
+
+    const result = await runValidateCi(root, ["--mode", "error"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.join("\n")).toContain("Source catalog");
+    expect(result.stderr.join("\n")).toContain("greeting");
+  });
+
   it("passes the FEO consumer example in error mode without consumer dependencies", async () => {
     const root = resolve(packageRoot, "../..", "examples/feo-consumer");
     const resultsDir = await mkdtemp(join(tmpdir(), "i18n-validate-ci-feo-results-"));

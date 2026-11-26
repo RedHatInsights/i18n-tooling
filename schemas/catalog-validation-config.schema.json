@@ -11,7 +11,7 @@
     },
     "tmsConfig": {
       "$ref": "#/$defs/path",
-      "description": "Phrase TMS config whose source catalog and target locales become a check. Targets are checked once their output file exists."
+      "description": "Phrase TMS config whose source catalog is validated and whose target paths are declared for directory coverage. Target contents are validated separately during translation delivery, not against in-flight source changes."
     },
     "checks": {
       "type": "array",

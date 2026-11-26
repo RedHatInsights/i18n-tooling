@@ -312,6 +312,22 @@ async function writeTmsConfig(): Promise<void> {
   );
 }
 
+function explicitTargetConfig() {
+  return {
+    version: 1,
+    tmsConfig: "phrase-tms.json",
+    checks: [
+      {
+        source: { path: "locales/en.json", adapter: "formatjs-json", locale: "en" },
+        targets: [
+          { path: "locales/fr-icu.json", adapter: "icu-json", locale: "fr" },
+          { path: "locales/zh-CN.json", adapter: "icu-json", locale: "zh-CN" },
+        ],
+      },
+    ],
+  };
+}
+
 afterEach(async () => {
   if (projectRoot) {
     await rm(projectRoot, { recursive: true, force: true });
@@ -512,7 +528,7 @@ describe("catalog project validation", () => {
       join(projectRoot!, "locales/zh-CN.json"),
       JSON.stringify({ remove: "{count, plural, other {# 个帐户}}" }),
     );
-    const result = await runValidation({ version: 1, tmsConfig: "phrase-tms.json", checks: [] });
+    const result = await runValidation(explicitTargetConfig());
 
     expect(result.exitCode).toBe(1);
     expect(result.errors[0]).toContain(
@@ -551,7 +567,7 @@ describe("catalog project validation", () => {
       }),
     );
 
-    const result = await runValidation({ version: 1, tmsConfig: "phrase-tms.json", checks: [] });
+    const result = await runValidation(explicitTargetConfig());
 
     expect(result.exitCode).toBe(1);
     expect(result.output[0]).toContain(
@@ -822,26 +838,51 @@ describe("catalog project validation", () => {
     );
   });
 
-  it("checks delivered TMS targets and counts undelivered ones as pending", async () => {
+  it("validates the TMS source without depending on delivered targets", async () => {
     await createProject();
     await writeTmsConfig();
 
     const passed = await runValidation({ version: 1, tmsConfig: "phrase-tms.json", checks: [] });
     expect(passed.exitCode).toBe(0);
     expect(passed.output).toEqual([
-      'Pending translations:\n- TMS target "locales/zh-CN.json" is not delivered yet; skipping.',
-      "Catalog validation passed (1 source, 1 target, 0 generated catalogs, 1 pending TMS target).",
+      "Catalog validation passed (1 source, 0 targets, 0 generated catalogs).",
     ]);
 
     await writeFile(
       join(projectRoot!, "locales/zh-CN.json"),
       JSON.stringify({ greeting: "你好 {user}" }),
     );
-    const failed = await runValidation({ version: 1, tmsConfig: "phrase-tms.json", checks: [] });
+    const independent = await runValidation({
+      version: 1,
+      tmsConfig: "phrase-tms.json",
+      checks: [],
+    });
+    expect(independent.exitCode).toBe(0);
+
+    const failed = await runValidation(explicitTargetConfig());
     expect(failed.exitCode).toBe(1);
     expect(failed.errors[0]).toContain(
       'Catalog check locales/en.json -> locales/zh-CN.json: argument mismatch for "greeting"',
     );
+  });
+
+  it("still rejects malformed rich-text tags in an explicit target comparison", async () => {
+    await createProject();
+    await writeTmsConfig();
+    await writeFile(
+      join(projectRoot!, "locales/en.json"),
+      JSON.stringify({ greeting: { defaultMessage: "Hello <SupportLink>{name}</SupportLink>" } }),
+    );
+    await writeFile(
+      join(projectRoot!, "locales/zh-CN.json"),
+      JSON.stringify({ greeting: "Hello <SupportLink>{name}</WrongLink>" }),
+    );
+
+    const result = await runValidation(explicitTargetConfig());
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors.join("\n")).toContain("locales/zh-CN.json");
+    expect(result.errors.join("\n")).toContain("invalid ICU");
   });
 
   it("uses a preset Phrase config from validate-project tmsConfig", async () => {
@@ -867,11 +908,11 @@ describe("catalog project validation", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.output.at(-1)).toBe(
-      "Catalog validation passed (1 source, 1 target, 0 generated catalogs).",
+      "Catalog validation passed (1 source, 0 targets, 0 generated catalogs).",
     );
   });
 
-  it("counts an empty placeholder TMS target as pending with a warning", async () => {
+  it("does not read empty placeholder TMS targets", async () => {
     await createProject();
     await writeTmsConfig();
     await writeFile(join(projectRoot!, "locales/zh-CN.json"), "{}\n");
@@ -879,11 +920,8 @@ describe("catalog project validation", () => {
     const result = await runValidation({ version: 1, tmsConfig: "phrase-tms.json", checks: [] });
 
     expect(result.exitCode).toBe(0);
-    expect(result.output.join("\n")).toContain(
-      'TMS target "locales/zh-CN.json" is an empty placeholder; counted as pending',
-    );
     expect(result.output.at(-1)).toBe(
-      "Catalog validation passed (1 source, 1 target, 0 generated catalogs, 1 pending TMS target).",
+      "Catalog validation passed (1 source, 0 targets, 0 generated catalogs).",
     );
   });
 

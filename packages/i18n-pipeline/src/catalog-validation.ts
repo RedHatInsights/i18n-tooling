@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { access, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { basename, isAbsolute, posix, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
@@ -95,7 +95,7 @@ export interface CatalogDirectory {
 
 export interface CatalogValidationConfig {
   version: 1;
-  /** Repository-relative Phrase TMS config whose source and target locales become a check. */
+  /** Phrase config declaring the source to validate and target paths owned by delivery. */
   tmsConfig?: string;
   checks: CatalogValidationCheck[];
   generated: GeneratedCatalogCheck[];
@@ -118,11 +118,11 @@ export interface CatalogValidationResult {
   sourceCount: number;
   targetCount: number;
   generatedCount: number;
-  /** TMS targets whose output file has not been delivered yet. */
+  /** @deprecated Always zero: TMS delivery is independent of source validation. */
   pendingTargetCount: number;
   /**
-   * One line per translation not delivered yet (an FEO locale, an empty placeholder or a missing
-   * TMS target). Expected before delivery, so they are reported apart from warnings.
+   * One line per FEO translation not delivered yet. Expected before delivery, so they are
+   * reported apart from warnings.
    */
   pending: string[];
 }
@@ -391,16 +391,6 @@ interface LoadedCatalog {
   catalog: Catalog;
 }
 
-interface PlannedTarget extends CatalogFileReference {
-  /** TMS outputs may not exist until the first translation PR lands. */
-  optional?: boolean;
-}
-
-interface PlannedCheck {
-  source: CatalogFileReference;
-  targets: PlannedTarget[];
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -446,15 +436,6 @@ async function readProjectFileBytes(
   }
 }
 
-async function fileExists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function loadCatalogFile(
   projectRoot: string,
   path: string,
@@ -494,8 +475,8 @@ async function loadJsonFile(projectRoot: string, path: string, label: string): P
   }
 }
 
-/** Turns the TMS source catalog and target locale mapping into one catalog check. */
-async function loadTmsCheck(projectRoot: string, path: string): Promise<PlannedCheck> {
+/** Resolves TMS catalog declarations; translation delivery validates targets separately. */
+async function loadTmsCheck(projectRoot: string, path: string): Promise<CatalogValidationCheck> {
   const content = await readProjectFile(projectRoot, path, "TMS config");
   let workflow;
   try {
@@ -516,7 +497,6 @@ async function loadTmsCheck(projectRoot: string, path: string): Promise<PlannedC
       adapter: targetAdapterId(workflow),
       locale: target.repositoryLocale,
       ...(workflow.targetOptions ? { options: workflow.targetOptions } : {}),
-      optional: true,
     })),
   };
 }
@@ -998,7 +978,6 @@ export async function validateCatalogProject(
   let sourceCount = 0;
   let targetCount = 0;
   let generatedCount = 0;
-  let pendingTargetCount = 0;
 
   for (const entry of config.generated) {
     try {
@@ -1040,16 +1019,23 @@ export async function validateCatalogProject(
     );
   }
 
-  const checks: PlannedCheck[] = [...config.checks];
+  const checks = [...config.checks];
+  let tmsCatalogs: CatalogValidationCheck | undefined;
   if (config.tmsConfig) {
     try {
-      checks.push(await loadTmsCheck(projectRoot, config.tmsConfig));
+      tmsCatalogs = await loadTmsCheck(projectRoot, config.tmsConfig);
+      // Source changes must not depend on asynchronous translation delivery. Explicit
+      // checks remain strict; Phrase reconciliation checks targets against its pinned source.
+      checks.push({ source: tmsCatalogs.source, targets: [] });
     } catch (error) {
       problems.push(errorMessage(error));
     }
   }
 
-  const declaredPaths = new Set(config.generated.map((entry) => entry.path));
+  const declaredPaths = new Set([
+    ...config.generated.map((entry) => entry.path),
+    ...(tmsCatalogs?.targets.map((target) => target.path) ?? []),
+  ]);
   for (const entry of config.feo ?? []) {
     declaredPaths.add(entry.source);
     for (const localePath of Object.values(entry.locales)) declaredPaths.add(localePath);
@@ -1085,14 +1071,6 @@ export async function validateCatalogProject(
     }
 
     for (const targetReference of check.targets) {
-      if (
-        targetReference.optional &&
-        !(await fileExists(resolve(projectRoot, targetReference.path)))
-      ) {
-        pendingTargetCount += 1;
-        pending.push(`TMS target "${targetReference.path}" is not delivered yet; skipping.`);
-        continue;
-      }
       try {
         const targetAdapter = registry.get(targetReference.adapter);
         const target = await loadCatalogFile(
@@ -1102,18 +1080,6 @@ export async function validateCatalogProject(
           targetAdapter,
           contextFor(targetReference.locale, "target", targetReference.options),
         );
-        // Apps that import every locale file often commit `{}` placeholders before delivery.
-        if (
-          targetReference.optional &&
-          Object.keys(target.catalog.messages).length === 0 &&
-          Object.keys(source.catalog.messages).length > 0
-        ) {
-          pendingTargetCount += 1;
-          pending.push(
-            `TMS target "${targetReference.path}" is an empty placeholder; counted as pending until translations are delivered.`,
-          );
-          continue;
-        }
         targetCount += 1;
         problems.push(
           ...comparisonProblems(
@@ -1144,6 +1110,6 @@ export async function validateCatalogProject(
     sourceCount,
     targetCount,
     generatedCount,
-    pendingTargetCount,
+    pendingTargetCount: 0,
   };
 }
