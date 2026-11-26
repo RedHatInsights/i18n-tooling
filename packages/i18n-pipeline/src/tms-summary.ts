@@ -77,7 +77,9 @@ export function formatTmsResultLine(result: PhraseReconcileResult): string {
     const label =
       result.phase === "failed" || result.phase === "invalid-translation"
         ? "PR (draft with errors)"
-        : "PR";
+        : result.phase === "pr-created" && (result.validationWarningCount ?? 0) > 0
+          ? "PR (draft with warnings)"
+          : "PR";
     parts.push(`${label}: ${result.pullRequestUrl}`);
   }
   return parts

@@ -311,6 +311,7 @@ class FakeRepository implements PhraseWorkflowRepository {
   pinnedSourceBytes = sourceBytes;
   pullRequestError?: Error;
   bodyUpdateError?: Error;
+  readinessError?: Error;
   commentError?: Error;
   refUpdateError?: Error;
   preverifiedRefUpdateHeadSha?: string;
@@ -411,7 +412,7 @@ class FakeRepository implements PhraseWorkflowRepository {
     const { recordToolingCommitSha, recheckOwnedCommitEligibility, ...storedInput } = input;
     void recordToolingCommitSha;
     void recheckOwnedCommitEligibility;
-    this.pullRequests.push({ ...storedInput, draft: true });
+    this.pullRequests.push({ ...storedInput });
     this.pullRequestBranches.set(pullRequestUrl, input.branch);
     this.pullRequestBodies.set(pullRequestUrl, input.body);
     return { pullRequestUrl, pullRequestCreated: true, toolingCommitSha };
@@ -458,6 +459,8 @@ class FakeRepository implements PhraseWorkflowRepository {
         409,
       );
     }
+    const pullRequest = this.pullRequests.find((pr) => pr.branch === input.branch);
+    if (pullRequest && input.draft) pullRequest.draft = true;
     const files = [{ path: input.path, content: input.content }, ...(input.additionalFiles ?? [])];
     const currentFiles = this.branchFiles.get(input.branch) ?? new Map<string, Uint8Array>();
     const changedFiles = files.filter((file) => {
@@ -465,7 +468,23 @@ class FakeRepository implements PhraseWorkflowRepository {
       return !current || !Buffer.from(current).equals(Buffer.from(file.content));
     });
     if (!changedFiles.length) {
-      return { changed: false, toolingCommitSha: headSha, bodyUpdated: false };
+      if (input.draft !== false)
+        return { changed: false, toolingCommitSha: headSha, bodyUpdated: false };
+      try {
+        if (input.updateMetadata !== false)
+          await this.updatePullRequestBody(input.pullRequestUrl, input.body, input.title);
+        if (this.readinessError)
+          return {
+            changed: false,
+            toolingCommitSha: headSha,
+            bodyUpdated: true,
+            readinessError: this.readinessError,
+          };
+        if (pullRequest) pullRequest.draft = false;
+        return { changed: false, toolingCommitSha: headSha, bodyUpdated: true };
+      } catch (bodyError) {
+        return { changed: false, toolingCommitSha: headSha, bodyUpdated: false, bodyError };
+      }
     }
     const toolingCommitSha = this.createCommitSha();
     await input.recordToolingCommitSha(toolingCommitSha, input.headSha);
@@ -496,6 +515,14 @@ class FakeRepository implements PhraseWorkflowRepository {
     );
     try {
       await this.updatePullRequestBody(input.pullRequestUrl, input.body, input.title);
+      if (!input.draft && this.readinessError)
+        return {
+          changed: true,
+          toolingCommitSha,
+          bodyUpdated: true,
+          readinessError: this.readinessError,
+        };
+      if (pullRequest && !input.draft) pullRequest.draft = false;
       return { changed: true, toolingCommitSha, bodyUpdated: true };
     } catch (bodyError) {
       return { changed: true, toolingCommitSha, bodyUpdated: false, bodyError };
@@ -512,11 +539,10 @@ class FakeRepository implements PhraseWorkflowRepository {
     const branch = this.pullRequestBranches.get(pullRequestUrl);
     const index = branch ? this.pullRequests.findIndex((input) => input.branch === branch) : -1;
     if (index !== -1) {
-      this.pullRequests[index] = {
-        ...this.pullRequests[index]!,
+      Object.assign(this.pullRequests[index]!, {
         ...(title === undefined ? {} : { title }),
         body,
-      };
+      });
     }
     return true;
   }
@@ -2894,7 +2920,7 @@ describe("PhraseWorkflow submission", () => {
     expect(phrase.createJobCalls).toBe(1);
   });
 
-  it("lists translation lint warnings in the locale pull request", async () => {
+  it("keeps warning-only PRs draft and automatically promotes corrections", async () => {
     const phrase = new FakePhrase();
     phrase.targetBytes = new TextEncoder().encode(
       JSON.stringify({ greeting: { defaultMessage: "Bonjour {name} !", description: "Greeting" } }),
@@ -2921,6 +2947,24 @@ describe("PhraseWorkflow submission", () => {
     expect(repository.pullRequests[0]?.body).toContain(
       "⚠️ 1 warning — see the latest 🌐 Translation check comment.",
     );
+    expect(repository.createDraftRequirements).toEqual([true]);
+    expect(repository.pullRequests[0]?.draft).toBe(true);
+    phrase.targetBytes = new TextEncoder().encode(
+      JSON.stringify({
+        greeting: { defaultMessage: "Bonjour {name}\u202f!", description: "Greeting" },
+      }),
+    );
+    await workflow.reconcile();
+    expect(repository.pullRequests[0]?.draft).toBe(false);
+    expect(repository.pullRequests).toHaveLength(1);
+    phrase.targetBytes = new TextEncoder().encode(
+      JSON.stringify({ greeting: { defaultMessage: "Bonjour {name} !", description: "Greeting" } }),
+    );
+    await workflow.reconcile();
+    expect(repository.pullRequests[0]?.draft).toBe(true);
+    repository.pullRequests[0]!.draft = false;
+    await workflow.reconcile();
+    expect(repository.pullRequests[0]?.draft).toBe(true);
   });
 
   it("renders the exact error and warning report comment", async () => {
@@ -2969,7 +3013,7 @@ describe("PhraseWorkflow submission", () => {
         "",
         "</details>",
         "",
-        "<sub>🤖 Posted by i18n-pipeline. A new run with changed findings adds a new report; this PR stays a draft and is never marked ready automatically.</sub>",
+        "<sub>🤖 Posted by i18n-pipeline. A new run with changed findings adds a new report; this PR is draft while errors or warnings remain and is marked ready automatically once findings are cleared.</sub>",
       ].join("\n"),
     );
   });
@@ -6328,7 +6372,7 @@ describe("PhraseWorkflow submission", () => {
     );
   });
 
-  it("requires drafts for adoption only when validation fails", async () => {
+  it("creates a ready PR without findings and promotes an unchanged clean draft", async () => {
     const phrase = new FakePhrase();
     const repository = new FakeRepository();
     const workflow = new PhraseWorkflow({
@@ -6347,7 +6391,51 @@ describe("PhraseWorkflow submission", () => {
     phrase.jobStatus = "COMPLETED";
     await workflow.reconcile();
     expect(repository.createDraftRequirements).toEqual([false]);
-    expect(repository.pullRequests[0]?.draft).toBe(true);
+    const pr = repository.pullRequests[0]!;
+    expect(pr.draft).toBe(false);
+    pr.draft = true;
+    const headSha = repository.branchHeads.get(pr.branch);
+    await workflow.reconcile();
+    expect(pr.draft).toBe(false);
+    expect(repository.branchHeads.get(pr.branch)).toBe(headSha);
+  });
+
+  it("retries promotion without marking a saved description pending or adding a commit", async () => {
+    const state = new MemoryStateStore();
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state,
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    const batch = await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Bonjour"}');
+    await workflow.reconcile();
+    phrase.targetBytes = new TextEncoder().encode('{"greeting":"Bonjour {name}"}');
+    repository.readinessError = new PhraseRepositoryError("promotion temporarily unavailable", 503);
+    const [failed] = await workflow.reconcile();
+    expect(failed?.phase).toBe("retrying");
+    expect(failed?.reason).toContain("promotion temporarily unavailable");
+    expect(
+      (await state.readBatch(batch.key))?.record.locales.fr?.pullRequestBodyPending,
+    ).toBeUndefined();
+    const pr = repository.pullRequests[0]!;
+    const commits = repository.commitCount(pr.branch);
+    expect(pr.draft).toBe(true);
+    repository.readinessError = undefined;
+    const [retried] = await workflow.reconcile();
+    expect(retried?.phase).toBe("pr-created");
+    expect(pr.draft).toBe(false);
+    expect(repository.commitCount(pr.branch)).toBe(commits);
   });
 
   it.each(["open", "closed", "merged"] as const)(
@@ -6488,6 +6576,7 @@ describe("PhraseWorkflow submission", () => {
       expect(fixed?.phase).toBe("pr-created");
       expect(fixed?.pullRequestUrl).toBe(invalid?.pullRequestUrl);
       expect(repository.pullRequests).toHaveLength(1);
+      expect(repository.pullRequests[0]?.draft).toBe(false);
       expect(repository.pullRequestBodies.get(fixed!.pullRequestUrl!)).not.toContain(
         "Translation errors",
       );
@@ -6495,6 +6584,35 @@ describe("PhraseWorkflow submission", () => {
       expect(phrase.createJobCalls).toBe(1);
     },
   );
+
+  it("preserves reviewer notes on unchanged exports while still reconciling readiness", async () => {
+    const phrase = new FakePhrase();
+    const repository = new FakeRepository();
+    const workflow = new PhraseWorkflow({
+      phrase,
+      state: new MemoryStateStore(),
+      repository,
+      catalogAdapters: new CatalogAdapterRegistry(),
+    });
+    await workflow.submit({
+      repository: "example/app",
+      baseRef: "phrase-pilot",
+      sourceCommit: "abc123",
+      sourceBytes,
+      config,
+    });
+    phrase.jobStatus = "COMPLETED";
+    const [created] = await workflow.reconcile();
+    const url = created!.pullRequestUrl!;
+    const notes = `${repository.pullRequestBodies.get(url)}\n\nRoll out after maintenance.`;
+    repository.pullRequestBodies.set(url, notes);
+    repository.pullRequests[0]!.draft = true;
+    const commits = repository.commitCount(repository.pullRequests[0]!.branch);
+    expect((await workflow.reconcile())[0]?.phase).toBe("pr-created");
+    expect(repository.pullRequestBodies.get(url)).toBe(notes);
+    expect(repository.pullRequests[0]!.draft).toBe(false);
+    expect(repository.commitCount(repository.pullRequests[0]!.branch)).toBe(commits);
+  });
 
   it("refreshes legacy PR descriptions even when findings and catalog bytes are unchanged", async () => {
     const state = new MemoryStateStore();

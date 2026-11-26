@@ -13,6 +13,7 @@ import {
 const baseCommitSha = "a".repeat(40);
 const noToolingCommitWrite = async (_pendingSha: string, _previousHeadSha: string | null) => {};
 const pullRequest: PhraseLocalePullRequest & { baseCommit: string } = {
+  draft: false,
   repository: "example/app",
   baseRef: "phrase-pilot",
   baseCommit: baseCommitSha,
@@ -80,6 +81,12 @@ function openPullRequestHarness(
     refUpdateStatuses?: number[];
     draft?: boolean;
     draftResult?: unknown;
+    bodyUpdateStatus?: number;
+    afterBodyUpdate?: "close" | "move";
+    moveBeforeCreation?: boolean;
+    branchInitiallyAbsent?: boolean;
+    closeBeforeRefWrite?: boolean;
+    laggingPullRequestHead?: boolean;
     apiUrl?: string;
     discovery?: "open" | "race" | "create" | "unsupported";
   } = {},
@@ -94,6 +101,9 @@ function openPullRequestHarness(
   let commitNumber = 0;
   let draft = options.draft ?? false;
   let discoveryCalls = 0;
+  let bodyUpdated = false;
+  let currentBody = "";
+  let currentTitle = "";
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const url = input instanceof Request ? input.url : String(input);
     const method = (init?.method ?? "GET").toUpperCase();
@@ -114,28 +124,52 @@ function openPullRequestHarness(
       ]);
     }
     if (url.endsWith("/pulls") && method === "POST") {
-      expect(JSON.parse(String(init?.body)).draft).toBe(true);
+      if (options.moveBeforeCreation) branchHead = "f".repeat(40);
+      const requestedDraft = JSON.parse(String(init?.body)).draft;
       if (options.discovery === "create") {
-        draft = true;
+        draft = requestedDraft;
         return response({ html_url: "https://github.com/example/app/pull/7" }, 201);
       }
       return response({ message: "Validation Failed" }, 422);
     }
     if (url.endsWith("/pulls/7") && method === "GET") {
-      return response({ state: "open", head: { sha: branchHead }, draft, node_id: "PR_7" });
+      return response({
+        state:
+          (bodyUpdated && options.afterBodyUpdate === "close") ||
+          (options.closeBeforeRefWrite && commitNumber > 0)
+            ? "closed"
+            : "open",
+        head: {
+          sha: options.laggingPullRequestHead ? initialHead : branchHead,
+        },
+        draft,
+        body: currentBody,
+        title: currentTitle,
+        node_id: "PR_7",
+      });
     }
     if (url.endsWith("/graphql") && method === "POST") {
       const body = JSON.parse(String(init?.body));
       expect(body.variables).toEqual({ id: "PR_7" });
-      expect(body.query).toContain("convertPullRequestToDraft");
-      draft = true;
+      const mutation = body.query.includes("convertPullRequestToDraft")
+        ? "convertPullRequestToDraft"
+        : "markPullRequestReadyForReview";
+      expect(body.query).toContain(mutation);
+      const requestedDraft = mutation === "convertPullRequestToDraft";
+      if (!options.draftResult) draft = requestedDraft;
       return response(
         options.draftResult ?? {
-          data: { convertPullRequestToDraft: { pullRequest: { isDraft: true } } },
+          data: { [mutation]: { pullRequest: { isDraft: requestedDraft } } },
         },
       );
     }
-    if (url.endsWith("/pulls/7") && method === "PATCH") return response({});
+    if (url.endsWith("/pulls/7") && method === "PATCH") {
+      bodyUpdated = true;
+      const requested = JSON.parse(String(init?.body));
+      currentBody = requested.body;
+      currentTitle = requested.title ?? currentTitle;
+      return response({}, options.bodyUpdateStatus ?? 200);
+    }
     if (url.includes(`/contents/${outputPath}?ref=`)) {
       const ref = new URL(url).searchParams.get("ref")!;
       if (options.missingAtRef?.(ref, outputPath)) return response({}, 404);
@@ -214,13 +248,25 @@ function openPullRequestHarness(
       return response({ sha: "tree-new" }, 201);
     }
     if (url.endsWith("/git/commits") && method === "POST") {
-      expect(JSON.parse(String(init?.body)).parents).toEqual([branchHead]);
+      expect(JSON.parse(String(init?.body)).parents).toEqual([
+        options.branchInitiallyAbsent && commitNumber === 0 ? baseCommitSha : branchHead,
+      ]);
       commitNumber += 1;
       if (options.headAfterCommit) branchHead = options.headAfterCommit;
       return response({ sha: `${String(commitNumber).padStart(40, "0")}` }, 201);
     }
+    if (url.endsWith("/git/refs") && method === "POST") {
+      branchHead = JSON.parse(String(init?.body)).sha;
+      currentContent = pendingContent ?? currentContent;
+      return response({ ref: "refs/heads/i18n/phrase-batch-fr" }, 201);
+    }
     if (url.endsWith("/git/ref/heads/i18n/phrase-batch-fr") && method === "GET") {
-      return response({ object: { sha: branchHead } });
+      if (options.branchInitiallyAbsent && commitNumber === 0) return response({}, 404);
+      return response({
+        object: {
+          sha: bodyUpdated && options.afterBodyUpdate === "move" ? "f".repeat(40) : branchHead,
+        },
+      });
     }
     if (url.endsWith("/git/refs/heads/i18n/phrase-batch-fr") && method === "PATCH") {
       const failedStatus = refUpdateStatuses.shift();
@@ -244,6 +290,7 @@ function openPullRequestHarness(
     recordToolingCommitSha: PhraseLocalePullRequestUpdate["recordToolingCommitSha"] = noToolingCommitWrite,
     overrides: Partial<PhraseLocalePullRequestUpdate> = {},
   ): PhraseLocalePullRequestUpdate => ({
+    draft: false,
     repository: "example/app",
     baseRef: "phrase-pilot",
     branch: pullRequest.branch,
@@ -270,6 +317,15 @@ function openPullRequestHarness(
     },
     get currentContent() {
       return currentContent;
+    },
+    set currentBody(body: string) {
+      currentBody = body;
+    },
+    get currentBody() {
+      return currentBody;
+    },
+    get draft() {
+      return draft;
     },
   };
 }
@@ -332,6 +388,224 @@ describe("GitHubPhraseRepository", () => {
       expect(created.pullRequestCreated).toBeUndefined();
       expect(harness.calls.some(({ url }) => url.endsWith("/graphql"))).toBe(false);
       expect(harness.currentContent).toBe(new TextDecoder().decode(pullRequest.content));
+    },
+  );
+
+  it.each(["old", new TextDecoder().decode(pullRequest.content)])(
+    "keeps recovered PR draft when its ref moves before creation (content: %s)",
+    async (currentContent) => {
+      const harness = openPullRequestHarness("b".repeat(40), {
+        discovery: "create",
+        currentContent,
+        moveBeforeCreation: true,
+      });
+      const result = await harness.repository.createOrUpdatePullRequestWithCommit(pullRequest);
+      expect(result.pullRequestCreated).toBe(true);
+      expect(result.readinessError).toBeInstanceOf(Error);
+      expect(harness.draft).toBe(true);
+      expect(harness.calls.some(({ url }) => url.endsWith("/graphql"))).toBe(false);
+    },
+  );
+
+  it("keeps a newly created branch draft when its ref moves before PR creation", async () => {
+    const harness = openPullRequestHarness(baseCommitSha, {
+      discovery: "create",
+      branchInitiallyAbsent: true,
+      moveBeforeCreation: true,
+    });
+    const result = await harness.repository.createOrUpdatePullRequestWithCommit(pullRequest);
+    expect(result.pullRequestCreated).toBe(true);
+    expect(result.readinessError).toBeInstanceOf(Error);
+    expect(harness.draft).toBe(true);
+    expect(harness.calls.some(({ url }) => url.endsWith("/graphql"))).toBe(false);
+  });
+
+  it.each([false, true])(
+    "promotes a new clean PR after checking its ref (initially absent: %s)",
+    async (branchInitiallyAbsent) => {
+      const harness = openPullRequestHarness(baseCommitSha, {
+        discovery: "create",
+        branchInitiallyAbsent,
+      });
+      const result = await harness.repository.createOrUpdatePullRequestWithCommit(pullRequest);
+      expect(result.readinessError).toBeUndefined();
+      expect(harness.draft).toBe(false);
+      const creation = harness.calls.findIndex(
+        ({ url, method }) => url.endsWith("/pulls") && method === "POST",
+      );
+      const promotion = harness.calls.findIndex(({ url }) => url.endsWith("/graphql"));
+      expect(promotion).toBeGreaterThan(creation);
+      expect(
+        harness.calls.slice(creation + 1, promotion).some(({ url }) => url.includes("/git/ref/")),
+      ).toBe(true);
+    },
+  );
+
+  it.each(["open", "race"] as const)(
+    "marks a recovered draft ready after a clean write (%s)",
+    async (discovery) => {
+      const harness = openPullRequestHarness("b".repeat(40), { discovery, draft: true });
+      await harness.repository.createOrUpdatePullRequestWithCommit({
+        ...pullRequest,
+        draft: false,
+      });
+      expect(harness.draft).toBe(false);
+      const body = harness.calls.findIndex(
+        ({ url, method }) => url.endsWith("/pulls/7") && method === "PATCH",
+      );
+      const ready = harness.calls.findIndex(({ url }) => url.endsWith("/graphql"));
+      expect(ready).toBeGreaterThan(body);
+    },
+  );
+
+  it.each(["old", "updated"])(
+    "marks a clean draft ready with initial content %s",
+    async (currentContent) => {
+      const harness = openPullRequestHarness("b".repeat(40), { draft: true, currentContent });
+      const result = await harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(undefined, { draft: false }),
+      );
+      expect(result.changed).toBe(currentContent !== "updated");
+      expect(result.bodyUpdated).toBe(true);
+      expect(harness.draft).toBe(false);
+      const body = harness.calls.findIndex(
+        ({ url, method }) => url.endsWith("/pulls/7") && method === "PATCH",
+      );
+      const ready = harness.calls.findIndex(({ url }) => url.endsWith("/graphql"));
+      expect(body).toBeGreaterThan(-1);
+      expect(ready).toBeGreaterThan(body);
+      const write = harness.calls.findIndex(
+        ({ url, method }) => url.includes("/git/refs/") && method === "PATCH",
+      );
+      if (currentContent !== "updated") expect(body).toBeGreaterThan(write);
+    },
+  );
+
+  it.each([
+    { errors: [{ message: "Not permitted" }] },
+    { data: { markPullRequestReadyForReview: { pullRequest: { isDraft: true } } } },
+    {},
+  ])("retries unconfirmed readiness after saving the clean commit: %j", async (draftResult) => {
+    const harness = openPullRequestHarness("b".repeat(40), { draft: true, draftResult });
+    const result = await harness.repository.updateOpenPullRequest(
+      harness.makeUpdate(undefined, { draft: false }),
+    );
+    expect(result.changed).toBe(true);
+    expect(result.readinessError).toBeInstanceOf(Error);
+    expect(result.bodyError).toBeUndefined();
+    expect(result.bodyUpdated).toBe(true);
+    expect(harness.currentContent).toBe("updated");
+  });
+
+  it("retries a failed promotion without another commit", async () => {
+    const options = {
+      draft: true,
+      draftResult: { errors: [{ message: "Not permitted" }] } as unknown,
+    };
+    const harness = openPullRequestHarness("b".repeat(40), options);
+    const failed = await harness.repository.updateOpenPullRequest(
+      harness.makeUpdate(undefined, { draft: false }),
+    );
+    expect(failed.readinessError).toBeInstanceOf(Error);
+    expect(failed.bodyUpdated).toBe(true);
+    expect(harness.draft).toBe(true);
+    const head = harness.branchHead;
+    options.draftResult = undefined;
+    const retried = await harness.repository.updateOpenPullRequest(
+      harness.makeUpdate(undefined, { draft: false }),
+    );
+    expect(retried.readinessError).toBeUndefined();
+    expect(retried.changed).toBe(false);
+    expect(harness.branchHead).toBe(head);
+    expect(harness.draft).toBe(false);
+  });
+
+  it("does not promote when the PR description update fails", async () => {
+    const harness = openPullRequestHarness("b".repeat(40), { draft: true, bodyUpdateStatus: 503 });
+    const result = await harness.repository.updateOpenPullRequest(
+      harness.makeUpdate(undefined, { draft: false }),
+    );
+    expect(result.bodyError).toBeInstanceOf(Error);
+    expect(harness.draft).toBe(true);
+    expect(harness.calls.some(({ url }) => url.endsWith("/graphql"))).toBe(false);
+  });
+
+  it.each(["close", "move"] as const)(
+    "does not promote after a concurrent PR %s",
+    async (afterBodyUpdate) => {
+      const harness = openPullRequestHarness("b".repeat(40), { draft: true, afterBodyUpdate });
+      const result = await harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(undefined, { draft: false }),
+      );
+      expect(result.readinessError).toBeInstanceOf(Error);
+      expect(result.bodyUpdated).toBe(true);
+      expect(harness.draft).toBe(true);
+      expect(harness.calls.some(({ url }) => url.endsWith("/graphql"))).toBe(false);
+    },
+  );
+
+  it.each([false, true])(
+    "does not PATCH or mutate unchanged metadata (draft: %s)",
+    async (draft) => {
+      const harness = openPullRequestHarness("b".repeat(40));
+      await harness.repository.updateOpenPullRequest(harness.makeUpdate(undefined, { draft }));
+      harness.calls.length = 0;
+      const result = await harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(undefined, { draft }),
+      );
+      expect(result).toMatchObject({ changed: false, bodyUpdated: true });
+      expect(harness.calls.every(({ method }) => method === "GET")).toBe(true);
+    },
+  );
+
+  it.each([false, true])(
+    "preserves reviewer notes while reconciling unchanged metadata (draft: %s)",
+    async (draft) => {
+      const harness = openPullRequestHarness("b".repeat(40), { draft });
+      await harness.repository.updateOpenPullRequest(harness.makeUpdate(undefined, { draft }));
+      const notes = `${harness.currentBody}\n\nRoll out after maintenance.`;
+      harness.currentBody = notes;
+      harness.calls.length = 0;
+      const result = await harness.repository.updateOpenPullRequest(
+        harness.makeUpdate(undefined, { draft: false, updateMetadata: false }),
+      );
+      expect(result.readinessError).toBeUndefined();
+      expect(harness.currentBody).toBe(notes);
+      expect(harness.draft).toBe(false);
+      expect(harness.calls.some(({ method }) => method === "PATCH")).toBe(false);
+      expect(harness.calls.some(({ url }) => url.endsWith("/graphql"))).toBe(draft);
+    },
+  );
+
+  it("promotes using the actual ref when the PR head cache lags", async () => {
+    const harness = openPullRequestHarness("b".repeat(40), {
+      draft: true,
+      laggingPullRequestHead: true,
+    });
+    const result = await harness.repository.updateOpenPullRequest(harness.makeUpdate());
+    expect(result.readinessError).toBeUndefined();
+    expect(harness.draft).toBe(false);
+    expect(harness.currentContent).toBe("updated");
+  });
+
+  it.each(["open", "race"] as const)(
+    "retries promotion failures when adopting a PR (%s)",
+    async (discovery) => {
+      const options = {
+        discovery,
+        draft: true,
+        draftResult: { errors: [{ message: "Not permitted" }] } as unknown,
+      };
+      const harness = openPullRequestHarness("b".repeat(40), options);
+      const failed = await harness.repository.createOrUpdatePullRequestWithCommit(pullRequest);
+      expect(failed.bodyError).toBeUndefined();
+      expect(failed.readinessError).toBeInstanceOf(Error);
+      const head = harness.branchHead;
+      options.draftResult = undefined;
+      const retried = await harness.repository.createOrUpdatePullRequestWithCommit(pullRequest);
+      expect(retried.readinessError).toBeUndefined();
+      expect(harness.branchHead).toBe(head);
+      expect(harness.draft).toBe(false);
     },
   );
 
@@ -1231,7 +1505,7 @@ describe("GitHubPhraseRepository", () => {
       const url = input instanceof Request ? input.url : String(input);
       calls.push({ url, init });
       if (url.endsWith("/pulls/7") && init?.method === "GET") {
-        return response({ state: "open", head: { sha: "branch-head" } });
+        return response({ state: "open", draft: false, head: { sha: "branch-head" } });
       }
       if (url.includes("/contents/locales/fr.json?ref=branch-head")) {
         return response({
@@ -1276,6 +1550,7 @@ describe("GitHubPhraseRepository", () => {
       fetch,
     });
     const update: PhraseLocalePullRequestUpdate = {
+      draft: false,
       repository: "example/app",
       baseRef: "phrase-pilot",
       branch: pullRequest.branch,
@@ -1298,7 +1573,7 @@ describe("GitHubPhraseRepository", () => {
       toolingCommitSha: "commit-new",
       bodyUpdated: true,
     });
-    expect(calls.filter(({ url }) => url.endsWith("/pulls/7"))).toHaveLength(5);
+    expect(calls.filter(({ url }) => url.endsWith("/pulls/7"))).toHaveLength(6);
     expect(calls.some(({ url }) => url.includes("/compare/"))).toBe(false);
     expect(
       calls.some(({ url, init }) => url.includes("/contents/") && init?.method === "PUT"),
@@ -1380,6 +1655,24 @@ describe("GitHubPhraseRepository", () => {
       ).toBe(true);
     },
   );
+
+  it("keeps the ownership anchor when a PR closes before writing onto a reviewer commit", async () => {
+    const harness = openPullRequestHarness("reviewer-head", {
+      closeBeforeRefWrite: true,
+      compare: () => ({ status: "ahead", commits: [], files: [] }),
+    });
+    const result = await harness.repository.updateOpenPullRequest(
+      harness.makeUpdate(undefined, { expectedToolingCommitShas: ["tooling-head"] }),
+    );
+    expect(result).toMatchObject({
+      changed: false,
+      toolingCommitSha: "tooling-head",
+      bodyUpdated: false,
+      pullRequestFinalized: true,
+    });
+    expect(harness.branchHead).toBe("reviewer-head");
+    expect(harness.calls.some(({ method }) => method === "PATCH")).toBe(false);
+  });
 
   it.each(["update", "discovery"])(
     "keeps the recorded ownership anchor on a no-op %s after an unrelated merge",
@@ -2072,6 +2365,7 @@ describe("GitHubPhraseRepository", () => {
       fetch,
     });
     const update: PhraseLocalePullRequestUpdate = {
+      draft: false,
       repository: "example/app",
       baseRef: "phrase-pilot",
       branch: pullRequest.branch,
@@ -2137,6 +2431,7 @@ describe("GitHubPhraseRepository", () => {
       fetch,
     });
     const update: PhraseLocalePullRequestUpdate = {
+      draft: false,
       repository: "example/app",
       baseRef: "phrase-pilot",
       branch: pullRequest.branch,

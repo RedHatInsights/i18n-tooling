@@ -70,6 +70,30 @@ function phraseBatch(overrides: Partial<PhraseBatchRecord> = {}): PhraseBatchRec
 }
 
 describe("TMS result lines", () => {
+  it("does not claim draft readiness on retries with stored warnings", () => {
+    const line = formatTmsResultLine(
+      result({
+        phase: "retrying",
+        validationWarningCount: 1,
+        pullRequestUrl: "https://github.com/example/app/pull/32",
+      }),
+    );
+    expect(line).toContain("PR: https://github.com/example/app/pull/32");
+    expect(line).not.toContain("draft");
+  });
+
+  it("labels warning-only locale PRs as drafts", () => {
+    expect(
+      formatTmsResultLine(
+        result({
+          phase: "pr-created",
+          validationWarningCount: 1,
+          pullRequestUrl: "https://github.com/example/app/pull/32",
+        }),
+      ),
+    ).toContain("PR (draft with warnings): https://github.com/example/app/pull/32");
+  });
+
   it("explains deferral with the deferred commit, blocking job links and latest-source pickup", () => {
     const batch = phraseBatch();
     const summary = formatTmsSubmitSummary(context, {
