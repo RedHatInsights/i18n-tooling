@@ -11,7 +11,7 @@
     },
     "tmsConfig": {
       "$ref": "#/$defs/path",
-      "description": "Phrase TMS config whose source catalog and target locales become a check. Targets are checked once their output file exists."
+      "description": "Phrase TMS config whose source catalog and target locales become a check. Targets are checked once their output file exists. Messages a target shares with the source must match; IDs on one side only are pending until the next delivery."
     },
     "checks": {
       "type": "array",

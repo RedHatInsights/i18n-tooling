@@ -95,7 +95,11 @@ export interface CatalogDirectory {
 
 export interface CatalogValidationConfig {
   version: 1;
-  /** Repository-relative Phrase TMS config whose source and target locales become a check. */
+  /**
+   * Repository-relative Phrase TMS config whose source and target locales become a check. Its
+   * targets may lag behind the source by whole messages until delivery; shared messages must
+   * still match.
+   */
   tmsConfig?: string;
   checks: CatalogValidationCheck[];
   generated: GeneratedCatalogCheck[];
@@ -118,10 +122,10 @@ export interface CatalogValidationResult {
   sourceCount: number;
   targetCount: number;
   generatedCount: number;
-  /** TMS targets whose output file has not been delivered yet. */
+  /** TMS targets that are missing, empty or behind their source until the next delivery. */
   pendingTargetCount: number;
   /**
-   * One line per translation not delivered yet (an FEO locale, an empty placeholder or a missing
+   * One line per translation not delivered yet (an FEO locale, or a missing, empty or lagging
    * TMS target). Expected before delivery, so they are reported apart from warnings.
    */
   pending: string[];
@@ -392,8 +396,11 @@ interface LoadedCatalog {
 }
 
 interface PlannedTarget extends CatalogFileReference {
-  /** TMS outputs may not exist until the first translation PR lands. */
-  optional?: boolean;
+  /**
+   * Written by asynchronous TMS delivery, so it may be missing, empty or behind the source.
+   * Messages on both sides are still compared; IDs on one side only are pending, not errors.
+   */
+  tmsDelivered?: boolean;
 }
 
 interface PlannedCheck {
@@ -516,7 +523,7 @@ async function loadTmsCheck(projectRoot: string, path: string): Promise<PlannedC
       adapter: targetAdapterId(workflow),
       locale: target.repositoryLocale,
       ...(workflow.targetOptions ? { options: workflow.targetOptions } : {}),
-      optional: true,
+      tmsDelivered: true,
     })),
   };
 }
@@ -558,26 +565,53 @@ function runGenerator(
   });
 }
 
-function comparisonProblems(
+interface CatalogComparison {
+  problems: string[];
+  /** Set when a TMS-delivered target has IDs on one side only. */
+  pending?: string;
+}
+
+/**
+ * Compares a target with its source. Every target must match the source's arguments for each
+ * message both define. A TMS-delivered target may lag behind the source by whole messages: new
+ * source IDs wait for translation and retired target IDs disappear on the next delivery, so
+ * neither blocks a source change. An explicit target must also have exactly the source's IDs.
+ */
+function compareCatalogs(
   source: Catalog,
   target: Catalog,
   sourcePath: string,
-  targetPath: string,
-): string[] {
+  targetReference: PlannedTarget,
+): CatalogComparison {
   const result = checkCatalogs(source, target);
+  const prefix = `Catalog check ${sourcePath} -> ${targetReference.path}: `;
+  const { tmsDelivered } = targetReference;
   const problems: string[] = [];
-  const prefix = `Catalog check ${sourcePath} -> ${targetPath}: `;
-  if (result.missingIds.length)
+  if (!tmsDelivered && result.missingIds.length)
     problems.push(`${prefix}missing from target: ${result.missingIds.join(", ")}`);
-  if (result.extraIds.length)
+  if (!tmsDelivered && result.extraIds.length)
     problems.push(`${prefix}extra in target: ${result.extraIds.join(", ")}`);
   for (const mismatch of result.argumentMismatches) {
     problems.push(
       `${prefix}argument mismatch for ` +
-        describeArgumentMismatch(source.messages[mismatch.id]!.pattern, mismatch),
+        describeArgumentMismatch(source.messages[mismatch.id]!.pattern, mismatch) +
+        // A delivered translation keeps its arguments until TMS translates the changed message.
+        (tmsDelivered
+          ? "; a translated message must keep its arguments, so give the changed message a new ID"
+          : ""),
     );
   }
-  return problems;
+  const lag = [
+    ...(result.missingIds.length ? [`untranslated: ${result.missingIds.join(", ")}`] : []),
+    ...(result.extraIds.length ? [`retired: ${result.extraIds.join(", ")}`] : []),
+  ];
+  if (!tmsDelivered || !lag.length) return { problems };
+  return {
+    problems,
+    pending:
+      `TMS target "${targetReference.path}" is behind its source until the next delivery; ` +
+      `${lag.join("; ")}.`,
+  };
 }
 
 async function checkGeneratedCatalog(
@@ -1086,7 +1120,7 @@ export async function validateCatalogProject(
 
     for (const targetReference of check.targets) {
       if (
-        targetReference.optional &&
+        targetReference.tmsDelivered &&
         !(await fileExists(resolve(projectRoot, targetReference.path)))
       ) {
         pendingTargetCount += 1;
@@ -1104,7 +1138,7 @@ export async function validateCatalogProject(
         );
         // Apps that import every locale file often commit `{}` placeholders before delivery.
         if (
-          targetReference.optional &&
+          targetReference.tmsDelivered &&
           Object.keys(target.catalog.messages).length === 0 &&
           Object.keys(source.catalog.messages).length > 0
         ) {
@@ -1115,14 +1149,17 @@ export async function validateCatalogProject(
           continue;
         }
         targetCount += 1;
-        problems.push(
-          ...comparisonProblems(
-            source.catalog,
-            target.catalog,
-            check.source.path,
-            targetReference.path,
-          ),
+        const comparison = compareCatalogs(
+          source.catalog,
+          target.catalog,
+          check.source.path,
+          targetReference,
         );
+        problems.push(...comparison.problems);
+        if (comparison.pending) {
+          pendingTargetCount += 1;
+          pending.push(comparison.pending);
+        }
         for (const finding of lintTargetCatalog(source.catalog, target.catalog)) {
           const message = `Target catalog ${targetReference.path}: ${finding.message}`;
           (finding.severity === "error" ? problems : warnings).push(message);
