@@ -842,6 +842,107 @@ describe("catalog project validation", () => {
     expect(failed.errors[0]).toContain(
       'Catalog check locales/en.json -> locales/zh-CN.json: argument mismatch for "greeting"',
     );
+    expect(failed.errors[0]).toContain("give the changed message a new ID");
+  });
+
+  it("lets a TMS target lag behind its source by whole messages", async () => {
+    await createProject();
+    await writeTmsConfig();
+    await writeFile(
+      join(projectRoot!, "locales/en.json"),
+      JSON.stringify({
+        greeting: { defaultMessage: "Hello {name}" },
+        visitSupport: { defaultMessage: "Visit <link>support</link> for {product}." },
+      }),
+    );
+    await writeFile(
+      join(projectRoot!, "locales/zh-CN.json"),
+      JSON.stringify({ greeting: "你好 {name}", supportFragment: "支持" }),
+    );
+
+    const result = await runValidation({ version: 1, tmsConfig: "phrase-tms.json", checks: [] });
+
+    expect(result.errors).toEqual([]);
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toEqual([
+      "Pending translations:\n" +
+        '- TMS target "locales/fr-icu.json" is behind its source until the next delivery; ' +
+        "untranslated: visitSupport.\n" +
+        '- TMS target "locales/zh-CN.json" is behind its source until the next delivery; ' +
+        "untranslated: visitSupport; retired: supportFragment.",
+      "Catalog validation passed (1 source, 2 targets, 0 generated catalogs, 2 pending TMS targets).",
+    ]);
+  });
+
+  it("still compares the messages a lagging TMS target shares with its source", async () => {
+    await createProject();
+    await writeTmsConfig();
+    await writeFile(
+      join(projectRoot!, "locales/en.json"),
+      JSON.stringify({
+        greeting: { defaultMessage: "Hello {user}" },
+        added: { defaultMessage: "Added" },
+      }),
+    );
+    await writeFile(
+      join(projectRoot!, "locales/zh-CN.json"),
+      JSON.stringify({ greeting: "你好 {user}", retired: "旧" }),
+    );
+
+    const result = await runValidation({ version: 1, tmsConfig: "phrase-tms.json", checks: [] });
+
+    // fr-icu.json still translates greeting with {name}; zh-CN.json only lags.
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain(
+      'locales/en.json -> locales/fr-icu.json: argument mismatch for "greeting"',
+    );
+    expect(result.errors[0]).not.toContain("zh-CN");
+    expect(result.errors[0]).not.toContain("missing from target");
+    expect(result.errors[0]).not.toContain("extra in target");
+  });
+
+  it.each([
+    { name: "invalid JSON", content: "{", detail: "is not valid JSON" },
+    {
+      name: "invalid ICU in a retired message",
+      content: JSON.stringify({ greeting: "你好 {name}", retired: "旧 {name" }),
+      detail: 'message "retired" has invalid ICU syntax',
+    },
+  ])("rejects a delivered TMS target with $name", async ({ content, detail }) => {
+    await createProject();
+    await writeTmsConfig();
+    await writeFile(join(projectRoot!, "locales/zh-CN.json"), content);
+
+    const result = await runValidation({ version: 1, tmsConfig: "phrase-tms.json", checks: [] });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors.join("\n")).toContain("locales/zh-CN.json");
+    expect(result.errors.join("\n")).toContain(detail);
+  });
+
+  it("applies target lint errors to messages a lagging TMS target shares", async () => {
+    await createProject();
+    await writeTmsConfig();
+    await writeFile(
+      join(projectRoot!, "locales/en.json"),
+      JSON.stringify({
+        greeting: { defaultMessage: "Hello {name}" },
+        items: { defaultMessage: "{count, plural, =0 {No items} other {# items}}" },
+        added: { defaultMessage: "Added" },
+      }),
+    );
+    await writeFile(
+      join(projectRoot!, "locales/fr-icu.json"),
+      JSON.stringify({ greeting: "Bonjour {name}", items: "{count, plural, other {# éléments}}" }),
+    );
+
+    const result = await runValidation({ version: 1, tmsConfig: "phrase-tms.json", checks: [] });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors[0]).toContain(
+      'Target catalog locales/fr-icu.json: "items": plural {count} lost exact branch =0',
+    );
   });
 
   it("uses a preset Phrase config from validate-project tmsConfig", async () => {

@@ -187,6 +187,82 @@ afterEach(async () => {
 });
 
 describe("i18n-pipeline validate-ci", () => {
+  it("passes a source change whose Phrase targets still hold the retired messages", async () => {
+    // Shape of a source PR that merges fragments into one rich-text message before delivery.
+    const root = await createRoot();
+    await writeProjectFile(
+      root,
+      "phrase-tms.json",
+      JSON.stringify({
+        preset: "hcc-ui",
+        locales: ["fr", "ja"],
+        sourceCatalog: { path: "locales/en.json", filename: "sample.ui.en.json" },
+        targetOutputPath: "locales/{locale}.json",
+      }),
+    );
+    await writeProjectFile(
+      root,
+      "locales/en.json",
+      JSON.stringify({
+        greeting: { defaultMessage: "Hello {name}." },
+        contactSupport: { defaultMessage: "Contact <SupportLink>support</SupportLink>." },
+      }),
+    );
+    for (const [locale, greeting] of [
+      ["fr", "Bonjour {name}."],
+      ["ja", "こんにちは {name}。"],
+    ] as const) {
+      await writeProjectFile(
+        root,
+        `locales/${locale}.json`,
+        JSON.stringify({ greeting, contact: "Contact", supportLink: "support" }),
+      );
+    }
+    await writeConfig(root, {
+      version: 1,
+      tmsConfig: "phrase-tms.json",
+      checks: [],
+      catalogDirectories: [{ path: "locales" }],
+    });
+
+    const passed = await runValidateCi(root, ["--mode", "error"]);
+
+    expect(passed.stderr).toEqual([]);
+    expect(passed.exitCode).toBe(0);
+    expect(passed.stdout.filter((line) => line.startsWith("pending: "))).toEqual(
+      ["fr", "ja"].map(
+        (locale) =>
+          `pending: TMS target "locales/${locale}.json" is behind its source until the next ` +
+          "delivery; untranslated: contactSupport; retired: contact, supportLink.",
+      ),
+    );
+    await expectResults(passed, {
+      status: "pass",
+      errors: 0,
+      warnings: 0,
+      pending: 2,
+      mode: "error",
+      config: "config",
+    });
+
+    // Changing the arguments of a message Phrase already translated still fails.
+    await writeProjectFile(
+      root,
+      "locales/en.json",
+      JSON.stringify({
+        greeting: { defaultMessage: "Hello {user}." },
+        contactSupport: { defaultMessage: "Contact <SupportLink>support</SupportLink>." },
+      }),
+    );
+
+    const failed = await runValidateCi(root, ["--mode", "error"]);
+
+    expect(failed.exitCode).toBe(1);
+    expect(failed.stderr.join("\n")).toContain(
+      'locales/en.json -> locales/fr.json: argument mismatch for "greeting"',
+    );
+    expect(failed.stderr.join("\n")).toContain("give the changed message a new ID");
+  });
   it("passes the FEO consumer example in error mode without consumer dependencies", async () => {
     const root = resolve(packageRoot, "../..", "examples/feo-consumer");
     const resultsDir = await mkdtemp(join(tmpdir(), "i18n-validate-ci-feo-results-"));
