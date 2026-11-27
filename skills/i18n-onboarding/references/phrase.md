@@ -57,7 +57,7 @@ done
 
 Reconciliation processes every active record on the branch (any phase except `completed`, `failed` and `superseded`), so an active record from another project or source filename, such as a pilot's, fails the new config's runs. In that case set a fresh `state.branch` in the new config, name it and the old branch's records in the plan, and leave the old branch untouched.
 
-Point the validation config's `tmsConfig` at `phrase-tms.json` in the same change. A target file that has not arrived yet, or that is an empty `{}` placeholder the app imports before delivery, is pending, not a validation error. Keep such placeholders.
+Point the validation config's `tmsConfig` at `phrase-tms.json` in the same change. A target file that has not arrived yet, or that is an empty `{}` placeholder the app imports before delivery, is pending, not a validation error. Keep such placeholders. The same holds for a delivered target that lacks new source IDs or still has retired ones: the next Phrase delivery updates it, so a source PR never edits target files. A source PR that changes the arguments of a message Phrase already translated fails; give the changed message a new ID.
 
 The reusable reconciliation workflow writes one flat locale JSON file per target locale and opens or updates one PR per locale. It does not run the consumer's build or aggregation scripts. Never use an aggregate file as a target `outputPath`.
 
